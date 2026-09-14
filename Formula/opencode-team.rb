@@ -17,7 +17,12 @@ class OpencodeTeam < Formula
 
   def install
     libexec.install "bin", "core", "shared", "teams", "tests", "VERSION"
-    bin.write_exec_script libexec/"bin/opencode-team"
+    (bin/"opencode-team").write <<~EOS
+      #!/bin/bash
+      export PATH="#{Formula["node@22"].opt_bin}:$PATH"
+      exec "#{libexec}/bin/opencode-team" "$@"
+    EOS
+    chmod 0755, bin/"opencode-team"
   end
 
   test do
