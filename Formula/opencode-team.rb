@@ -20,7 +20,7 @@ class OpencodeTeam < Formula
     (bin/"opencode-team").write <<~EOS
       #!/bin/bash
       node22="#{Formula["node@22"].opt_bin}/node"
-      simdjson_name="$(otool -L "$node22" 2>/dev/null | while IFS= read -r line; do case "$line" in *libsimdjson.*.dylib*) library="${line##*/}"; printf '%s\\n' "${library%% *}"; break;; esac; done)"
+      simdjson_name="$(otool -L "$node22" 2>/dev/null | while IFS= read -r line; do if [[ "$line" == *libsimdjson.*.dylib* ]]; then library="${line##*/}"; printf '%s\\n' "${library%% *}"; break; fi; done)"
       if [ -n "$simdjson_name" ]; then
         for simdjson_lib in "$(brew --cellar simdjson)"/*/lib/"$simdjson_name"; do
           if [ -f "$simdjson_lib" ]; then
