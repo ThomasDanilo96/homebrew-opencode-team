@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: release candidate. Release URL and SHA256 remain pending until publication.
+Status: public release `v0.1.0`.
 
 ## Goal
 
