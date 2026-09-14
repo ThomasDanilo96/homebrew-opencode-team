@@ -19,7 +19,7 @@ class OpencodeTeam < Formula
     libexec.install "bin", "core", "shared", "teams", "tests", "VERSION"
     (bin/"opencode-team").write <<~EOS
       #!/bin/bash
-      node22="#{Formula["node@22"].opt_bin}/node"
+      node22="#{formula_opt_bin("node@22")}/node"
       simdjson_name="$(otool -L "$node22" 2>/dev/null | while IFS= read -r line; do if [[ "$line" == *libsimdjson.*.dylib* ]]; then library="${line##*/}"; printf '%s\\n' "${library%% *}"; break; fi; done)"
       if [ -n "$simdjson_name" ]; then
         for simdjson_lib in "$(brew --cellar simdjson)"/*/lib/"$simdjson_name"; do
@@ -29,7 +29,7 @@ class OpencodeTeam < Formula
           fi
         done
       fi
-      export PATH="#{Formula["node@22"].opt_bin}:$PATH"
+      export PATH="#{formula_opt_bin("node@22")}:$PATH"
       exec "#{libexec}/bin/opencode-team" "$@"
     EOS
     chmod 0755, bin/"opencode-team"
