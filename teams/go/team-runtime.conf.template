@@ -1,0 +1,12 @@
+# Portable GO profile. Values are rendered by opencode-team setup.
+TEAM_NAME=go
+SANDBOX=@DATA_ROOT@/go
+TMUX_PREFIX=oc-go-unified-candidate
+OMO_PROFILE=go-team-v2-visible
+OPENCODE_CONFIG=@CONFIG_ROOT@/go/opencode.jsonc
+PRE_SERVER_HOOK=@DATA_ROOT@/go/hooks/patch-omo-task-completion.sh
+XDG_CONFIG_HOME_OVERRIDE=@CONFIG_ROOT@/go/xdg-config
+RUNTIME_ENV_HOOK=@PACKAGE_ROOT@/shared/runtime-env/github-token.sh
+NATIVE_UI_ONLY_AGENTS=
+RESUME_ALLOWED_AGENTS=OpenCode-Builder
+BRIDGE_MODE=tmux

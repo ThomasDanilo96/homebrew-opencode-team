@@ -1,0 +1,23 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["@OMO_PLUGIN@"],
+  "model": "opencode-go/mimo-v2.5",
+  "small_model": "opencode-go/mimo-v2.5",
+  "default_agent": "OpenCode-Builder",
+  "disabled_providers": [
+    "openai", "anthropic", "google", "opencode-omniroute", "openrouter", "bedrock",
+    "vertex", "xai", "mistral", "groq", "cohere", "fireworks", "together",
+    "deepinfra", "cerebras", "perplexity", "voyage", "ollama", "lmstudio", "litellm"
+  ],
+  "compaction": { "auto": true, "prune": true, "reserved": 10000 },
+  "mcp": {
+    "serena": {
+      "type": "local",
+      "command": ["@SERENA_BIN@", "start-mcp-server", "--context", "ide", "--project-from-cwd", "--open-web-dashboard", "false"],
+      "enabled": true
+    }
+  },
+  "provider": {
+    "opencode-go": { "options": { "max_tokens": 32768, "timeout": 300000 } }
+  }
+}

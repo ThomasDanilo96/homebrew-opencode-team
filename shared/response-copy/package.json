@@ -1,0 +1,8 @@
+{
+  "name": "shared-response-copy",
+  "type": "module",
+  "exports": {
+    ".": "./response-copy-plugin.js",
+    "./tui": "./response-copy-plugin.js"
+  }
+}

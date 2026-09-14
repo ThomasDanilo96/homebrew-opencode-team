@@ -1,0 +1,11 @@
+# Portable OPENAI profile. Values are rendered by opencode-team setup.
+TEAM_NAME=opencode-openai-team-unified-candidate
+SANDBOX=@DATA_ROOT@/openai
+TMUX_PREFIX=oc-openai
+OMO_PROFILE=openai-candidate
+OPENCODE_CONFIG=@CONFIG_ROOT@/openai/opencode.jsonc
+XDG_CONFIG_HOME_OVERRIDE=@CONFIG_ROOT@/openai/xdg-config
+RUNTIME_ENV_HOOK=@PACKAGE_ROOT@/teams/openai/runtime-env.sh
+NATIVE_UI_ONLY_AGENTS=openai_explore,openai_librarian,codex_executor,openai_ops
+RESUME_ALLOWED_AGENTS=openai_orchestrator
+BRIDGE_MODE=native_ui

@@ -1,0 +1,13 @@
+# Portable BEST profile. Values are rendered by opencode-team setup.
+TEAM_NAME=best
+SANDBOX=@DATA_ROOT@/best
+TMUX_PREFIX=oc-best-unified-candidate
+OMO_PROFILE=best-team
+OPENCODE_CONFIG=@CONFIG_ROOT@/best/opencode.jsonc
+PRE_SERVER_HOOK=@DATA_ROOT@/best/hooks/patch-omo-hook-timeout.sh
+XDG_CONFIG_HOME_OVERRIDE=@CONFIG_ROOT@/best/xdg-config
+RUNTIME_ENV_HOOK=@PACKAGE_ROOT@/teams/best/runtime-env.sh
+CLAUDE_CONFIG_DIR_OVERRIDE=@CONFIG_ROOT@/best/claude-config
+NATIVE_UI_ONLY_AGENTS=explore,librarian
+RESUME_ALLOWED_AGENTS=OpenCode-Builder,compaction
+BRIDGE_MODE=tmux

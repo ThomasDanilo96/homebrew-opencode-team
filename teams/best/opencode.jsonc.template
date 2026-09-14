@@ -1,0 +1,78 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    "@OMO_PLUGIN@",
+    "@PACKAGE_ROOT@/teams/best/best-router-plugin.js"
+  ],
+  "model": "openai/gpt-5.6-luna",
+  "small_model": "opencode-go/mimo-v2.5",
+  "default_agent": "OpenCode-Builder",
+  "subagent_depth": 1,
+  "agent": {
+    "OpenCode-Builder": {
+      "permission": { "task": "allow" }
+    },
+    "explore": {
+      "model": "opencode-go/qwen3.7-plus",
+      "permission": {
+        "serena_get_symbols_overview": "allow",
+        "serena_find_symbol": "allow",
+        "serena_find_declaration": "allow",
+        "serena_find_implementations": "allow",
+        "serena_find_referencing_symbols": "allow",
+        "serena_get_diagnostics_for_file": "allow",
+        "serena_search_for_pattern": "allow",
+        "serena_replace_content": "deny",
+        "serena_replace_in_files": "deny",
+        "serena_replace_symbol_body": "deny",
+        "serena_insert_before_symbol": "deny",
+        "serena_insert_after_symbol": "deny",
+        "serena_rename_symbol": "deny",
+        "serena_safe_delete_symbol": "deny",
+        "serena_write_memory": "deny",
+        "serena_edit_memory": "deny",
+        "serena_delete_memory": "deny",
+        "serena_rename_memory": "deny"
+      }
+    },
+    "librarian": {
+      "model": "opencode-go/qwen3.7-plus",
+      "permission": {
+        "serena_get_symbols_overview": "allow",
+        "serena_find_symbol": "allow",
+        "serena_find_declaration": "allow",
+        "serena_find_implementations": "allow",
+        "serena_find_referencing_symbols": "allow",
+        "serena_get_diagnostics_for_file": "allow",
+        "serena_search_for_pattern": "allow",
+        "serena_replace_content": "deny",
+        "serena_replace_in_files": "deny",
+        "serena_replace_symbol_body": "deny",
+        "serena_insert_before_symbol": "deny",
+        "serena_insert_after_symbol": "deny",
+        "serena_rename_symbol": "deny",
+        "serena_safe_delete_symbol": "deny",
+        "serena_write_memory": "deny",
+        "serena_edit_memory": "deny",
+        "serena_delete_memory": "deny",
+        "serena_rename_memory": "deny"
+      }
+    }
+  },
+  "disabled_providers": [
+    "anthropic", "google", "opencode-omniroute", "openrouter", "bedrock",
+    "vertex", "xai", "mistral", "groq", "cohere", "fireworks", "together",
+    "deepinfra", "cerebras", "perplexity", "voyage", "ollama", "lmstudio", "litellm"
+  ],
+  "compaction": { "auto": true, "prune": true, "reserved": 10000 },
+  "mcp": {
+    "serena": {
+      "type": "local",
+      "command": ["@SERENA_BIN@", "start-mcp-server", "--context", "ide", "--project-from-cwd", "--open-web-dashboard", "false"],
+      "enabled": true
+    }
+  },
+  "provider": {
+    "opencode-go": { "options": { "max_tokens": 32768, "timeout": 300000 } }
+  }
+}

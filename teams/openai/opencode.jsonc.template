@@ -1,0 +1,112 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "model": "openai/gpt-5.6-sol",
+  "small_model": "openai/gpt-5.6-luna-fast",
+  "default_agent": "openai_orchestrator",
+  "subagent_depth": 1,
+  "enabled_providers": ["openai"],
+  "disabled_providers": [
+    "anthropic", "google", "opencode-go", "opencode-omniroute", "openrouter",
+    "bedrock", "vertex", "xai", "mistral", "groq", "cohere", "fireworks",
+    "together", "deepinfra", "cerebras", "perplexity", "voyage", "ollama",
+    "lmstudio", "litellm"
+  ],
+  "share": "disabled",
+  "autoupdate": "notify",
+  "compaction": { "auto": true, "prune": true, "reserved": 10000 },
+  "plugin": [
+    "@OMO_PLUGIN@",
+    "@PACKAGE_ROOT@/teams/openai/config/opencode/openai-team-tools.js",
+    "@PACKAGE_ROOT@/teams/openai/config/opencode/openai-authorship-guard.js"
+  ],
+  "agent": {
+    "openai_orchestrator": {
+      "mode": "primary",
+      "description": "Adaptive OpenAI-only master orchestrator.",
+      "model": "openai/gpt-5.6-sol",
+      "permission": { "task": "allow", "bash": "deny", "edit": "deny", "write": "deny", "skill": "deny" },
+      "tools": { "task": true, "bash": false, "interactive_bash": false, "openai_remote_read": false, "openai_run_codex": false, "call_omo_agent": false },
+       "prompt_append": "You are the OpenAI Super Team orchestrator. A TASK_CACHE_HIT payload is a completed result: return its result_summary and do not retry or delegate it. Use the analyzeObjective outcomes supplied by the router. Route remote infrastructure read-only objectives with task(subagent_type=\"openai_ops\"). When a high-risk Codex terminal response lists reviewer and tester, launch both in one parallel task batch against its exact packet_id; when a critical-risk response lists reviewer_critical and tester, launch that pair instead. Reviewer objectives include review_task_id=<64hex> and tester objectives include test_task_id=<64hex>. Wait for both gate results before reporting final success; approval alone is pending verification and tester success alone is pending review. Use tester for other verification-only tasks. When discovery_agents contains both openai_explore and openai_librarian, launch both task calls in one assistant message/parallel batch, merge their evidence once, and retry only a failed lane. Codex terminal next_agents and reasons are authoritative: do not add a reasoning/tool round-trip to decide delegation. Never use Codex or generic bash for remote operations. Never use task(category=...) for this team. Every native task call must specify exactly one approved subagent_type. Coding changes use codex_executor as the first and only coding delegation. Never call openai_run_codex directly, never call call_omo_agent, and never use detached shells. If the codex_executor child reports a provider/infrastructure failure, continue from its handoff with native Terra editing in that same child. Never use non-OpenAI providers.\nROUTER CONTEXT: If a <OPENAI_ROUTER_ROUTE> tag is present, obey it, but do not spawn workers when the route is DIRECT."
+    },
+    "openai_explore": {
+      "description": "Fast read-only semantic repository explorer.",
+      "model": "openai/gpt-5.6-luna-fast",
+      "permission": { "edit": "deny", "write": "deny" },
+      "tools": { "openai_run_codex": false, "call_omo_agent": false },
+      "prompt_append": "For semantic code navigation, use Serena first and read-only. Use grep for exact text, glob for paths, and read for known bounded files."
+    },
+    "openai_librarian": {
+      "description": "OpenAI-only documentation and research worker.",
+      "model": "openai/gpt-5.6-luna",
+      "permission": { "serena_*": "deny" },
+      "tools": { "openai_run_codex": false, "call_omo_agent": false }
+    },
+    "openai_ops": {
+      "description": "OpenAI-only read-only remote infrastructure investigator.",
+      "mode": "subagent",
+      "model": "openai/gpt-5.6-luna",
+      "permission": { "edit": "deny", "write": "deny", "bash": "deny", "task": "deny", "skill": "deny", "serena_*": "deny" },
+      "tools": { "openai_remote_read": true, "openai_run_codex": false, "call_omo_agent": false, "bash": false, "interactive_bash": false, "task": false, "skill": false }
+    },
+    "tester": {
+      "description": "Test, verification, and regression worker.",
+      "model": "openai/gpt-5.6-terra",
+      "permission": { "apply_patch": "deny", "edit": "deny", "write": "deny", "delete": "deny", "rename": "deny", "file_create": "deny", "file_delete": "deny", "file_rename": "deny", "create_file": "deny", "remove_file": "deny", "move_file": "deny", "multi_edit": "deny", "write_file": "deny", "patch": "deny", "serena_*": "deny", "bash": "allow", "interactive_bash": "deny", "shell": "deny", "command": "deny", "task": "deny", "skill": "deny" },
+      "tools": { "openai_run_codex": false, "call_omo_agent": false, "apply_patch": false, "edit": false, "write": false, "delete": false, "rename": false, "file_create": false, "file_delete": false, "file_rename": false, "create_file": false, "remove_file": false, "move_file": false, "multi_edit": false, "write_file": false, "patch": false, "bash": true, "interactive_bash": false, "shell": false, "command": false, "task": false, "skill": false }
+    },
+    "reviewer": {
+      "description": "Read-only correctness, security, and architecture reviewer.",
+      "model": "openai/gpt-5.6-sol",
+      "permission": { "edit": "deny", "write": "deny" },
+      "tools": { "openai_run_codex": false, "call_omo_agent": false }
+    },
+    "reviewer_critical": {
+      "description": "Read-only critical-risk security, release, deployment, and data-deletion reviewer.",
+      "model": "openai/gpt-6-astra",
+      "permission": { "edit": "deny", "write": "deny" },
+      "tools": { "openai_run_codex": false, "call_omo_agent": false }
+    },
+    "specialist": {
+      "description": "Escalated specialist for difficult independent reasoning.",
+      "model": "openai/gpt-6-astra",
+      "tools": { "openai_run_codex": false, "call_omo_agent": false }
+    },
+    "codex_executor": {
+      "description": "Native OpenCode child that executes coding work through the isolated official Codex CLI lane.",
+      "model": "openai/gpt-5.6-luna-fast",
+      "permission": {
+        "openai_run_codex": "allow",
+        "read": "allow",
+        "glob": "allow",
+        "grep": "allow",
+        "apply_patch": "allow",
+        "edit": "allow",
+        "write": "allow",
+        "bash": "allow",
+        "task": "deny",
+        "skill": "deny",
+        "webfetch": "deny",
+        "websearch": "deny",
+        "web": "deny",
+        "documentation": "deny",
+        "session": "deny",
+        "browser": "deny",
+        "mcp": "deny",
+        "call_omo_agent": "deny",
+        "interactive_bash": "deny",
+        "shell": "deny",
+        "command": "deny",
+        "serena_*": "deny"
+      },
+      "tools": { "openai_run_codex": true },
+      "prompt": "You are a native OpenCode Luna-fast wrapper around the isolated single-lane Codex CLI. Call openai_run_codex exactly once immediately with the full bound objective and no prior tool. On success, return its structured terminal JSON unchanged, including task_id, attempt, complexity, risk, review_required, verification_status, next_agents, and reasons. On task_failed, return immediately. Only on structured fallback_required, inspect the handoff and current repository state and finish natively. Never rerun Codex or manufacture fallback."
+    }
+  },
+  "mcp": {
+    "serena": {
+      "type": "local",
+      "command": ["@SERENA_BIN@", "start-mcp-server", "--context", "ide", "--project-from-cwd", "--open-web-dashboard", "false"],
+      "enabled": true
+    }
+  }
+}

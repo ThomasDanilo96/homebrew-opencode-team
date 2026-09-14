@@ -1,0 +1,14 @@
+.DS_Store
+*.db
+*.db-wal
+*.db-shm
+.env
+*.log
+tool-output/
+cache/
+state/
+runtime/
+tmp/
+node_modules/
+__pycache__/
+*.py[cod]
