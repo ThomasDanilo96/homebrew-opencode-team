@@ -12,6 +12,10 @@ const [home, root] = process.argv.slice(2);
 const read = (team) => JSON.parse(fs.readFileSync(path.join(home, "config", team, "opencode.jsonc"), "utf8"));
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 const same = (actual, expected, label) => assert(JSON.stringify(actual) === JSON.stringify(expected), `${label} mismatch`);
+const tuiTeams = fs.readdirSync(path.join(root, "teams"), { withFileTypes: true })
+  .filter((entry) => entry.isDirectory())
+  .map((entry) => entry.name)
+  .filter((team) => fs.existsSync(path.join(root, "teams", team, "tui.json.template")));
 
 const best = read("best");
 same(best.model, "openai/gpt-5.6-luna", "BEST model");
@@ -54,6 +58,16 @@ for (const team of ["best", "go", "openai"]) {
   const serialized = JSON.stringify(config);
   assert(!serialized.includes(".opencode-" + "team-staging"), `${team} staging fallback`);
   assert(!serialized.includes("go-" + "final-ux-v1"), `${team} historical fallback`);
+}
+for (const team of tuiTeams) {
+  const tuiPath = path.join(home, "config", team, "xdg-config", "opencode", "tui.json");
+  assert(fs.existsSync(tuiPath), `${team} TUI config missing`);
+  const tui = JSON.parse(fs.readFileSync(tuiPath, "utf8"));
+  const expectedPlugin = path.join(root, "shared", "response-copy");
+  assert(Array.isArray(tui.plugin), `${team} TUI plugin list missing`);
+  assert(tui.plugin.filter((plugin) => plugin === expectedPlugin).length === 1, `${team} response-copy plugin mismatch`);
+  assert(path.isAbsolute(expectedPlugin) && fs.existsSync(expectedPlugin), `${team} response-copy plugin path invalid`);
+  assert(!JSON.stringify(tui).includes(".opencode-" + "team-staging"), `${team} TUI staging fallback`);
 }
 assert(fs.existsSync(path.join(root, "teams", "best", "patch-omo-hook-timeout.sh")), "BEST hook missing");
 console.log("CONFIG PARITY PASS");
