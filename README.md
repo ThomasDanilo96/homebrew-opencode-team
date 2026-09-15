@@ -1,9 +1,6 @@
 # OpenCode Team
 
-Status: public release `v0.1.0`; current development version `0.1.1-dev`.
-
-The public Homebrew release remains `v0.1.0`. The `0.1.1-dev` version is currently
-under development and is not published yet.
+Status: public release `v0.1.1`.
 
 ## Goal
 
