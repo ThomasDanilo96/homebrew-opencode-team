@@ -31,12 +31,23 @@ function diff(oldString, newString) {
 }
 
 function formatTool(part) {
-  const tool = String(part.tool || "").toLowerCase();
-  if (!KNOWN_TOOLS.has(tool)) return undefined;
+  const tool = String(part.tool || "").toLowerCase().split(".").at(-1);
   const input = part.state?.input ?? {};
-  const output = part.state?.output;
-  const error = part.state?.error;
-  const result = error ?? output;
+  const metadata = part.state?.metadata ?? {};
+  const result = part.state?.error ?? part.state?.output ?? metadata.output;
+  if (typeof metadata.diff === "string" && Array.isArray(metadata.files)) {
+    const files = metadata.files.filter((file) => typeof file === "string").join(", ") || pathOf(input);
+    return `← Patched ${files}\n\n${bounded(metadata.diff)}`;
+  }
+  if (typeof input.patchText === "string") return `← Applied patch\n\n${bounded(input.patchText)}`;
+  if (typeof input.oldString === "string" && typeof input.newString === "string") {
+    return `← Patched ${pathOf(input)}\n\n${diff(input.oldString, input.newString)}`;
+  }
+  if (typeof input.content === "string" && (tool === "write" || tool === "create")) {
+    const content = bounded(input.content);
+    return `# Created ${pathOf(input)}${content ? `\n\n${content}` : ""}`;
+  }
+  if (!KNOWN_TOOLS.has(tool)) return undefined;
   if (tool === "edit") return `← Patched ${pathOf(input)}\n\n${diff(input.oldString, input.newString)}`;
   if (tool === "write" || tool === "create") {
     const content = bounded(input.content);

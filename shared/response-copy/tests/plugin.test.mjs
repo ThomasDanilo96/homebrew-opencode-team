@@ -142,3 +142,37 @@ test("persisted client data supplies an unopened child", async () => {
   assert.doesNotMatch(clipboard, /raw task|reasoning|provider metadata/i);
   assert.equal(toasts.at(-1).message, "Copied full response");
 });
+
+test("loads nested children when task parent metadata is absent", async () => {
+  const child = { id: "child-real", parentID: "parent", agent: "explore", model: { providerID: "test", id: "child" } };
+  const nested = { id: "nested-real", parentID: "child-real", agent: "librarian", model: { providerID: "test", id: "nested" } };
+  const parentTask = { type: "tool", tool: "task", state: { metadata: { sessionId: "child-real", parentSessionId: null } } };
+  const nestedTask = { type: "tool", tool: "task", state: { metadata: { sessionId: "nested-real", parentSessionId: null } } };
+  const sessions = { parent, "child-real": child, "nested-real": nested };
+  const messages = {
+    parent: [user, assistant, { id: "parent-final", role: "assistant", sessionID: "parent", parentID: "user", time: { created: 3 } }],
+    "child-real": [{ id: "child-user", role: "user", sessionID: "child-real" }, { id: "child-assistant", role: "assistant", sessionID: "child-real", parentID: "child-user" }],
+    "nested-real": [{ id: "nested-user", role: "user", sessionID: "nested-real" }, { id: "nested-assistant", role: "assistant", sessionID: "nested-real", parentID: "nested-user" }],
+  };
+  const parts = {
+    assistant: [parentTask],
+    "parent-final": [{ type: "text", text: "parent final" }],
+    "child-assistant": [nestedTask, { type: "text", text: "child output" }],
+    "nested-assistant": [{ type: "text", text: "nested output" }],
+  };
+  let clipboard;
+  const api = {
+    route: { current: { name: "session", params: { sessionID: "parent" } } },
+    client: { session: {
+      get: async ({ sessionID }) => ({ data: sessions[sessionID] }),
+      messages: async ({ sessionID }) => ({ data: (messages[sessionID] ?? []).map((info) => ({ info, parts: parts[info.id] ?? [] })) }),
+      status: async () => ({ data: Object.fromEntries(Object.keys(sessions).map((id) => [id, { type: "idle" }])) }),
+    } },
+    renderer: { copyToClipboardOSC52: async (value) => { clipboard = value; } },
+    ui: { toast: () => {} },
+  };
+  await copyResponse(api);
+  assert.match(clipboard, /SUBAGENT: explore[\s\S]*child output/);
+  assert.match(clipboard, /SUBAGENT: librarian[\s\S]*nested output/);
+  assert.match(clipboard, /FINAL RESPONSE/);
+});

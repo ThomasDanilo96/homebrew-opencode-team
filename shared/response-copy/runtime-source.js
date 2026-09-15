@@ -47,7 +47,7 @@ export async function loadResponseGraph(api, parentSessionID) {
     for (const task of taskPartsForCurrentTurn(sessionMessages, parts)) {
       const childID = task.state?.metadata?.sessionId;
       const taskParentID = task.state?.metadata?.parentSessionId;
-      if (typeof childID !== "string" || taskParentID !== sessionID) continue;
+      if (typeof childID !== "string" || (taskParentID && taskParentID !== sessionID)) continue;
       await loadSession(childID, sessionID);
     }
   }

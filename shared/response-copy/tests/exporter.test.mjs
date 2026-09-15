@@ -85,6 +85,27 @@ test("renders recognized tools, failures, redaction, bounds, and source order", 
   assert.doesNotMatch(result.text, /secret|RAW_JSON/);
 });
 
+test("renders real mutation and metadata-backed tool output", () => {
+  const a = assistant("a");
+  const result = fixture([user("u"), a], { a: [
+    { type: "tool", tool: "apply_patch", state: {
+      input: { patchText: "*** Begin Patch\n*** Update File: src/app.js\n@@\n-old\n+new\n*** Add File: src/new.js\n+created\n*** End Patch" },
+      metadata: { diff: "```diff\n-old\n+new\n+created\n```", files: ["src/app.js", "src/new.js"] },
+      status: "completed",
+    } },
+    { type: "tool", tool: "bash", state: {
+      input: { command: "npm test" },
+      metadata: { output: "PASS tests/app.test.js" },
+      status: "completed",
+    } },
+  ] });
+  assert.match(result.text, /src\/app\.js/);
+  assert.match(result.text, /src\/new\.js/);
+  assert.match(result.text, /-old\n\+new/);
+  assert.match(result.text, /\+created/);
+  assert.match(result.text, /\$ npm test[\s\S]*PASS tests\/app\.test\.js/);
+});
+
 test("bounds very large tool output", () => {
   const a = assistant("a");
   const result = fixture([user("u"), a], { a: [{ type: "tool", tool: "bash", state: { input: { command: "large" }, output: "x".repeat(5000), status: "completed" } }] });
