@@ -26,7 +26,8 @@ OPENCODE_TEAM_LEGACY_MAINTENANCE=1 "$CLI" setup >/tmp/opencode-team-maintenance-
 test "$(< "$TEST_ROOT/state/maintenance/status/best-tool-output-gc")" = DEFERRED
 test "$(< "$TEST_ROOT/state/maintenance/status/best-retention")" = DEFERRED
 test "$(< "$TEST_ROOT/state/maintenance/status/openai-retention")" = DEFERRED
-OPENCODE_TEAM_LEGACY_MAINTENANCE=1 "$CLI" maintenance status | rg -q 'BEST tool-output GC  DEFERRED'
+OPENCODE_TEAM_LEGACY_MAINTENANCE=1 "$CLI" maintenance status >"$TEST_ROOT/maintenance-status.out"
+rg -q 'BEST tool-output GC  DEFERRED' "$TEST_ROOT/maintenance-status.out"
 
 unset OPENCODE_TEAM_LEGACY_MAINTENANCE
 state_root="$TEST_ROOT/data/openai/state/team"
