@@ -62,6 +62,13 @@ jobs:
           test_home="$(mktemp -d)"
           trap 'rm -rf "$test_home"' EXIT
           OPENCODE_TEAM_HOME="$test_home" opencode-team setup >/dev/null
+          terminate_tree() {
+            local parent="$1" child
+            for child in $(pgrep -P "$parent" 2>/dev/null || true); do
+              terminate_tree "$child"
+            done
+            kill -TERM "$parent" 2>/dev/null || true
+          }
           for team in best go openai; do
             run_dir="$(mktemp -d)"
             log="$run_dir/runtime.log"
@@ -74,7 +81,7 @@ jobs:
               sleep 1
             done
             test "$ready" -eq 1
-            kill -TERM "$pid" 2>/dev/null || true
+            terminate_tree "$pid"
             wait "$pid" 2>/dev/null || true
             for _ in $(seq 1 15); do
               if ! ps -axo pid=,command= | rg "$test_home" | rg -v 'rg ' >/dev/null; then break; fi
