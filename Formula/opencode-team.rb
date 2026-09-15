@@ -25,7 +25,7 @@ class OpencodeTeam < Formula
   end
 
   test do
-    assert_match "OpenCode Team 0.1.2", shell_output("#{bin}/opencode-team version")
+    assert_match "OpenCode Team 0.1.3", shell_output("#{bin}/opencode-team version")
     assert_match "opencode-team start", shell_output("#{bin}/opencode-team --help")
   end
 end
