@@ -43,7 +43,9 @@ const ADMIT = join(TEAM_ROOT, "bin", "openai-admit.sh");
 const RELEASE = join(TEAM_ROOT, "bin", "openai-release.sh");
 const BIND = join(TEAM_ROOT, "bin", "openai-bind.sh");
 const reservations = new Map();
-export const DEFAULT_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-sol", openai_explore: "openai/gpt-5.6-luna-fast", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-terra", reviewer: "openai/gpt-5.6-sol", reviewer_critical: "openai/gpt-6-astra", specialist: "openai/gpt-6-astra", codex_executor: "openai/gpt-5.6-luna-fast" };
+const PREMIUM_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-sol", openai_explore: "openai/gpt-5.6-luna-fast", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-terra", reviewer: "openai/gpt-5.6-sol", reviewer_critical: "openai/gpt-6-astra", specialist: "openai/gpt-6-astra", codex_executor: "openai/gpt-5.6-luna-fast" };
+const DAILY_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-luna", openai_explore: "openai/gpt-5.6-luna", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-luna", reviewer: "openai/gpt-5.6-terra", reviewer_critical: "openai/gpt-5.6-sol", specialist: "openai/gpt-5.6-terra", codex_executor: "openai/gpt-5.6-luna" };
+export const DEFAULT_AGENT_MODELS = process.env.OPENAI_DAILY_PROFILE === "1" ? DAILY_AGENT_MODELS : PREMIUM_AGENT_MODELS;
 // Codex persists more than credentials in CODEX_HOME.  Every lane therefore
 // gets a new, private home containing only the host authentication document.
 // It is deliberately not inherited from the OpenCode process.
@@ -1732,7 +1734,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       if (parent) masterParentBySession.set(child.id, masterParent(parent));
       if (parent) {
         const parentGuard = await guardrailFor(masterParent(parent));
-        if (parentGuard) { guardrails.set(child.id, { ...parentGuard, activeDelegation: true }); await writeStopLatch(process.env.OPENAI_TEAM_STATE_ROOT, child.id, parentGuard); }
+        if (parentGuard) { guardrails.set(child.id, { ...parentGuard, activeDelegations: 1, activeDelegation: true }); await writeStopLatch(process.env.OPENAI_TEAM_STATE_ROOT, child.id, parentGuard); }
       }
       if (parent && ["codex_executor", "reviewer", "reviewer_critical", "tester"].includes(child.agent)) {
         const rootParent = masterParent(parent);
