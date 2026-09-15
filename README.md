@@ -34,7 +34,16 @@ opencode-team go
 opencode-team openai
 ```
 
-`best`, `go`, and `openai` are aliases for `start <team>`. Resume is forwarded
+## OpenAI profiles
+
+`opencode-team daily` is the fast, cost-efficient OpenAI-only daily driver for
+repository analysis, coding, bug fixes, tests, and medium-size refactors. It
+uses Luna by default, escalates selectively to Terra or Sol, and keeps runtime
+state isolated from `openai`.
+
+Use `opencode-team openai` for maximum-capability or high-risk work.
+
+`best`, `go`, `openai`, and `daily` are aliases for `start <team>`. Resume is forwarded
 to the shared runtime with `--resume ses_...`.
 
 Profiles:
