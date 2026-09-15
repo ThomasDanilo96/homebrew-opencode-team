@@ -1,0 +1,11 @@
+# Portable OPENAI DAILY profile. Values are rendered by opencode-team setup.
+TEAM_NAME=opencode-openai-daily
+SANDBOX=@DATA_ROOT@/daily
+TMUX_PREFIX=oc-openai-daily
+OMO_PROFILE=openai-daily
+OPENCODE_CONFIG=@CONFIG_ROOT@/daily/opencode.jsonc
+XDG_CONFIG_HOME_OVERRIDE=@CONFIG_ROOT@/daily/xdg-config
+RUNTIME_ENV_HOOK=@PACKAGE_ROOT@/teams/daily/runtime-env.sh
+NATIVE_UI_ONLY_AGENTS=openai_explore,openai_librarian,codex_executor,openai_ops
+RESUME_ALLOWED_AGENTS=openai_orchestrator
+BRIDGE_MODE=native_ui
