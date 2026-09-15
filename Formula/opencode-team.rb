@@ -2,7 +2,6 @@ class OpencodeTeam < Formula
   desc "Portable runtime foundation for OpenCode Team"
   homepage "https://github.com/ThomasDanilo96/homebrew-opencode-team"
   url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.0.tar.gz"
-  version "0.1.0"
   sha256 "e190f8e0e1983c6323b5231f2fe24496472dba37afaaf609f9b3f79fd9be1724"
   license "MIT"
 
@@ -19,16 +18,6 @@ class OpencodeTeam < Formula
     libexec.install "bin", "core", "shared", "teams", "tests", "VERSION"
     (bin/"opencode-team").write <<~EOS
       #!/bin/bash
-      node22="#{formula_opt_bin("node@22")}/node"
-      simdjson_name="$(otool -L "$node22" 2>/dev/null | while IFS= read -r line; do if [[ "$line" == *libsimdjson.*.dylib* ]]; then library="${line##*/}"; printf '%s\\n' "${library%% *}"; break; fi; done)"
-      if [ -n "$simdjson_name" ]; then
-        for simdjson_lib in "$(brew --cellar simdjson)"/*/lib/"$simdjson_name"; do
-          if [ -f "$simdjson_lib" ]; then
-            export DYLD_LIBRARY_PATH="${simdjson_lib%/*}${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-            break
-          fi
-        done
-      fi
       export PATH="#{formula_opt_bin("node@22")}:$PATH"
       exec "#{libexec}/bin/opencode-team" "$@"
     EOS
