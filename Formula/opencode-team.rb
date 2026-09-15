@@ -1,8 +1,8 @@
 class OpencodeTeam < Formula
   desc "Portable runtime foundation for OpenCode Team"
   homepage "https://github.com/ThomasDanilo96/homebrew-opencode-team"
-  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.0.tar.gz"
-  sha256 "e190f8e0e1983c6323b5231f2fe24496472dba37afaaf609f9b3f79fd9be1724"
+  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.1.tar.gz"
+  sha256 "c1fc4ce29671f92c327bb68d90e917c5e5a78a07007f72b785c53ccf71739ff7"
   license "MIT"
 
   depends_on "anomalyco/tap/opencode"
@@ -25,7 +25,7 @@ class OpencodeTeam < Formula
   end
 
   test do
-    assert_match "OpenCode Team 0.1.0", shell_output("#{bin}/opencode-team version")
+    assert_match "OpenCode Team 0.1.1", shell_output("#{bin}/opencode-team version")
     assert_match "opencode-team start", shell_output("#{bin}/opencode-team --help")
   end
 end

@@ -63,13 +63,17 @@ jobs:
           brew test ThomasDanilo96/opencode-team/opencode-team
           brew audit --strict ThomasDanilo96/opencode-team/opencode-team
 
-      - name: Development 0.1.1-dev maintenance regression
+      - name: Installed v0.1.1 maintenance regression
         run: |
           export PATH="$(brew --prefix node@22)/bin:$PATH"
-          test "$("$GITHUB_WORKSPACE/bin/opencode-team" version)" = \
-            "OpenCode Team 0.1.1-dev"
-          OPENCODE_TEAM_CLI="$GITHUB_WORKSPACE/bin/opencode-team" \
-            bash "$GITHUB_WORKSPACE/tests/maintenance-smoke.sh"
+          package_root="$(brew --prefix opencode-team)/libexec"
+          test "$(opencode-team version)" = "OpenCode Team 0.1.1"
+          test -f "$package_root/shared/maintenance/run-maintenance.sh"
+          test -f "$package_root/shared/maintenance/opencode-cleanup.py"
+          test -f "$package_root/shared/maintenance/openai-state-retention.mjs"
+          test -f "$package_root/tests/maintenance-smoke.sh"
+          OPENCODE_TEAM_CLI=opencode-team \
+            bash "$package_root/tests/maintenance-smoke.sh"
 
       - name: Disposable runtime smoke
         run: |
