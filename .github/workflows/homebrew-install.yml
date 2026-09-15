@@ -12,6 +12,7 @@ jobs:
       - name: Tap and trust formula
         run: |
           brew tap ThomasDanilo96/opencode-team
+          brew tap anomalyco/tap
           brew trust --formula ThomasDanilo96/opencode-team/opencode-team
           brew trust --formula anomalyco/tap/opencode
 
