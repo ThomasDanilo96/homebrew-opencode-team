@@ -53,7 +53,19 @@ assert(openai.mcp?.serena?.enabled === true, "OPENAI Serena MCP missing");
 assert(path.isAbsolute(openai.mcp.serena.command[0]) && openai.mcp.serena.command[0].startsWith(path.join(home, "data")), "OPENAI Serena path invalid");
 assert(openai.plugin.length === 3 && openai.plugin.every(path.isAbsolute), "OPENAI plugin paths invalid");
 
-for (const team of ["best", "go", "openai"]) {
+const daily = read("daily");
+same(daily.model, "openai/gpt-5.6-luna", "OPENAI DAILY model");
+same(daily.small_model, "openai/gpt-5.6-luna", "OPENAI DAILY small_model");
+same(daily.default_agent, "openai_orchestrator", "OPENAI DAILY default_agent");
+same(Object.keys(daily.agent).sort(), ["codex_executor", "openai_explore", "openai_librarian", "openai_ops", "openai_orchestrator", "reviewer", "reviewer_critical", "specialist", "tester"], "OPENAI DAILY agents");
+same(daily.enabled_providers, ["openai"], "OPENAI DAILY enabled providers");
+same(daily.compaction, { auto: true, prune: true, reserved: 24000 }, "OPENAI DAILY compaction");
+assert(daily.mcp?.serena?.enabled === true, "OPENAI DAILY Serena MCP missing");
+assert(path.isAbsolute(daily.mcp.serena.command[0]) && daily.mcp.serena.command[0].startsWith(path.join(home, "data")), "OPENAI DAILY Serena path invalid");
+assert(daily.plugin.length === 3 && daily.plugin.every(path.isAbsolute), "OPENAI DAILY plugin paths invalid");
+assert(daily.plugin[1].endsWith("/teams/openai/config/opencode/openai-team-tools.js"), "OPENAI DAILY shared tools path invalid");
+
+for (const team of ["best", "go", "openai", "daily"]) {
   const config = read(team);
   const serialized = JSON.stringify(config);
   assert(!serialized.includes(".opencode-" + "team-staging"), `${team} staging fallback`);

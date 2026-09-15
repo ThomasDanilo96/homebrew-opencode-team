@@ -12,7 +12,7 @@ for template in "$ROOT"/teams/*/tui.json.template; do
   tui_file="$TEST_ROOT/config/$team/xdg-config/opencode/tui.json"
   TUI_FILES+=("$tui_file")
 done
-for team in best go openai; do
+for team in best go openai daily; do
   test -f "$TEST_ROOT/config/$team/team-runtime.conf"
   test -f "$TEST_ROOT/config/$team/opencode.jsonc"
   node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$TEST_ROOT/config/$team/opencode.jsonc"

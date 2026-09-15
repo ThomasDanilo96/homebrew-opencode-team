@@ -21,7 +21,8 @@ usage() {
     '  opencode-team best [--resume SESSION]' \
     '  opencode-team go [--resume SESSION]' \
     '  opencode-team openai [--resume SESSION]' \
-    '  opencode-team start <best|go|openai> [--resume SESSION]' \
+    '  opencode-team daily [--resume SESSION]' \
+    '  opencode-team start <best|go|openai|daily> [--resume SESSION]' \
     '  opencode-team maintenance <best-tool-output-gc|best-retention|openai-retention|status>' \
     '  opencode-team version'
 }
@@ -140,7 +141,7 @@ doctor() {
   else
     printf '  %-16s OPTIONAL / missing\n' "GitHub CLI"
   fi
-  for team in best go openai; do
+  for team in best go openai daily; do
     if [ -f "$CONFIG_ROOT/$team/team-runtime.conf" ]; then
       printf '  %-16s CONFIGURED\n' "$team profile"
     else
@@ -311,9 +312,11 @@ maintenance_command() {
 }
 
 install_dependencies() {
-  local team="$1" dependency_root="$DATA_ROOT/dependencies/$team"
-  local package_file="$PACKAGE_ROOT/teams/$team/package.json"
-  local lock_file="$PACKAGE_ROOT/teams/$team/package-lock.json"
+  local team="$1" dependency_team="$1"
+  [ "$team" = daily ] && dependency_team=openai
+  local dependency_root="$DATA_ROOT/dependencies/$dependency_team"
+  local package_file="$PACKAGE_ROOT/teams/$dependency_team/package.json"
+  local lock_file="$PACKAGE_ROOT/teams/$dependency_team/package-lock.json"
   local marker="$dependency_root/.installed-lock-sha256"
   local lock_hash
   lock_hash="$(shasum -a 256 "$lock_file" | cut -d' ' -f1)"
@@ -396,8 +399,10 @@ setup() {
   printf '  cache root        %s\n' "$CACHE_ROOT"
   ensure_serena || return 1
   ensure_codex || return 1
-  for team in best go openai; do
-    export OMO_PLUGIN="$DATA_ROOT/dependencies/$team/node_modules/oh-my-openagent/dist/index.js"
+  for team in best go openai daily; do
+    dependency_team="$team"
+    [ "$team" = daily ] && dependency_team=openai
+    export OMO_PLUGIN="$DATA_ROOT/dependencies/$dependency_team/node_modules/oh-my-openagent/dist/index.js"
     mkdir -p "$CONFIG_ROOT/$team/xdg-config" "$CONFIG_ROOT/$team/claude-config" "$DATA_ROOT/$team" "$STATE_ROOT/$team" "$CACHE_ROOT/$team"
     case "$team" in
       best) hook_source="$PACKAGE_ROOT/teams/best/patch-omo-hook-timeout.sh"; hook_name="patch-omo-hook-timeout.sh" ;;
@@ -440,9 +445,9 @@ start_team() {
   local team="$1"
   shift
   case "$team" in
-    best|go|openai) ;;
+    best|go|openai|daily) ;;
     *)
-      printf 'Unknown team: %s (expected best, go, or openai)\n' "$team" >&2
+      printf 'Unknown team: %s (expected best, go, openai, or daily)\n' "$team" >&2
       return 1
       ;;
   esac
@@ -491,7 +496,7 @@ case "${1:-}" in
     shift
     start_team "$@"
     ;;
-  best|go|openai)
+  best|go|openai|daily)
     team="$1"
     shift
     start_team "$team" "$@"
