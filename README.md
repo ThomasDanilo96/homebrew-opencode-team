@@ -1,6 +1,9 @@
 # OpenCode Team
 
-Status: public release `v0.1.0`.
+Status: public release `v0.1.0`; current development version `0.1.1-dev`.
+
+The public Homebrew release remains `v0.1.0`. The `0.1.1-dev` version is currently
+under development and is not published yet.
 
 ## Goal
 
@@ -65,7 +68,13 @@ OPENCODE_TEAM_HOME="$(mktemp -d)" bin/opencode-team setup
 
 `setup` installs all team dependencies under the isolated data root, installs the
 version-pinned Serena MCP server there, and generates the verified BEST and GO OMO
-bundles. It refuses unsupported Node versions and does not start a runtime.
+bundles. It also schedules package-owned BEST tool-output GC and BEST/OPENAI
+retention jobs when no legacy maintenance agents are detected. It refuses unsupported
+Node versions and does not start a runtime.
+
+When legacy maintenance agents are present, setup reports `DEFERRED` and does not
+install duplicate jobs. Disposable setups write and validate LaunchAgent plists under
+the test state root without loading them.
 
 ## Uninstall
 

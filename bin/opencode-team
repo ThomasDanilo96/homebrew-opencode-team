@@ -22,6 +22,7 @@ usage() {
     '  opencode-team go [--resume SESSION]' \
     '  opencode-team openai [--resume SESSION]' \
     '  opencode-team start <best|go|openai> [--resume SESSION]' \
+    '  opencode-team maintenance <best-tool-output-gc|best-retention|openai-retention|status>' \
     '  opencode-team version'
 }
 
@@ -147,6 +148,8 @@ doctor() {
       failed=1
     fi
   done
+  printf 'Maintenance\n'
+  maintenance_status
   return "$failed"
 }
 
@@ -162,6 +165,149 @@ setup_roots() {
     STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/opencode-team"
     CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/opencode-team"
   fi
+}
+
+maintenance_tasks() {
+  printf '%s\n' best-tool-output-gc best-retention openai-retention
+}
+
+maintenance_label() {
+  case "$1" in
+    best-tool-output-gc) printf '%s\n' 'it.danilodantoni.opencode-team.best-tool-output-gc' ;;
+    best-retention) printf '%s\n' 'it.danilodantoni.opencode-team.best-retention' ;;
+    openai-retention) printf '%s\n' 'it.danilodantoni.opencode-team.openai-retention' ;;
+    *) return 1 ;;
+  esac
+}
+
+legacy_maintenance_detected() {
+  [ "${OPENCODE_TEAM_LEGACY_MAINTENANCE:-}" = 1 ] && return 0
+  [ -n "${OPENCODE_TEAM_HOME:-}" ] && return 1
+  local label plist
+  for label in com.thomasd.opencode-best-tool-output-gc com.thomasd.opencode-best-retention com.thomasd.opencode-retention; do
+    plist="$HOME/Library/LaunchAgents/$label.plist"
+    [ -f "$plist" ] && return 0
+    launchctl print "gui/${UID:-$(id -u)}/$label" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+
+maintenance_status() {
+  local task marker status
+  for task in $(maintenance_tasks); do
+    marker="$STATE_ROOT/maintenance/status/$task"
+    if [ -f "$marker" ]; then
+      status="$(< "$marker")"
+    elif legacy_maintenance_detected; then
+      status=DEFERRED
+    else
+      status=MISSING
+    fi
+    case "$task" in
+      best-tool-output-gc) printf '  BEST tool-output GC  %s\n' "$status" ;;
+      best-retention) printf '  BEST retention       %s\n' "$status" ;;
+      openai-retention) printf '  OPENAI retention     %s\n' "$status" ;;
+    esac
+  done
+}
+
+write_maintenance_plist() {
+  local task="$1" destination="$2" label executable log_path temporary
+  label="$(maintenance_label "$task")"
+  executable="${OPENCODE_TEAM_EXECUTABLE:-$(command -v opencode-team || printf '%s/bin/opencode-team' "$PACKAGE_ROOT")}"
+  log_path="$STATE_ROOT/maintenance/logs/$task.launchd.log"
+  temporary="${destination}.tmp.$$"
+  python3 - "$temporary" "$label" "$executable" "$task" "$log_path" "${OPENCODE_TEAM_HOME:-}" <<'PY'
+import pathlib
+import plistlib
+import sys
+
+destination, label, executable, task, log_path, team_home = sys.argv[1:]
+environment = {"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
+if team_home:
+    environment["OPENCODE_TEAM_HOME"] = team_home
+hour, minute = {
+    "best-tool-output-gc": (4, 45),
+    "best-retention": (5, 0),
+    "openai-retention": (4, 15),
+}[task]
+plist = {
+    "Label": label,
+    "ProgramArguments": [executable, "maintenance", task],
+    "EnvironmentVariables": environment,
+    "StartCalendarInterval": {"Hour": hour, "Minute": minute},
+    "StandardOutPath": log_path,
+    "StandardErrorPath": log_path.replace(".log", ".err"),
+    "ProcessType": "Background",
+}
+pathlib.Path(destination).parent.mkdir(parents=True, exist_ok=True)
+with pathlib.Path(destination).open("wb") as stream:
+    plistlib.dump(plist, stream, sort_keys=False)
+PY
+  if [ -f "$destination" ] && cmp -s "$temporary" "$destination"; then
+    rm -f "$temporary"
+  else
+    mv "$temporary" "$destination"
+  fi
+}
+
+install_maintenance() {
+  local task plist label agent_dir status_marker
+  mkdir -p "$STATE_ROOT/maintenance/status" "$STATE_ROOT/maintenance/logs"
+  if legacy_maintenance_detected; then
+    printf 'Maintenance migration deferred: legacy BEST GC/retention and OPENAI retention detected\n'
+    for task in $(maintenance_tasks); do
+      printf '%s\n' DEFERRED > "$STATE_ROOT/maintenance/status/$task"
+    done
+    return 0
+  fi
+  if [ -n "${OPENCODE_TEAM_HOME:-}" ]; then
+    agent_dir="$STATE_ROOT/maintenance/launchagents"
+  else
+    agent_dir="$HOME/Library/LaunchAgents"
+  fi
+  for task in $(maintenance_tasks); do
+    label="$(maintenance_label "$task")"
+    plist="$agent_dir/$label.plist"
+    write_maintenance_plist "$task" "$plist"
+    if [ -n "${OPENCODE_TEAM_HOME:-}" ]; then
+      status=INSTALLED
+    elif launchctl print "gui/${UID:-$(id -u)}/$label" >/dev/null 2>&1; then
+      status=INSTALLED
+    else
+      launchctl bootstrap "gui/${UID:-$(id -u)}" "$plist"
+      launchctl enable "gui/${UID:-$(id -u)}/$label"
+      status=INSTALLED
+    fi
+    printf '%s\n' "$status" > "$STATE_ROOT/maintenance/status/$task"
+    printf '  %-18s OK (%s)\n' "$task" "$status"
+  done
+}
+
+maintenance_command() {
+  setup_roots
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT
+  if [ "${1:-}" = status ]; then
+    [ "$#" -eq 1 ] || { usage >&2; return 2; }
+    maintenance_status
+    return 0
+  fi
+  [ "$#" -eq 1 ] || { usage >&2; return 2; }
+  case "$1" in
+    best-tool-output-gc|best-retention|openai-retention)
+      local team=best
+      [ "$1" = openai-retention ] && team=openai
+      [ -f "$CONFIG_ROOT/$team/team-runtime.conf" ] || {
+        printf 'Maintenance is not configured: %s\n' "$1" >&2
+        return 1
+      }
+      exec "$PACKAGE_ROOT/shared/maintenance/run-maintenance.sh" "$1"
+      ;;
+    *)
+      printf 'Unknown maintenance task: %s\n' "$1" >&2
+      return 2
+      ;;
+  esac
 }
 
 install_dependencies() {
@@ -286,6 +432,7 @@ setup() {
   verify_best_omo
   verify_go_omo
   printf '  %-18s OK (package-local)\n' "openai OMO"
+  install_maintenance || return 1
   printf 'Setup complete. No runtime was started.\n'
 }
 
@@ -334,6 +481,10 @@ case "${1:-}" in
   setup)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
     setup
+    ;;
+  maintenance)
+    shift
+    maintenance_command "$@"
     ;;
   start)
     [ "$#" -ge 2 ] || { usage >&2; exit 2; }
