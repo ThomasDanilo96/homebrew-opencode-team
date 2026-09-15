@@ -54,9 +54,15 @@ jobs:
 
           package_root="$(brew --prefix opencode-team)/libexec"
           for required_file in \
-            "$package_root/shared/response-copy/index.mjs" \
-            "$package_root/shared/response-copy/response-copy.mjs" \
-            "$package_root/shared/response-copy/response-copy-plugin.mjs"; do
+            "$package_root/shared/response-copy/package.json" \
+            "$package_root/shared/response-copy/runtime-source.js" \
+            "$package_root/shared/response-copy/safe-parts.js" \
+            "$package_root/shared/response-copy/exporter.js" \
+            "$package_root/shared/response-copy/formatter.js" \
+            "$package_root/shared/response-copy/response-copy-plugin.js" \
+            "$package_root/teams/best/tui.json.template" \
+            "$package_root/teams/go/tui.json.template" \
+            "$package_root/teams/openai/tui.json.template"; do
             test -f "$required_file"
           done
           node --test "$package_root/shared/response-copy/tests/"*.test.mjs
