@@ -71,16 +71,19 @@ rg -q '^logs_pruned=1$' "$openai_output"
 OPENCODE_MAINTENANCE_TEST_DELAY_MS=500 "$CLI" maintenance best-tool-output-gc >/tmp/opencode-team-best-lock.out &
 best_pid=$!
 sleep 0.1
-"$CLI" maintenance best-tool-output-gc | rg -q 'SKIP_ALREADY_RUNNING'
+"$CLI" maintenance best-tool-output-gc >"$TEST_ROOT/best-lock-skip.out"
+rg -q 'SKIP_ALREADY_RUNNING' "$TEST_ROOT/best-lock-skip.out"
 wait "$best_pid"
 
 OPENCODE_MAINTENANCE_TEST_DELAY_MS=500 "$CLI" maintenance openai-retention >/tmp/opencode-team-openai-lock.out &
 openai_pid=$!
 sleep 0.1
-"$CLI" maintenance openai-retention | rg -q 'SKIP_ALREADY_RUNNING'
+"$CLI" maintenance openai-retention >"$TEST_ROOT/openai-lock-skip.out"
+rg -q 'SKIP_ALREADY_RUNNING' "$TEST_ROOT/openai-lock-skip.out"
 wait "$openai_pid"
 
-"$CLI" maintenance best-tool-output-gc | rg -q 'SKIP_NO_BEST_TOOL_OUTPUT_STORE'
+"$CLI" maintenance best-tool-output-gc >"$TEST_ROOT/best-empty.out"
+rg -q 'SKIP_NO_BEST_TOOL_OUTPUT_STORE' "$TEST_ROOT/best-empty.out"
 "$CLI" maintenance best-retention >/dev/null
 "$CLI" maintenance openai-retention >/dev/null
 
