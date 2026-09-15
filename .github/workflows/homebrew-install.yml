@@ -21,6 +21,9 @@ jobs:
 
       - name: Verify toolchain
         run: |
+          sw_vers
+          uname -m
+          brew --prefix
           test "$(opencode-team version)" = "OpenCode Team 0.1.0"
           node --version
           opencode --version
