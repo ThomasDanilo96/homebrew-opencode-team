@@ -27,7 +27,7 @@ jobs:
           sw_vers
           uname -m
           brew --prefix
-          test "$(opencode-team version)" = "OpenCode Team 0.1.2"
+          test "$(opencode-team version)" = "OpenCode Team 0.1.3"
           node --version
           opencode --version
           python3 --version
@@ -37,7 +37,7 @@ jobs:
           rg --version
           package_root="$(brew --prefix opencode-team)/libexec"
           test -x "$package_root/bin/opencode-team"
-          test "$(opencode-team version)" = "OpenCode Team 0.1.2"
+          test "$(opencode-team version)" = "OpenCode Team 0.1.3"
 
       - name: Clean-room setup and doctor
         run: |
@@ -53,6 +53,13 @@ jobs:
           done
 
           package_root="$(brew --prefix opencode-team)/libexec"
+          for required_file in \
+            "$package_root/shared/response-copy/index.mjs" \
+            "$package_root/shared/response-copy/response-copy.mjs" \
+            "$package_root/shared/response-copy/response-copy-plugin.mjs"; do
+            test -f "$required_file"
+          done
+          node --test "$package_root/shared/response-copy/tests/"*.test.mjs
           OPENCODE_TEAM_HOME="$test_home" bash "$package_root/tests/config-parity.sh"
           ! rg -n '/Users/|\.opencode-team-staging|go-final-ux-v1|best-shared-v1' "$test_home"
           test "$(shasum -a 256 "$test_home/data/dependencies/best/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "a022deff9202c97e922a4a75c357beab420907f724fe9214267dad53fe72455e"
@@ -63,11 +70,11 @@ jobs:
           brew test ThomasDanilo96/opencode-team/opencode-team
           brew audit --strict ThomasDanilo96/opencode-team/opencode-team
 
-      - name: Installed v0.1.2 maintenance regression
+      - name: Installed v0.1.3 maintenance regression
         run: |
           export PATH="$(brew --prefix node@22)/bin:$PATH"
           package_root="$(brew --prefix opencode-team)/libexec"
-          test "$(opencode-team version)" = "OpenCode Team 0.1.2"
+          test "$(opencode-team version)" = "OpenCode Team 0.1.3"
           test -f "$package_root/shared/maintenance/run-maintenance.sh"
           test -f "$package_root/shared/maintenance/opencode-cleanup.py"
           test -f "$package_root/shared/maintenance/openai-state-retention.mjs"
