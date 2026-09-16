@@ -18,7 +18,7 @@ import { addWorkPacketTokensByID, createWorkPacket, incrementWorkPacketByID, lis
 import { TaskStateError, claimTask, completeTask, readTask, transitionTask } from "./task-state.js";
 import { workspaceFingerprint } from "./read-cache.js";
 import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
-import { GuardrailPolicyError, admitDelegation, admitToolCall, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, updateStopLatch, writeStopLatch } from "./openai-guardrails.js";
+import { GuardrailPolicyError, admitDelegation, admitToolCall, allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, updateStopLatch, writeStopLatch } from "./openai-guardrails.js";
 import { guardToolExecution } from "../../../../shared/tool-output-guard.js";
 import {
   CODEX_REQUIRED,
@@ -1488,7 +1488,9 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
      if (callID) await incrementWorkPacketByID(callID, { tool_call_count: 1 });
     }
     if (isMutationCapableTool(toolName)) {
-      if (sessionAgent === "openai_orchestrator" && REPOSITORY_MUTATING_TOOLS.has(toolName)) {
+       const shellCommand = output.args?.command ?? output.args?.cmd ?? input.args?.command ?? input.args?.cmd;
+       if (sessionAgent === "openai_orchestrator" && allowsDailyOrchestratorShell(toolName, shellCommand, guard?.authoritativeObjective)) return;
+       if (sessionAgent === "openai_orchestrator" && REPOSITORY_MUTATING_TOOLS.has(toolName)) {
         throw new Error("openai_orchestrator repository mutation is denied; delegate implementation to codex_executor");
       }
       if (sessionAgent !== "codex_executor") {

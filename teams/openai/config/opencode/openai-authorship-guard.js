@@ -1,6 +1,7 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { CODEX_REQUIRED, CODEX_SUCCESS, TERRA_FALLBACK, ensurePolicy, readPolicy } from "./codex-authority.js";
+import { allowsDailyOrchestratorShell } from "./openai-guardrails.js";
 import { isAllowlistedVerificationCommand, verificationCommandCategory } from "./execution-policy.js";
 import { createHash } from "node:crypto";
 import { listWorkPackets } from "./work-packet.js";
@@ -68,6 +69,25 @@ const childPrompt = (messages) => {
   const latest = [...(Array.isArray(messages) ? messages : [])].reverse().find((message) => message?.info?.role === "user");
   const text = (latest?.parts || []).filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n").trim();
   return text || null;
+};
+const genuineObjective = async (pluginInput, input) => {
+  const supplied = pluginInput.authoritativeObjective;
+  if (typeof supplied === "function") return await supplied(input.sessionID);
+  if (typeof supplied === "string" && supplied.trim()) return supplied.trim();
+  try {
+    let id = input.sessionID;
+    for (let depth = 0; id && depth < 32; depth += 1) {
+      const session = (await pluginInput.client?.session?.get({ path: { id } }))?.data;
+      const parent = childParent(session);
+      if (!parent) {
+        const messages = (await pluginInput.client?.session?.messages({ path: { id } }))?.data;
+        return childPrompt(messages);
+      }
+      if (parent === id) return null;
+      id = parent;
+    }
+  } catch { return null; }
+  return null;
 };
 const bootstrapCodexPolicy = async (pluginInput, sessionID, agent) => {
   if (agent !== "codex_executor" || !sessionID) return null;
@@ -214,6 +234,12 @@ export const OpenAIAuthorshipGuard = async (pluginInput = {}) => ({
     if (agent === "tester") {
       await record("tester_mutation_blocked", input, agent, authorityState, "BLOCK");
       throw new Error("OPENAI AUTHORSHIP POLICY: Tester is read-only and may not invoke mutation-capable or unbounded execution tools.");
+    }
+
+    const command = output.args?.command ?? output.args?.cmd ?? input.args?.command ?? input.args?.cmd;
+    if (agent === "openai_orchestrator" && allowsDailyOrchestratorShell(toolName, command, await genuineObjective(pluginInput, input))) {
+      await record("daily_orchestrator_shell_allowed", input, agent, "NONE", "ALLOW");
+      return;
     }
 
     if (unknownTool || (agent === "codex_executor" && authorityState === TERRA_FALLBACK && !FALLBACK_MUTATION_TOOLS.has(toolName))) {

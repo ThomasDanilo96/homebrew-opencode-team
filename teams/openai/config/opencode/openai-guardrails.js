@@ -14,7 +14,7 @@ const INTERNAL = /OMO_INTERNAL_INITIATOR|OH-MY-OPENCODE/i;
 const LONG = /\b(?:authorize|authorise|approved?|consent(?:ed)?)\b[^\n]{0,40}\b(?:long[- ]work|long[- ]running|duration|hours?)\b|\b(?:long[- ]work|long[- ]running|duration|hours?)\b[^\n]{0,40}\b(?:authorize|authorise|approved?|consent)\b/i;
 const COMPLEX = /\b(?:complex|multi[- ]step|cross[- ](?:service|repository)|end[- ]to[- ]end|integration|migrat|refactor|architecture)\b/i;
 const QUICK = /\b(?:quick(?:ly)?|simple|small|brief|just\s+(?:tell|show|read|check)|what\s+is|how\s+do\s+i)\b/i;
-const CATEGORIES = Object.freeze({ push: /\bpush(?:ing)?\b/i, deploy: /\bdeploy(?:ment|ing)?\b/i, cron: /\bcron(?:tab|job)?\b/i, vps_ssh: /\b(?:vps|ssh)\b/i, destructive: /(?:\b(?:destruct(?:ive|ion)|delet(?:e|ing|ed|ion)|remov(?:e|ing|ed)|drop(?:ping|ped)?|reset(?:ting|ted)?|rm)\b|删除|移除|丢弃|重置|消除|\b(?:elimina|eliminare|rimuovi|rimuovere|cancella|cancellare|reimposta|eliminar|borrar|borra)\b)/iu });
+const CATEGORIES = Object.freeze({ push: /\bpush(?:ing)?\b/i, deploy: /\bdeploy(?:ment|ing)?\b/i, cron: /\bcron(?:tab|job)?\b/i, vps_ssh: /\b(?:vps|ssh|remote)\b/i, destructive: /(?:\b(?:destruct(?:ive|ion)|delet(?:e|ing|ed|ion)|remov(?:e|ing|ed)|drop(?:ping|ped)?|reset(?:ting|ted)?|rm)\b|删除|移除|丢弃|重置|消除|\b(?:elimina|eliminare|rimuovi|rimuovere|cancella|cancellare|reimposta|eliminar|borrar|borra)\b)/iu });
 const bounded = (value, fallback, [min, max]) => { const n = Number(value); return Number.isInteger(n) && n >= min && n <= max ? n : fallback; };
 export const readGuardrailLimits = (env = process.env, base = DEFAULT_GUARDRAIL_LIMITS, bounds = BOUNDS) => ({
   minutes: bounded(env.OPENAI_GUARDRAIL_MINUTES ?? env.OPENAI_REQUEST_MAX_MINUTES, base.minutes, bounds.minutes),
@@ -65,6 +65,18 @@ export const recoverRootRequestState = (state = createGuardrailState(), objectiv
 export const confirmationCategory = (operation) => Object.entries(CATEGORIES).find(([, pattern]) => pattern.test(String(operation || "")))?.[0] || null;
 const negatedCategoryAction = (request, category) => category === "destructive" && /(?:(?:\b(?:do\s+not|don['’]t|must\s+not|never|no)\b|不(?:要|得)?|禁止|别|\bnon\b|\bno\b)[^\n]{0,40}(?:\b(?:destruct(?:ive|ion)|delet(?:e|ing|ed|ion)|remov(?:e|ing|ed)|drop(?:ping|ped)?|reset(?:ting|ted)?|rm)\b|删除|移除|丢弃|重置|消除|\b(?:elimina|eliminare|rimuovi|rimuovere|cancella|cancellare|reimposta|eliminar|elimine|rimuovere|borrar|borra)\b))/iu.test(String(request || ""));
 export const explicitlyConfirms = (request, category) => Boolean(category && CATEGORIES[category] && !/\b(?:continue|go ahead|proceed)\b/i.test(String(request || "")) && !negatedCategoryAction(request, category) && /(?:\b(?:authorize|authorise|confirm|explicitly|approved?|consent|yes|conferma|confermato|approva|autorizza)\b|确认|同意|批准)/iu.test(String(request || "")) && CATEGORIES[category].test(String(request || "")));
+const DAILY_SHELL_TOOLS = new Set(["bash", "interactive_bash", "shell", "command"]);
+const SAFE_SSH_PROBE = /^\s*(?:command\s+-v\s+ssh|ssh\s+-V|ssh\s+-G\s+[A-Za-z0-9._-]+)\s*$/i;
+export const allowsDailyOrchestratorShell = (tool, command, authoritativeObjective, env = process.env) => {
+  if (env.OPENAI_DAILY_PROFILE !== "1" || !DAILY_SHELL_TOOLS.has(String(tool || "").toLowerCase())) return false;
+  const objective = String(authoritativeObjective || "");
+  const operation = String(command || "");
+  const category = confirmationCategory(operation);
+  if (category === "vps_ssh" && SAFE_SSH_PROBE.test(operation)) return true;
+  if (category === "vps_ssh" && !CATEGORIES.vps_ssh.test(objective)) return false;
+  if (["push", "deploy", "cron", "destructive"].includes(category) && !explicitlyConfirms(objective, category)) return false;
+  return true;
+};
 export const requiresExplicitConfirmation = (operation) => confirmationCategory(operation) !== null;
 export class GuardrailPolicyError extends Error { constructor(reason, details = {}) { super(`OPENAI_GUARDRAIL_${reason}: stop and report state; do not create todos or retry.`); this.name = "GuardrailPolicyError"; this.code = `OPENAI_GUARDRAIL_${reason}`; this.policy = { type: "policy_error", reason, stop: true, retry: false, ...details }; } }
 export const objectiveIsBound = (authoritative, delegated) => { const a = String(authoritative || "").trim().replace(/\s+/g, " ").toLowerCase(), d = String(delegated || "").trim().replace(/\s+/g, " ").toLowerCase(); return Boolean(a && d && (a === d || d.includes(a) || a.includes(d))); };

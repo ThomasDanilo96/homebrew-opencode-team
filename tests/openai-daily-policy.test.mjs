@@ -2,11 +2,41 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { dailyCost, dailyFanout, DAILY_AGENT_MODELS, DAILY_PRICING } from "../teams/daily/daily-policy.mjs";
-import { backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, updateStopLatch } from "../teams/openai/config/opencode/openai-guardrails.js";
+import { allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, updateStopLatch } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
 import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
 import { latestUserObjective, resolveInitialObjectiveFromClient } from "../teams/openai/config/opencode/openai-team-tools.js";
+
+test("Daily shell policy is bounded by the genuine objective", () => {
+  const env = { OPENAI_DAILY_PROFILE: "1" };
+  for (const command of ["printf ok", "test -f file", "build", "git status", "docker inspect app", "command -v ssh", "ssh -V"]) {
+    assert.equal(allowsDailyOrchestratorShell("bash", command, "Inspect the repository", env), true, command);
+  }
+  assert.equal(allowsDailyOrchestratorShell("bash", "ssh host", "Inspect the repository", env), false);
+  assert.equal(allowsDailyOrchestratorShell("bash", "git push", "Push the branch", env), false);
+  assert.equal(allowsDailyOrchestratorShell("bash", "git push", "I explicitly confirm push", env), true);
+  assert.equal(allowsDailyOrchestratorShell("bash", "rm file", "Do not delete anything", env), false);
+  assert.equal(allowsDailyOrchestratorShell("bash", "rm file", "I explicitly confirm deletion", env), true);
+  assert.equal(allowsDailyOrchestratorShell("bash", "printf ok", "Inspect", {}), false);
+});
+
+test("Daily template enables only orchestrator shell access and runtime forwards SSH vars conditionally", async () => {
+  const template = await readFile(new URL("../teams/daily/opencode.jsonc.template", import.meta.url), "utf8");
+  assert.match(template, /"bash": "allow"/);
+  assert.match(template, /"interactive_bash": "allow"/);
+  assert.match(template, /"bash": true/);
+  assert.match(template, /"interactive_bash": true/);
+  assert.match(template, /"edit": "deny"/);
+  assert.match(template, /"write": "deny"/);
+  assert.match(template, /"openai_run_codex": false/);
+  const premium = await readFile(new URL("../teams/openai/opencode.jsonc.template", import.meta.url), "utf8");
+  assert.match(premium, /"bash": "deny"/);
+  assert.match(premium, /"interactive_bash": "deny"/);
+  const runtime = await readFile(new URL("../core/bin/team-runtime", import.meta.url), "utf8");
+  assert.match(runtime, /OPENCODE_AUTH_SOURCE OPENAI_CODEX_AUTH_SOURCE SSH_AUTH_SOCK SSH_AGENT_PID/);
+  assert.match(runtime, /\[\s*"\$\{!auth_var\+x\}"\s*=\s*x\s*\]/);
+});
 
 test("Daily uses OpenAI-only model tiers", () => {
   assert.equal(DAILY_AGENT_MODELS.openai_orchestrator, "openai/gpt-5.6-luna");

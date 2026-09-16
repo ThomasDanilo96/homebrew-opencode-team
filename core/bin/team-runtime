@@ -89,7 +89,7 @@ else
   COLS=$(tput cols 2>/dev/null || echo 120)
   LINES=$(tput lines 2>/dev/null || echo 30)
   tmux_env_args=()
-  for auth_var in OPENCODE_AUTH_SOURCE OPENAI_CODEX_AUTH_SOURCE; do
+  for auth_var in OPENCODE_AUTH_SOURCE OPENAI_CODEX_AUTH_SOURCE SSH_AUTH_SOCK SSH_AGENT_PID; do
     if [ "${!auth_var+x}" = x ]; then
       tmux_env_args+=(-e "$auth_var=${!auth_var}")
     fi
