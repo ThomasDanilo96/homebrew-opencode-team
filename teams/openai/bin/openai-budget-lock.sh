@@ -27,7 +27,7 @@ openai_lock_owner_valid() {
   case "$lease" in ''|*[!0-9]*) return 1;; esac
   [ "$lease" -gt 0 ] && [ "$lease" -le 300 ]
 }
-openai_lock_process_start_identity() { ps -o lstart= -p "$1" 2>/dev/null | awk '{$1=$1; print}' | tr -s ' ' | tr ':' '_'; }
+openai_lock_process_start_identity() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | awk '{$1=$1; print}' | tr -s ' ' | tr ':' '_'; }
 openai_lock_mtime() { stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || printf '0\n'; }
 openai_lock_reclaim_enter() {
   local deadline=$((SECONDS + OPENAI_BUDGET_WAIT + 1)) stage token now age pid owner_start current_start lease_until

@@ -24,7 +24,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 if [ -z "$owner_pid" ]; then owner_pid="$PPID"; fi
-if [ -z "$reservation_owner_start" ]; then reservation_owner_start=$(normalize_identity "$(ps -o lstart= -p "$owner_pid" 2>/dev/null || true)"); fi
+if [ -z "$reservation_owner_start" ]; then reservation_owner_start=$(normalize_identity "$(LC_ALL=C ps -o lstart= -p "$owner_pid" 2>/dev/null || true)"); fi
 reservation_owner_start=$(normalize_identity "$reservation_owner_start")
 role=${1:?role required}
 weight=${2:?weight required}
@@ -61,7 +61,7 @@ while true; do
     record_pid=$(jq -r '.owner_pid // empty' "$f" 2>/dev/null || true)
     record_start=$(jq -r '.owner_start_identity // empty' "$f" 2>/dev/null || true)
     if [ -n "$record_pid" ]; then
-      current_start=$(normalize_identity "$(ps -o lstart= -p "$record_pid" 2>/dev/null || true)")
+      current_start=$(normalize_identity "$(LC_ALL=C ps -o lstart= -p "$record_pid" 2>/dev/null || true)")
       if ! kill -0 "$record_pid" 2>/dev/null; then
         stale=1
       elif [ -n "$current_start" ] && [ -n "$record_start" ] && [ "$current_start" != "$record_start" ]; then
