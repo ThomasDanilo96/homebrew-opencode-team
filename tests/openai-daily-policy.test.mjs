@@ -56,6 +56,8 @@ test("Daily pricing is optional observability math", () => {
 });
 
 test("Routing ignores explicitly negated mutations without hiding genuine mutations", () => {
+	assert.equal(analyzeObjective("Add multiply(a,b) to the calculator").classification, "MUTATING");
+	assert.equal(analyzeObjective("Inspect the calculator and verify it defines add(a,b)").classification, "READ_ONLY");
   assert.equal(analyzeObjective("Read only README.md line 3. Do not modify anything and do not call task.").classification, "READ_ONLY");
   assert.equal(analyzeObjective("do not analyze, modify the file").classification, "MUTATING");
   assert.equal(analyzeObjective("Do not modify or delete files; review them").classification, "READ_ONLY");
@@ -173,6 +175,15 @@ test("Recovered Daily inspection scope remains bound without admitting unrelated
   assert.notEqual(canonical, "");
   assert.equal(objectiveIsBound(parent, canonical), true);
   assert.equal(canonicalDelegatedObjective(parent, "Read-only inspection only. Inspect billing secrets in the workspace."), "");
+});
+
+test("Second live parent and child inspection scope remains read-only and bound", () => {
+	const parent = "Run one read-only agent using openai_explore to inspect calculator.js, write no operation, and otherwise include the reason, but do not edit files. Verify it defines add(a,b) and supports multiply.";
+	const child = "Read-only inspection: run the agent to inspect calculator.js, write no operation, otherwise include the reason, but do not edit files; verify it defines add(a,b) and supports multiply.";
+	assert.equal(analyzeObjective(child).classification, "READ_ONLY");
+	assert.equal(routeDelegatedAgent(parent, child, "openai_explore").agent, "openai_explore");
+	assert.notEqual(canonicalDelegatedObjective(parent, child), "");
+	assert.equal(canonicalDelegatedObjective(parent, "Inspect unrelated billing secrets and include the reason"), "");
 });
 
 test("Review protocol target binding excludes unrelated scope tokens", () => {
