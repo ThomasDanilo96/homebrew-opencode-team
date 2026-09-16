@@ -57,7 +57,14 @@ test("Daily pricing is optional observability math", () => {
 
 test("Routing ignores explicitly negated mutations without hiding genuine mutations", () => {
 	assert.equal(analyzeObjective("Add multiply(a,b) to the calculator").classification, "MUTATING");
+	assert.equal(analyzeObjective("make edits to the calculator").classification, "MUTATING");
+	assert.equal(analyzeObjective("run write operations on the calculator").classification, "MUTATING");
+	assert.equal(analyzeObjective("write files for the calculator").classification, "MUTATING");
 	assert.equal(analyzeObjective("Inspect the calculator and verify it defines add(a,b)").classification, "READ_ONLY");
+	assert.equal(analyzeObjective("Inspect the calculator. Make no edits.").classification, "READ_ONLY");
+	assert.equal(analyzeObjective("Inspect the calculator. No edits.").classification, "READ_ONLY");
+	assert.equal(analyzeObjective("Inspect the calculator. Do not run any write operations.").classification, "READ_ONLY");
+	assert.equal(analyzeObjective("Inspect the calculator. Do not perform any write operations.").classification, "READ_ONLY");
   assert.equal(analyzeObjective("Read only README.md line 3. Do not modify anything and do not call task.").classification, "READ_ONLY");
   assert.equal(analyzeObjective("do not analyze, modify the file").classification, "MUTATING");
   assert.equal(analyzeObjective("Do not modify or delete files; review them").classification, "READ_ONLY");
@@ -193,6 +200,13 @@ test("Third live root/task inspection ignores response formatting while routing 
   assert.notEqual(canonical, "");
   assert.equal(routeDelegatedAgent(root, child, "openai_explore").agent, "openai_explore");
   assert.equal(canonicalDelegatedObjective(root, "Inspect unrelated billing secrets. Return exactly CALCULATOR_READONLY_OK."), "");
+});
+
+test("Exact live Daily child prompt routes read-only inspection to openai_explore", () => {
+  const root = "Delegate exactly one read-only subagent using openai_explore to inspect calculator.js. It must make no edits and return exactly the fixed sentinel DAILY_READONLY_CHILD_OK if calculator.js defines add(a, b) and exports add. Do not start any other child. Return the child's sentinel and nothing else.";
+  const child = "Read-only inspection only. Inspect calculator.js in the workspace. If it defines add(a, b) and exports add, return exactly: DAILY_READONLY_CHILD_OK. Make no edits and return nothing else.";
+  assert.equal(analyzeObjective(child).classification, "READ_ONLY");
+  assert.equal(routeDelegatedAgent(root, child, "openai_explore").agent, "openai_explore");
 });
 
 test("Review protocol target binding excludes unrelated scope tokens", () => {
