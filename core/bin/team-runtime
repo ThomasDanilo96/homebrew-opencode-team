@@ -88,7 +88,13 @@ else
   echo "Starting tmux session: $SESSION_NAME (run=$RUN_ID)"
   COLS=$(tput cols 2>/dev/null || echo 120)
   LINES=$(tput lines 2>/dev/null || echo 30)
-  tmux new-session -d -s "$SESSION_NAME" -x "$COLS" -y "$LINES" \
+  tmux_env_args=()
+  for auth_var in OPENCODE_AUTH_SOURCE OPENAI_CODEX_AUTH_SOURCE; do
+    if [ "${!auth_var+x}" = x ]; then
+      tmux_env_args+=(-e "$auth_var=${!auth_var}")
+    fi
+  done
+  tmux new-session -d "${tmux_env_args[@]}" -s "$SESSION_NAME" -x "$COLS" -y "$LINES" \
     "TEAM_RUNTIME_INNER=1 RUN_ID=$RUN_ID SESSION_MODE=$SESSION_MODE RESUME_SESSION_ID=$RESUME_SESSION_ID bash $CORE_DIR/bin/team-runtime --config '$CONFIG_FILE'"
   exec tmux attach-session -t "$SESSION_NAME"
 fi
