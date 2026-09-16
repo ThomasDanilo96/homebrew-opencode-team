@@ -23,6 +23,7 @@ usage() {
     '  opencode-team openai [--resume SESSION]' \
     '  opencode-team daily [--resume SESSION]' \
     '  opencode-team start <best|go|openai|daily> [--resume SESSION]' \
+    '  opencode-team daily-report [--markdown]' \
     '  opencode-team maintenance <best-tool-output-gc|best-retention|openai-retention|status>' \
     '  opencode-team version'
 }
@@ -478,6 +479,11 @@ case "${1:-}" in
   version)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
     printf 'OpenCode Team %s\n' "$(< "$VERSION_FILE")"
+    ;;
+  daily-report)
+    shift
+    setup_roots
+    exec env OPENAI_TEAM_STATE_ROOT="$STATE_ROOT/daily" node "$PACKAGE_ROOT/teams/daily/bin/daily-report.mjs" "$@"
     ;;
   doctor)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }

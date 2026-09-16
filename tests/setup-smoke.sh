@@ -27,4 +27,6 @@ before="$(shasum -a 256 "${CONFIG_FILES[@]}" "${TUI_FILES[@]}")"
 OPENCODE_TEAM_HOME="$TEST_ROOT" "$ROOT/bin/opencode-team" setup >/tmp/opencode-team-setup-smoke-second.out
 after="$(shasum -a 256 "${CONFIG_FILES[@]}" "${TUI_FILES[@]}")"
 test "$before" = "$after"
+report="$(OPENCODE_TEAM_HOME="$TEST_ROOT" "$ROOT/bin/opencode-team" daily-report)"
+REPORT_JSON="$report" node -e 'const report = JSON.parse(process.env.REPORT_JSON); for (const field of ["completed_tasks", "estimated_total_usd", "cache_ratio_pct", "by_model", "by_complexity"]) if (!(field in report)) process.exit(1)'
 printf '%s\n' 'SETUP SMOKE PASS'
