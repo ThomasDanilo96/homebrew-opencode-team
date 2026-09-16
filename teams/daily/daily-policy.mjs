@@ -23,7 +23,7 @@ export const DAILY_AGENT_MODELS = Object.freeze({
 
 export const DAILY_PRICING = Object.freeze({
   effective_date: "2026-09-16",
-  source: "https://openai.com/api/pricing/",
+  source: "https://platform.openai.com/docs/pricing",
   models: Object.freeze({
     "gpt-5.6-luna": tier("gpt-5.6-luna", 0.2, 0.02, 1.2),
     "gpt-5.6-terra": tier("gpt-5.6-terra", 2, 0.2, 12),
