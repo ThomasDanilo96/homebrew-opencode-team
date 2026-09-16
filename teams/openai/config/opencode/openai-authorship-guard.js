@@ -16,7 +16,7 @@ const READ_ONLY_TOOLS = new Set([
   "serena_find_declaration", "serena_find_implementations", "serena_find_referencing_symbols",
   "serena_get_diagnostics_for_file", "serena_search_for_pattern", "serena_list_memories",
   "serena_read_memory", "serena_get_current_config", "serena_list_mcp_resources",
-  "serena_read_mcp_resource",
+  "serena_read_mcp_resource", "serena_activate_project",
 ]);
 
 const UNBOUNDED_EXECUTION = new Set(["bash", "interactive_bash", "shell", "command"]);

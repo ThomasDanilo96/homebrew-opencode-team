@@ -11,14 +11,14 @@ import { readRecovery, removeRecovery, removeRecoveryAndHome, removeRecoveryHome
 import { openCodexCircuit, readCodexCircuitGeneration } from "./codex-circuit.js";
 import { resolveCodexModels } from "./codex-models.js";
 import { createRemoteReadTool } from "./openai-remote-ops.js";
-import { analyzeObjective, READ_ONLY_AGENTS, REPOSITORY_MUTATING_TOOLS } from "./openai-routing.js";
+import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective, REPOSITORY_MUTATING_TOOLS } from "./openai-routing.js";
 import { parseVerificationEvidence, postExecutionPolicy, verificationCommandCategory, isAllowlistedVerificationCommand } from "./execution-policy.js";
 import { DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, runProcessAsync } from "./process-async.js";
 import { addWorkPacketTokens, createWorkPacket, incrementWorkPacket, listWorkPackets, pruneWorkPackets, tokenEventHash, updateWorkPacket, updateWorkPacketByID, updateWorkPacketByIDIfCurrent } from "./work-packet.js";
 import { TaskStateError, claimTask, completeTask, readTask, transitionTask } from "./task-state.js";
 import { workspaceFingerprint } from "./read-cache.js";
 import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
-import { GuardrailPolicyError, admitDelegation, admitToolCall, backgroundDelegationAllowed, beginRequestCycle, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, readStopLatch, updateStopLatch, writeStopLatch } from "./openai-guardrails.js";
+import { GuardrailPolicyError, admitDelegation, admitToolCall, backgroundDelegationAllowed, beginRequestCycle, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, updateStopLatch, writeStopLatch } from "./openai-guardrails.js";
 import { guardToolExecution } from "../../../../shared/tool-output-guard.js";
 import {
   CODEX_REQUIRED,
@@ -46,6 +46,39 @@ const reservations = new Map();
 const PREMIUM_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-sol", openai_explore: "openai/gpt-5.6-luna-fast", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-terra", reviewer: "openai/gpt-5.6-sol", reviewer_critical: "openai/gpt-6-astra", specialist: "openai/gpt-6-astra", codex_executor: "openai/gpt-5.6-luna-fast" };
 const DAILY_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-luna", openai_explore: "openai/gpt-5.6-luna", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-luna", reviewer: "openai/gpt-5.6-terra", reviewer_critical: "openai/gpt-5.6-sol", specialist: "openai/gpt-5.6-terra", codex_executor: "openai/gpt-5.6-luna" };
 export const DEFAULT_AGENT_MODELS = process.env.OPENAI_DAILY_PROFILE === "1" ? DAILY_AGENT_MODELS : PREMIUM_AGENT_MODELS;
+export const latestUserObjective = (messages = []) => {
+  const latest = [...(Array.isArray(messages) ? messages : [])].reverse().find((message) => message?.info?.role === "user");
+  const text = (latest?.parts || []).filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n").trim();
+  return text || null;
+};
+export const resolveInitialObjectiveFromClient = async (client, sessionID, seen = new Set(), cache = new Map()) => {
+  if (!sessionID || seen.has(sessionID)) return null;
+  if (cache.has(sessionID)) return cache.get(sessionID);
+  const nextSeen = new Set(seen).add(sessionID);
+  if (typeof client?.session?.get !== "function") return null;
+  let session;
+  try { session = (await client.session.get({ path: { id: sessionID } }))?.data; } catch { return null; }
+  if (!session || typeof session !== "object") return null;
+  const parentID = session.parentID || session.parent_id || session.parent?.id || null;
+  if (parentID) {
+    if (parentID === sessionID || nextSeen.has(parentID)) return null;
+    const parent = await resolveInitialObjectiveFromClient(client, parentID, nextSeen, cache);
+    if (!parent?.rootSessionID) return null;
+    const result = { ...parent, parentSessionID: parent.rootSessionID };
+    cache.set(sessionID, result);
+    return result;
+  }
+  const readLatest = async (id) => {
+    try {
+      const response = await client?.session?.messages({ path: { id } });
+      return latestUserObjective(response?.data);
+    } catch { return null; }
+  };
+  const text = await readLatest(sessionID);
+  const result = text ? { objective: text, parentSessionID: null, rootSessionID: sessionID } : null;
+  cache.set(sessionID, result);
+  return result;
+};
 const authMetadataError = (label, reason) => Object.assign(new Error(`${label}_AUTH_METADATA_REFUSED:${reason}`), { code: "AUTH_METADATA_REFUSED" });
 const validatePrivateAuthFile = async (path, label) => {
   const info = await lstat(path);
@@ -357,11 +390,6 @@ const criteriaFrom = (objective) => String(objective || "").split(/\r?\n/).flatM
   const match = line.match(/^\s*(?:[-*]\s*)?(?:acceptance|criteria|expect|verify|test|check|run)\s*[:\-]?\s*(.+)$/i);
   return match ? [match[1].trim()] : [];
 });
-const routeFromAnalysis = (analysis, requestedAgent, hasCategory) => {
-  if (analysis.classification === "AMBIGUOUS" && READ_ONLY_AGENTS.has(requestedAgent)) return { classification: analysis.classification, agent: requestedAgent };
-  if (analysis.classification === "AMBIGUOUS" && hasCategory) return { classification: analysis.classification, agent: null };
-  return { classification: analysis.classification, agent: analysis.agent };
-};
 const eventMetadata = (packet, extra = {}) => ({ task_id: packet?.packet_id || (packet?.task_call_id ? objectiveHash(packet.task_call_id) : null), attempt: packet?.attempt ?? null, classification: packet?.classification || null, complexity: packet?.complexity || null, codex_profile: packet?.codex_profile || null, ...extra });
 const objectiveLogPath = () => join(process.env.OPENAI_TEAM_STATE_ROOT || "/tmp", "logs", "authorship-guard.log");
 const recordObjectiveEvent = async (event, sessionID, parentSessionID, callID, authorityState, action) => {
@@ -869,18 +897,9 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
   };
 
   const resolveInitialObjective = async (sessionID) => {
-    try {
-      const response = await pluginInput.client?.session.messages({ path: { id: sessionID } });
-      const initial = (response?.data || []).find((message) => message.info?.role === "user");
-      const text = (initial?.parts || [])
-        .filter((part) => part.type === "text" && typeof part.text === "string")
-        .map((part) => part.text)
-        .join("\n")
-        .trim();
-      return text ? { objective: text, parentSessionID: initial.info?.parentID || null } : null;
-    } catch {
-      return null;
-    }
+    const result = await resolveInitialObjectiveFromClient(pluginInput.client, sessionID, new Set(), new Map());
+    if (result?.rootSessionID && result.rootSessionID !== sessionID) masterParentBySession.set(sessionID, result.rootSessionID);
+    return result;
   };
 
   const plugin = ({
@@ -1414,8 +1433,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     guardToolExecution({ team: "openai", input, output });
     const toolName = String(input.tool || "").toLowerCase();
      let guard = await guardrailFor(input.sessionID);
-     if (toolName === "task" && guard && !guard.activeDelegation && (guard.delegations > 0 || guard.verificationTerminal)) {
-       guard = beginRequestCycle(guard, String(output.args?.prompt || output.args?.description || ""));
+     if (toolName === "task" && guard && !guard.activeDelegation && guard.delegations > 0 && !guard.verificationTerminal) {
+        guard = beginRequestCycle(guard, String(output.args?.prompt || output.args?.description || ""), Date.now(), process.env, { preserveVerificationTerminal: true });
        guardrails.set(input.sessionID, guard);
      }
     if (guard && toolName !== "openai_run_codex") guardrails.set(input.sessionID, admitToolCall(guard, toolName));
@@ -1470,8 +1489,10 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
      if (args.run_in_background === true && !backgroundDelegationAllowed()) throw new GuardrailPolicyError("BACKGROUND_DENIED");
     const currentTaskObjective = String(args.prompt || args.description || "").trim();
     const requestedAgent = String(output.args?.subagent_type || output.args?.agent || "");
-     const analysis = analyzeObjective(currentTaskObjective);
-      const route = routeFromAnalysis(analysis, requestedAgent, Boolean(args.category));
+    const fallbackParentObjective = guard?.authoritativeObjective ? "" : (await resolveInitialObjective(masterParent(input.sessionID)))?.objective || "";
+    const authoritativeParentObjective = selectAuthoritativeObjective(guard?.authoritativeObjective, fallbackParentObjective);
+    const analysis = analyzeObjective(currentTaskObjective);
+    const route = routeDelegatedAgent(authoritativeParentObjective, currentTaskObjective, requestedAgent);
     const remoteReadOnly = route.classification === "REMOTE_READ_ONLY" ||
       (/\bopenai_remote_read\b/i.test(currentTaskObjective) && route.classification !== "REMOTE_MUTATION");
     if (route.classification === "MUTATING") {
@@ -1509,16 +1530,16 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
          }
        }
        const currentGuard = guardrails.get(input.sessionID) || guard;
-       if (!currentGuard.activeDelegation && (currentGuard.delegations > 0 || currentGuard.verificationTerminal)) {
-         guardrails.set(input.sessionID, beginRequestCycle(currentGuard, currentTaskObjective));
-       }
-       const requestGuard = guardrails.get(input.sessionID) || currentGuard;
-       const parentObjective = requestGuard.objective || (await resolveInitialObjective(masterParent(input.sessionID)))?.objective;
-       requestGuard.objective = parentObjective || currentTaskObjective;
+        if (!currentGuard.activeDelegation && currentGuard.delegations > 0 && !currentGuard.verificationTerminal) {
+          guardrails.set(input.sessionID, beginRequestCycle(currentGuard, currentTaskObjective, Date.now(), process.env, { preserveVerificationTerminal: true }));
+        }
+        const requestGuard = guardrails.get(input.sessionID) || currentGuard;
+        const parentObjective = selectAuthoritativeObjective(requestGuard.authoritativeObjective, authoritativeParentObjective);
+        requestGuard.objective = requestGuard.objective || currentTaskObjective;
        const reviewDelegation = ["reviewer", "reviewer_critical"].includes(agent);
        guardrails.set(input.sessionID, admitDelegation(reviewDelegation ? { ...requestGuard, objective: currentTaskObjective } : requestGuard, currentTaskObjective, {
          review: reviewDelegation,
-         explicitlyRequestedReview: /\b(?:review|audit)\b/i.test(parentObjective || ""),
+          explicitlyRequestedReview: /\b(?:review|audit)\b/i.test(parentObjective || ""),
        }));
      }
     const resolvedModel = String(output.args?.model || "");
@@ -1841,7 +1862,35 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         if (String(info?.role || "").toLowerCase() === "user") {
           const text = (event.properties?.parts || event.properties?.message?.parts || []).filter((part) => part?.type === "text").map((part) => part.text).join(" ");
           const sessionID = event.properties?.sessionID || info.sessionID;
-           if (sessionID && !isInternalContinuation(text)) { const state = await guardrailFor(sessionID); const cycled = beginRequestCycle(state, text); const next = updateStopLatch(cycled, text, true); guardrails.set(sessionID, next); await writeStopLatch(process.env.OPENAI_TEAM_STATE_ROOT, sessionID, next); }
+           if (sessionID && !isInternalContinuation(text)) {
+             const state = await guardrailFor(sessionID);
+             const mappedRoot = masterParentBySession.get(sessionID);
+             const resolved = await resolveInitialObjective(sessionID);
+             const rootSessionID = mappedRoot || resolved?.rootSessionID;
+             const childSession = Boolean(rootSessionID && rootSessionID !== sessionID);
+             if (childSession && resolved?.rootSessionID) masterParentBySession.set(sessionID, resolved.rootSessionID);
+             const positivelyIdentifiedRoot = resolved?.rootSessionID === sessionID && resolved.parentSessionID == null;
+             if (childSession) {
+               const rootState = rootSessionID ? guardrails.get(rootSessionID) : null;
+               const next = preserveChildGuardState(state, rootState, resolved?.objective);
+               guardrails.set(sessionID, next);
+               await writeStopLatch(process.env.OPENAI_TEAM_STATE_ROOT, sessionID, next);
+               return;
+             }
+             if (!positivelyIdentifiedRoot) {
+               guardrails.set(sessionID, state);
+               return;
+             }
+             const cycled = beginRequestCycle(state, text, Date.now(), process.env, { preserveVerificationTerminal: !positivelyIdentifiedRoot });
+             const next = positivelyIdentifiedRoot ? updateStopLatch(cycled, text, true) : {
+               ...cycled,
+               stopped: state.stopped,
+               verificationTerminal: state.verificationTerminal,
+               authoritativeObjective: state.authoritativeObjective || null,
+             };
+             guardrails.set(sessionID, next);
+             await writeStopLatch(process.env.OPENAI_TEAM_STATE_ROOT, sessionID, next);
+           }
         }
         if (info?.role === "assistant" && info.finish != null && info.tokens && rememberCompletedMessage(info.id)) {
         const tokens = info.tokens;

@@ -2,9 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { dailyCost, dailyFanout, DAILY_AGENT_MODELS, DAILY_PRICING } from "../teams/daily/daily-policy.mjs";
-import { backgroundDelegationAllowed, beginRequestCycle, admitDelegation, finishDelegation, GuardrailPolicyError } from "../teams/openai/config/opencode/openai-guardrails.js";
+import { backgroundDelegationAllowed, beginRequestCycle, admitDelegation, finishDelegation, GuardrailPolicyError, preserveChildGuardState, updateStopLatch } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
-import { analyzeObjective } from "../teams/openai/config/opencode/openai-routing.js";
+import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
+import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
+import { latestUserObjective, resolveInitialObjectiveFromClient } from "../teams/openai/config/opencode/openai-team-tools.js";
 
 test("Daily uses OpenAI-only model tiers", () => {
   assert.equal(DAILY_AGENT_MODELS.openai_orchestrator, "openai/gpt-5.6-luna");
@@ -33,6 +35,120 @@ test("Routing ignores explicitly negated mutations without hiding genuine mutati
   assert.equal(analyzeObjective("do not ever modify files").classification, "READ_ONLY");
   assert.equal(analyzeObjective("do not modify files, but delete the file").classification, "MUTATING");
   assert.equal(analyzeObjective("do not modify files; then delete the file").classification, "MUTATING");
+});
+
+test("Serena project activation is read-only for the authorship guard", async () => {
+  const guard = await OpenAIAuthorshipGuard();
+  await assert.doesNotReject(() => guard["tool.execute.before"]({
+    agent: "openai_orchestrator", sessionID: "serena-read-only-test", tool: "serena_activate_project",
+  }, { args: {} }));
+});
+
+test("Child review wording cannot override an explicitly requested read-only agent", () => {
+  assert.equal(routeDelegatedAgent("Inspect the fixture structure", "Review the fixture structure", "openai_explore").agent, "openai_explore");
+  assert.equal(routeDelegatedAgent("Review the fixture structure", "Review the fixture structure", "openai_explore").agent, "reviewer");
+  assert.equal(routeDelegatedAgent("Critical security review of the fixture", "Review the fixture structure", "openai_explore").agent, "reviewer_critical");
+  assert.equal(routeDelegatedAgent("Inspect the fixture structure", "Review the fixture structure", "reviewer").agent, "reviewer");
+  assert.equal(routeDelegatedAgent("Inspect the fixture structure", "Modify the fixture", "openai_explore").agent, "codex_executor");
+});
+
+test("Routing uses the current request objective instead of an older session turn", () => {
+  assert.equal(selectAuthoritativeObjective("Inspect the fixture structure", "Review the old implementation"), "Inspect the fixture structure");
+  assert.equal(selectAuthoritativeObjective("Review the current implementation", "Inspect the old fixture"), "Review the current implementation");
+  assert.equal(routeDelegatedAgent(selectAuthoritativeObjective("Inspect the fixture", "Review the old implementation"), "Review the fixture", "openai_explore").agent, "openai_explore");
+  assert.equal(routeDelegatedAgent(selectAuthoritativeObjective("Review the current implementation", "Inspect the old fixture"), "Inspect the implementation", "openai_explore").agent, "reviewer");
+});
+
+test("Guardrail authority survives operational sequential cycles and terminal verification", () => {
+  const user = beginRequestCycle(undefined, "Inspect the fixture", 1);
+  const sequential = beginRequestCycle({ ...user, delegations: 1 }, "Review the fixture", 2, process.env, { preserveVerificationTerminal: true });
+  assert.equal(sequential.objective, "Review the fixture");
+  assert.equal(sequential.authoritativeObjective, "Inspect the fixture");
+  assert.deepEqual(beginRequestCycle({ ...user, verificationTerminal: true }, "Review the fixture", 2, process.env, { preserveVerificationTerminal: true }), { ...user, verificationTerminal: true });
+  const reviewed = beginRequestCycle(undefined, "Review the fixture", 3);
+  assert.equal(reviewed.authoritativeObjective, "Review the fixture");
+});
+
+test("Objective recovery selects the latest root user message and safely follows resumed parents", async () => {
+  const sessions = {
+    root: { id: "root", parentID: null },
+    child: { id: "child", parentID: "root" },
+  };
+  const messages = {
+    root: [
+      { info: { role: "user" }, parts: [{ type: "text", text: "Inspect the old fixture" }] },
+      { info: { role: "user" }, parts: [{ type: "text", text: "Review the current fixture" }] },
+    ],
+    child: [{ info: { role: "user" }, parts: [{ type: "text", text: "Review synthetic child prompt" }] }],
+  };
+  const client = { session: {
+    get: async ({ path: { id } }) => ({ data: sessions[id] }),
+    messages: async ({ path: { id } }) => ({ data: messages[id] }),
+  } };
+  assert.equal(latestUserObjective(messages.root), "Review the current fixture");
+  const resolved = await resolveInitialObjectiveFromClient(client, "child");
+  assert.deepEqual(resolved, { objective: "Review the current fixture", parentSessionID: "root", rootSessionID: "root" });
+});
+
+test("Objective recovery falls back on lookup failure and breaks parent loops", async () => {
+  const failing = { session: { get: async () => { throw new Error("unavailable"); }, messages: async () => ({ data: [{ info: { role: "user" }, parts: [{ type: "text", text: "Review synthetic child" }] }] }) } };
+  assert.equal(await resolveInitialObjectiveFromClient(failing, "child"), null);
+  const loop = { session: { get: async ({ path: { id } }) => ({ data: { id, parentID: id === "a" ? "b" : "a" } }), messages: async ({ path: { id } }) => ({ data: [{ info: { role: "user" }, parts: [{ type: "text", text: `Inspect ${id}` }] }] }) } };
+  assert.equal(await resolveInitialObjectiveFromClient(loop, "a"), null);
+  assert.equal(routeDelegatedAgent(null, "Review synthetic child", "openai_explore").agent, "openai_explore");
+});
+
+test("Objective recovery has fresh per-call root reads", async () => {
+  let current = "Inspect the fixture";
+  const client = { session: {
+    get: async () => ({ data: { id: "root", parentID: null } }),
+    messages: async () => ({ data: [{ info: { role: "user" }, parts: [{ type: "text", text: current }] }] }),
+  } };
+  assert.equal((await resolveInitialObjectiveFromClient(client, "root")).objective, "Inspect the fixture");
+  current = "Review the fixture";
+  assert.equal((await resolveInitialObjectiveFromClient(client, "root")).objective, "Review the fixture");
+});
+
+test("Synthetic child messages preserve the inherited guard without resuming it", () => {
+  const root = { ...beginRequestCycle(undefined, "Inspect the fixture", 1), activeDelegation: true, activeDelegations: 1, toolCalls: 7, weightedUnits: 8, stopped: true, verificationTerminal: true };
+  const child = preserveChildGuardState(beginRequestCycle(undefined, "Review synthetic child", 2), root, "Inspect the fixture");
+  assert.equal(child.activeDelegation, true);
+  assert.equal(child.activeDelegations, 1);
+  assert.equal(child.toolCalls, 7);
+  assert.equal(child.weightedUnits, 8);
+  assert.equal(child.stopped, true);
+  assert.equal(child.verificationTerminal, true);
+  assert.equal(child.authoritativeObjective, "Inspect the fixture");
+  assert.equal(child.stopped, true);
+  assert.equal(updateStopLatch(beginRequestCycle({ ...root, verificationTerminal: false }, "Inspect the fixture", 3), "Continue", true).stopped, false);
+});
+
+test("Cold child state remains the local monotonic base", () => {
+  const root = { ...beginRequestCycle(undefined, "Inspect the fixture", 1), stopped: false, authoritativeObjective: "Inspect the fixture" };
+  const coldChild = { ...beginRequestCycle(undefined, "Review synthetic child", 2), stopped: true, budgetTerminal: true, toolCalls: 9, weightedUnits: 11, authoritativeObjective: null };
+  const merged = preserveChildGuardState(coldChild, root, "Inspect the fixture");
+  assert.equal(merged.stopped, true);
+  assert.equal(merged.budgetTerminal, true);
+  assert.equal(merged.toolCalls, 9);
+  assert.equal(merged.weightedUnits, 11);
+  assert.equal(merged.authoritativeObjective, "Inspect the fixture");
+  const rootStopped = preserveChildGuardState({ ...coldChild, stopped: false }, { ...root, stopped: true }, "Inspect the fixture");
+  assert.equal(rootStopped.stopped, true);
+});
+
+test("Cold child delegation marker is internally consistent", () => {
+  const merged = preserveChildGuardState(
+    { ...beginRequestCycle(undefined, "Inspect child", 1), activeDelegations: 0, activeDelegation: false },
+    { ...beginRequestCycle(undefined, "Inspect root", 1), activeDelegations: 0, activeDelegation: false },
+    "Inspect root",
+  );
+  assert.equal(merged.activeDelegations, 1);
+  assert.equal(merged.activeDelegation, true);
+  assert.throws(() => admitDelegation(merged, "Inspect root", { review: false }), /CONCURRENT_DELEGATION/);
+
+  const normal = beginRequestCycle(undefined, "Inspect normally", 1);
+  assert.equal(normal.activeDelegation, false);
+  assert.equal(admitDelegation(normal, "Inspect normally").activeDelegation, true);
 });
 
 test("OpenCode path plugins expose ids on their default objects", async () => {

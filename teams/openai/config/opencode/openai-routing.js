@@ -77,4 +77,29 @@ export const routeObjective = (objective, requestedAgent = "", hasCategory = fal
   return { classification: analysis.classification, agent: analysis.agent };
 };
 
+export const selectAuthoritativeObjective = (currentObjective, fallbackObjective = "") =>
+  String(currentObjective || "").trim() || String(fallbackObjective || "").trim();
+
+export const routeDelegatedAgent = (parentObjective, childObjective, requestedAgent = "") => {
+  const analysis = analyzeObjective(childObjective);
+  if (analysis.classification === "MUTATING" || analysis.classification === "REMOTE_MUTATION") {
+    return { classification: analysis.classification, agent: analysis.agent };
+  }
+  if (analysis.classification === "REMOTE_READ_ONLY") {
+    return { classification: analysis.classification, agent: analysis.agent };
+  }
+  if (requestedAgent === "reviewer" || requestedAgent === "reviewer_critical") {
+    return { classification: analysis.classification, agent: requestedAgent };
+  }
+  const parentRequestsReview = EXPLICIT_REVIEW.test(String(parentObjective || ""));
+  if (parentRequestsReview && analysis.classification === "READ_ONLY") {
+    const parentIsCriticalReview = CRITICAL_AUDIT_OR_REVIEW.test(String(parentObjective || ""));
+    return { classification: analysis.classification, agent: parentIsCriticalReview ? "reviewer_critical" : "reviewer" };
+  }
+  if (READ_ONLY_AGENTS.has(requestedAgent)) {
+    return { classification: analysis.classification, agent: requestedAgent };
+  }
+  return routeObjective(childObjective, requestedAgent);
+};
+
 export { READ_ONLY_AGENTS, REPOSITORY_MUTATING_TOOLS };
