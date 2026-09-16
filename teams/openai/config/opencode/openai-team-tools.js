@@ -18,7 +18,7 @@ import { addWorkPacketTokens, createWorkPacket, incrementWorkPacket, listWorkPac
 import { TaskStateError, claimTask, completeTask, readTask, transitionTask } from "./task-state.js";
 import { workspaceFingerprint } from "./read-cache.js";
 import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
-import { GuardrailPolicyError, admitDelegation, admitToolCall, backgroundDelegationAllowed, beginRequestCycle, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, updateStopLatch, writeStopLatch } from "./openai-guardrails.js";
+import { GuardrailPolicyError, admitDelegation, admitToolCall, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, updateStopLatch, writeStopLatch } from "./openai-guardrails.js";
 import { guardToolExecution } from "../../../../shared/tool-output-guard.js";
 import {
   CODEX_REQUIRED,
@@ -1498,12 +1498,13 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     if (toolName !== "task") return;
     const args = output.args || {};
      if (args.run_in_background === true && !backgroundDelegationAllowed()) throw new GuardrailPolicyError("BACKGROUND_DENIED");
-    const currentTaskObjective = String(args.prompt || args.description || "").trim();
-    const requestedAgent = String(output.args?.subagent_type || output.args?.agent || "");
-    const fallbackParentObjective = guard?.authoritativeObjective ? "" : (await resolveInitialObjective(masterParent(input.sessionID)))?.objective || "";
-    const authoritativeParentObjective = selectAuthoritativeObjective(guard?.authoritativeObjective, fallbackParentObjective);
-    const analysis = analyzeObjective(currentTaskObjective);
-    const route = routeDelegatedAgent(authoritativeParentObjective, currentTaskObjective, requestedAgent);
+     const currentTaskObjective = String(args.prompt || args.description || "").trim();
+     const requestedAgent = String(output.args?.subagent_type || output.args?.agent || "");
+     const fallbackParentObjective = guard?.authoritativeObjective ? "" : (await resolveInitialObjective(masterParent(input.sessionID)))?.objective || "";
+     const authoritativeParentObjective = selectAuthoritativeObjective(guard?.authoritativeObjective, fallbackParentObjective);
+     const analysis = analyzeObjective(currentTaskObjective);
+     if (!authoritativeParentObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
+     const route = routeDelegatedAgent(authoritativeParentObjective, currentTaskObjective, requestedAgent);
     const remoteReadOnly = route.classification === "REMOTE_READ_ONLY" ||
       (/\bopenai_remote_read\b/i.test(currentTaskObjective) && route.classification !== "REMOTE_MUTATION");
     if (route.classification === "MUTATING") {
@@ -1527,31 +1528,47 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       throw new Error("Native task category dispatch is ambiguous or unsupported for the OpenAI team; specify an approved OpenAI subagent_type.");
     }
     let agent = String(output.args?.subagent_type || output.args?.agent || "");
-     const allowedTaskAgents = new Set(["codex_executor", "openai_librarian", "openai_explore", "openai_ops", "tester", "reviewer", "reviewer_critical", "specialist"]);
-     if (!allowedTaskAgents.has(agent)) throw new Error(`Native task agent '${agent || "(missing)"}' is not allowed for the OpenAI team.`);
-     if (guard) {
+      const allowedTaskAgents = new Set(["codex_executor", "openai_librarian", "openai_explore", "openai_ops", "tester", "reviewer", "reviewer_critical", "specialist"]);
+      if (!allowedTaskAgents.has(agent)) throw new Error(`Native task agent '${agent || "(missing)"}' is not allowed for the OpenAI team.`);
+      const rootParent = masterParent(input.sessionID);
+      let reviewTaskID = ["reviewer", "reviewer_critical"].includes(agent) ? (currentTaskObjective.match(/\breview_task_id=([a-f0-9]{64})\b/i) || [])[1]?.toLowerCase() : null;
+      let reviewTarget = null;
+      let gateTarget = null;
+      if (["reviewer", "reviewer_critical"].includes(agent)) {
+        if (!reviewTaskID) throw new Error("REVIEW_TASK_ID_REQUIRED");
+        reviewTarget = (await listWorkPackets()).find((packet) => packet.packet_id === reviewTaskID);
+        const requiredRisk = agent === "reviewer_critical" ? "critical" : "high";
+        if (!reviewTarget || reviewTarget.parent_session_id !== rootParent || reviewTarget.review_required !== true || reviewTarget.risk !== requiredRisk || reviewTarget.review_status !== "pending") throw new Error("REVIEW_TARGET_DENIED");
+        gateTarget = await gateTargetSnapshot(reviewTarget);
+        if (!gateTarget) throw new Error("REVIEW_TARGET_DENIED");
+      }
+      const delegatedObjective = canonicalDelegatedObjective(authoritativeParentObjective, currentTaskObjective, { targetBound: Boolean(reviewTarget) });
+      if (!delegatedObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
+      output.args.prompt = delegatedObjective;
+      if (guard) {
        if (guard.activeDelegation) {
          const parent = masterParent(input.sessionID);
          const active = [...reservations.values()].find((entry) => entry.master_parent_session_id === parent && entry.token);
          try {
            await readFile(join(process.env.OPENAI_TEAM_STATE_ROOT || "/tmp", "active", `${active?.token}.json`), "utf8");
          } catch {
-            const released = finishDelegation(guard, false, delegationScope(currentTaskObjective));
+            const released = finishDelegation(guard, false, active?.delegation_scope || null);
            guardrails.set(input.sessionID, { ...released, objective: currentTaskObjective, delegations: 0, weightedUnits: 0 });
          }
-       }
-       const currentGuard = guardrails.get(input.sessionID) || guard;
-        if (!currentGuard.activeDelegation && currentGuard.delegations > 0 && !currentGuard.verificationTerminal) {
-          guardrails.set(input.sessionID, beginRequestCycle(currentGuard, currentTaskObjective, Date.now(), process.env, { preserveVerificationTerminal: true }));
-        }
+         }
+         const currentGuard = guardrails.get(input.sessionID) || guard;
+         if (!currentGuard.activeDelegation && currentGuard.delegations > 0 && !currentGuard.verificationTerminal) {
+           const rootAuthority = currentGuard.authoritativeObjective || authoritativeParentObjective;
+           guardrails.set(input.sessionID, { ...beginRequestCycle(currentGuard, currentTaskObjective, Date.now(), process.env, { preserveVerificationTerminal: true }), authoritativeObjective: rootAuthority });
+         }
         const requestGuard = guardrails.get(input.sessionID) || currentGuard;
-        const parentObjective = selectAuthoritativeObjective(requestGuard.authoritativeObjective, authoritativeParentObjective);
-        requestGuard.objective = requestGuard.objective || currentTaskObjective;
-       const reviewDelegation = ["reviewer", "reviewer_critical"].includes(agent);
-       guardrails.set(input.sessionID, admitDelegation(reviewDelegation ? { ...requestGuard, objective: currentTaskObjective } : requestGuard, currentTaskObjective, {
-         review: reviewDelegation,
-          explicitlyRequestedReview: /\b(?:review|audit)\b/i.test(parentObjective || ""),
-       }));
+         const parentObjective = selectAuthoritativeObjective(requestGuard.authoritativeObjective, authoritativeParentObjective);
+         requestGuard.objective = parentObjective;
+        const reviewDelegation = ["reviewer", "reviewer_critical"].includes(agent);
+         guardrails.set(input.sessionID, admitDelegation({ ...requestGuard, objective: parentObjective }, delegatedObjective, {
+          review: reviewDelegation,
+           explicitlyRequestedReview: /\b(?:review|audit)\b/i.test(parentObjective || "") || Boolean(reviewTarget),
+        }));
      }
     const resolvedModel = String(output.args?.model || "");
     if (resolvedModel && !resolvedModel.startsWith("openai/")) {
@@ -1563,20 +1580,9 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     }
     const weights = { openai_explore: 1, openai_librarian: 1, openai_ops: 1, tester: 2, reviewer: 3, reviewer_critical: 3, specialist: 3, codex_executor: 2 };
     const weight = weights[agent] || 1;
-    const rootParent = masterParent(input.sessionID);
-    const discoveryGroupID = analysis.discovery_agents.length ? objectiveHash(`${rootParent}\n${objectiveHash(currentTaskObjective)}`) : null;
-    let reviewTaskID = ["reviewer", "reviewer_critical"].includes(agent) ? (currentTaskObjective.match(/\breview_task_id=([a-f0-9]{64})\b/i) || [])[1]?.toLowerCase() : null;
-    let testTaskID = agent === "tester" ? (currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i) || [])[1]?.toLowerCase() : null;
-    let gateTarget = null;
-    if (["reviewer", "reviewer_critical"].includes(agent)) {
-      if (!reviewTaskID) throw new Error("REVIEW_TASK_ID_REQUIRED");
-      const target = (await listWorkPackets()).find((packet) => packet.packet_id === reviewTaskID);
-      const requiredRisk = agent === "reviewer_critical" ? "critical" : "high";
-      if (!target || target.parent_session_id !== rootParent || target.risk !== requiredRisk || target.review_status !== "pending") throw new Error("REVIEW_TARGET_DENIED");
-      gateTarget = await gateTargetSnapshot(target);
-      if (!gateTarget) throw new Error("REVIEW_TARGET_DENIED");
-    }
-    if (agent === "tester") {
+     const discoveryGroupID = analysis.discovery_agents.length ? objectiveHash(`${rootParent}\n${objectiveHash(currentTaskObjective)}`) : null;
+     let testTaskID = agent === "tester" ? (currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i) || [])[1]?.toLowerCase() : null;
+     if (agent === "tester") {
       const packets = await listWorkPackets();
       const pendingGates = packets.filter((packet) => packet.parent_session_id === rootParent && ["pending", "required"].includes(packet.tester_status));
       const gateIntent = /\b(?:gate|gated|verification[_ -]?gate|release[_ -]?gate)\b/i.test(currentTaskObjective);
@@ -1609,8 +1615,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       ? await workspaceFingerprint({ repository: input.directory || input.worktree || process.cwd(), agent, model: selectedModel, policyVersion: "read-cache-v1" }, { runProcess: pluginInput.runProcess })
       : { cacheable: false, fingerprint: null, reason: remoteReadOnly ? "remote_read_only" : "not_local_read_only" };
     const cacheableRead = localReadOnly && workspace.cacheable;
-    const fingerprint = objectiveHash(`${canonicalObjective(currentTaskObjective)}\n${rootParent}\n${agent}${cacheableRead ? `\n${workspace.fingerprint}` : agent === "codex_executor" ? "\nresumable-codex-v1" : `\nnonce:${createHash("sha256").update(`${input.callID}:${Date.now()}:${Math.random()}`).digest("hex")}`}`);
-    const claim = await claimTask({ task_fingerprint: fingerprint, objective_sha256: objectiveHash(currentTaskObjective), parent_session_id: rootParent, agent, first_call_id: input.callID, packet_id: input.callID });
+     const fingerprint = objectiveHash(`${canonicalObjective(delegatedObjective)}\n${rootParent}\n${agent}${cacheableRead ? `\n${workspace.fingerprint}` : agent === "codex_executor" ? "\nresumable-codex-v1" : `\nnonce:${createHash("sha256").update(`${input.callID}:${Date.now()}:${Math.random()}`).digest("hex")}`}`);
+     const claim = await claimTask({ task_fingerprint: fingerprint, objective_sha256: objectiveHash(delegatedObjective), parent_session_id: rootParent, agent, first_call_id: input.callID, packet_id: input.callID });
     if (!claim.owner) {
       if (claim.disposition === "ACTIVE_DUPLICATE") throw new TaskStateError("TASK_DUPLICATE_ACTIVE", { task_id: fingerprint, attempt: claim.record.attempt, phase: "task_admission" });
       if (cacheableRead && claim.record.state === "COMPLETED") throw new TaskStateError("TASK_CACHE_HIT", { task_id: fingerprint, phase: "task_admission", status: claim.record.state, result_summary: claim.record.result_summary });
@@ -1663,15 +1669,15 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       weight,
       background: Boolean(output.args?.run_in_background),
       started_at: Date.now(),
-      authoritative_objective: agent === "codex_executor" ? currentTaskObjective : "",
+      authoritative_objective: agent === "codex_executor" ? delegatedObjective : "",
        review_task_id: reviewTaskID, test_task_id: testTaskID, gate_target: gateTarget,
-       objective_sha256: objectiveHash(currentTaskObjective),
+       objective_sha256: objectiveHash(delegatedObjective),
         classification: route.classification, cacheable_read: cacheableRead, ...packetMetadata, test_task_id: testTaskID,
-        task_id: fingerprint, task_state_version: claim.record.version, task_lease_id: claim.record.lease_id, task_fingerprint: fingerprint, packet_id: claim.record.packet_id, delegation_scope: delegationScope(currentTaskObjective),
+         task_id: fingerprint, task_state_version: claim.record.version, task_lease_id: claim.record.lease_id, task_fingerprint: fingerprint, packet_id: claim.record.packet_id, delegation_scope: delegationScope(delegatedObjective),
     });
     try {
       await createWorkPacket(input.callID, {
-        objective_sha256: objectiveHash(currentTaskObjective), parent_session_id: rootParent,
+        objective_sha256: objectiveHash(delegatedObjective), parent_session_id: rootParent,
         agent, classification: route.classification, phase: "admitted", outcome: "pending",
          admission_wait_ms: elapsed(admissionStartedAt),
          ...packetMetadata, review_task_id: reviewTaskID, test_task_id: testTaskID, gate_target: gateTarget ? (reviewTaskID || testTaskID) : null,

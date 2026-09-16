@@ -14,7 +14,7 @@ const INTERNAL = /OMO_INTERNAL_INITIATOR|OH-MY-OPENCODE/i;
 const LONG = /\b(?:authorize|authorise|approved?|consent(?:ed)?)\b[^\n]{0,40}\b(?:long[- ]work|long[- ]running|duration|hours?)\b|\b(?:long[- ]work|long[- ]running|duration|hours?)\b[^\n]{0,40}\b(?:authorize|authorise|approved?|consent)\b/i;
 const COMPLEX = /\b(?:complex|multi[- ]step|cross[- ](?:service|repository)|end[- ]to[- ]end|integration|migrat|refactor|architecture)\b/i;
 const QUICK = /\b(?:quick(?:ly)?|simple|small|brief|just\s+(?:tell|show|read|check)|what\s+is|how\s+do\s+i)\b/i;
-const CATEGORIES = Object.freeze({ push: /\bpush(?:ing)?\b/i, deploy: /\bdeploy(?:ment|ing)?\b/i, cron: /\bcron(?:tab|job)?\b/i, vps_ssh: /\b(?:vps|ssh)\b/i, destructive: /\b(?:destruct(?:ive|ion)|delete|remove|drop|reset|rm)\b/i });
+const CATEGORIES = Object.freeze({ push: /\bpush(?:ing)?\b/i, deploy: /\bdeploy(?:ment|ing)?\b/i, cron: /\bcron(?:tab|job)?\b/i, vps_ssh: /\b(?:vps|ssh)\b/i, destructive: /(?:\b(?:destruct(?:ive|ion)|delet(?:e|ing|ed|ion)|remov(?:e|ing|ed)|drop(?:ping|ped)?|reset(?:ting|ted)?|rm)\b|删除|移除|丢弃|重置|消除|\b(?:elimina|eliminare|rimuovi|rimuovere|cancella|cancellare|reimposta|eliminar|borrar|borra)\b)/iu });
 const bounded = (value, fallback, [min, max]) => { const n = Number(value); return Number.isInteger(n) && n >= min && n <= max ? n : fallback; };
 export const readGuardrailLimits = (env = process.env, base = DEFAULT_GUARDRAIL_LIMITS, bounds = BOUNDS) => ({
   minutes: bounded(env.OPENAI_GUARDRAIL_MINUTES ?? env.OPENAI_REQUEST_MAX_MINUTES, base.minutes, bounds.minutes),
@@ -63,11 +63,62 @@ export const recoverRootRequestState = (state = createGuardrailState(), objectiv
   };
 };
 export const confirmationCategory = (operation) => Object.entries(CATEGORIES).find(([, pattern]) => pattern.test(String(operation || "")))?.[0] || null;
-export const explicitlyConfirms = (request, category) => Boolean(category && CATEGORIES[category] && !/\b(?:continue|go ahead|proceed)\b/i.test(String(request || "")) && /\b(?:authorize|authorise|confirm|explicitly|approved?|consent|yes|do)\b/i.test(String(request || "")) && CATEGORIES[category].test(String(request || "")));
+const negatedCategoryAction = (request, category) => category === "destructive" && /(?:(?:\b(?:do\s+not|don['’]t|must\s+not|never|no)\b|不(?:要|得)?|禁止|别|\bnon\b|\bno\b)[^\n]{0,40}(?:\b(?:destruct(?:ive|ion)|delet(?:e|ing|ed|ion)|remov(?:e|ing|ed)|drop(?:ping|ped)?|reset(?:ting|ted)?|rm)\b|删除|移除|丢弃|重置|消除|\b(?:elimina|eliminare|rimuovi|rimuovere|cancella|cancellare|reimposta|eliminar|elimine|rimuovere|borrar|borra)\b))/iu.test(String(request || ""));
+export const explicitlyConfirms = (request, category) => Boolean(category && CATEGORIES[category] && !/\b(?:continue|go ahead|proceed)\b/i.test(String(request || "")) && !negatedCategoryAction(request, category) && /(?:\b(?:authorize|authorise|confirm|explicitly|approved?|consent|yes|conferma|confermato|approva|autorizza)\b|确认|同意|批准)/iu.test(String(request || "")) && CATEGORIES[category].test(String(request || "")));
 export const requiresExplicitConfirmation = (operation) => confirmationCategory(operation) !== null;
 export class GuardrailPolicyError extends Error { constructor(reason, details = {}) { super(`OPENAI_GUARDRAIL_${reason}: stop and report state; do not create todos or retry.`); this.name = "GuardrailPolicyError"; this.code = `OPENAI_GUARDRAIL_${reason}`; this.policy = { type: "policy_error", reason, stop: true, retry: false, ...details }; } }
 export const objectiveIsBound = (authoritative, delegated) => { const a = String(authoritative || "").trim().replace(/\s+/g, " ").toLowerCase(), d = String(delegated || "").trim().replace(/\s+/g, " ").toLowerCase(); return Boolean(a && d && (a === d || d.includes(a) || a.includes(d))); };
-export const delegationScope = (objective) => String(objective || "").trim().replace(/\s+/g, " ").toLowerCase();
+const GENERIC_OBJECTIVE_TOKENS = new Set(["a", "an", "and", "add", "all", "apply", "change", "code", "create", "delete", "do", "file", "files", "fix", "for", "implement", "in", "inspect", "into", "make", "modify", "of", "on", "or", "patch", "read", "refactor", "rename", "review", "task", "test", "tests", "the", "to", "update", "work"]);
+const normalizedScopeText = (value) => String(value || "").normalize("NFKC").trim().replace(/^[;,.:\-]+\s*|\s*[;,.:\-]+$/gu, "").replace(/\s+/gu, " ").toLowerCase();
+const SCOPE_ACTION_WORDS = /\b(?:add|create|modify|change|implement|refactor|patch|delete|remove|drop|reset|rm|rename|update|fix|deploy|review|inspect|verify|approve|reject|confirm|completed?|work)\b|新增|添加|修改|更改|实现|重构|补丁|删除|移除|丢弃|重置|修复|确认|同意|批准|\b(?:aggiungi|crea|modifica|cambia|implementa|rifattorizza|elimina|rimuovi|reimposta|correggi|recensisci|verifica|approva|rifiuta|revisar|revisa|eliminar|elimina|borrar|borra)\b/giu;
+const objectiveTokens = (value) => normalizedScopeText(value).replace(SCOPE_ACTION_WORDS, " ").match(/[\p{L}\p{N}]+(?:[._-][\p{L}\p{N}]+)*/gu)?.filter((token) => token.length > 2 && !GENERIC_OBJECTIVE_TOKENS.has(token)) || [];
+const canonicalParts = (value) => String(value || "").match(/^Parent objective \(verbatim\):\n([\s\S]*?)\nDelegated scope:\n([\s\S]*)$/);
+const MUTATING_INTENT = /(?:\b(?:add|create|modify|change|implement|refactor|patch|delete|remove|drop|reset|rm|rename|update|fix|deploy)\b|新增|添加|修改|更改|实现|重构|补丁|删除|移除|丢弃|重置|修复|\b(?:aggiungi|crea|modifica|cambia|implementa|rifattorizza|elimina|rimuovi|reimposta|correggi|revisar|revisa|eliminar|elimina|borrar|borra)\b)/iu;
+const DESTRUCTIVE_INTENT = /(?:\b(?:delet(?:e|ing|ed|ion)|remov(?:e|ing|ed)|drop(?:ping|ped)?|reset(?:ting|ted)?|rm|destroy|erase)\b|删除|移除|丢弃|重置|消除|\b(?:elimina|eliminare|rimuovi|rimuovere|cancella|cancellare|reimposta|eliminar|borrar|borra)\b)/iu;
+const REVIEW_TASK_ID = /\breview_task_id\s*=\s*[a-f0-9]{64}\b/iu;
+const REVIEW_PROTOCOL_WORDS = new Set(["approve", "approves", "approved", "completed", "critical", "findings", "finding", "inspect", "inspection", "reject", "rejects", "result", "results", "review", "reviewed", "verify", "verification", "work"]);
+const pureReviewProtocolScope = (value) => {
+  const text = normalizedScopeText(value);
+  if (!REVIEW_TASK_ID.test(text)) return false;
+  const protocol = text.replace(REVIEW_TASK_ID, " ");
+  const tokens = protocol.match(/[\p{L}\p{N}]+(?:[._-][\p{L}\p{N}]+)*/gu) || [];
+  return tokens.length > 0 && tokens.every((token) => REVIEW_PROTOCOL_WORDS.has(token));
+};
+export const delegatedScopeIsBound = (parentObjective, normalizedScope, { targetBound = false } = {}) => {
+  const parent = normalizedScopeText(parentObjective);
+  const scope = normalizedScopeText(normalizedScope);
+  if (!parent || !scope) return false;
+  if (parent === scope) return true;
+  const parentAnalysis = analyzeObjective(parent);
+  const scopeAnalysis = analyzeObjective(scope);
+  if (scopeAnalysis.classification === "MUTATING" && parentAnalysis.classification !== "MUTATING") return false;
+  const parentMutating = parentAnalysis.classification === "MUTATING" || MUTATING_INTENT.test(parent);
+  const childMutating = scopeAnalysis.classification === "MUTATING" || MUTATING_INTENT.test(scope);
+  const parentDestructive = DESTRUCTIVE_INTENT.test(parent) && explicitlyConfirms(parent, "destructive");
+  const childDestructive = DESTRUCTIVE_INTENT.test(scope);
+  if (childDestructive && !parentDestructive) return false;
+  if (childMutating && !parentMutating) return false;
+  if (targetBound) return pureReviewProtocolScope(scope);
+  const parentTokens = new Set(objectiveTokens(parent));
+  const childTokens = objectiveTokens(scope);
+  const parentDomain = normalizedScopeText(parent.replace(SCOPE_ACTION_WORDS, " "));
+  const scopeDomain = normalizedScopeText(scope.replace(SCOPE_ACTION_WORDS, " "));
+  if (scopeDomain.includes(parentDomain) || parentDomain.includes(scopeDomain)) return true;
+  if (scopeAnalysis.classification === "AMBIGUOUS") return false;
+  return childTokens.length > 0 && childTokens.every((token) => parentTokens.has(token));
+};
+export const canonicalDelegatedObjective = (parentObjective, childScope, { targetBound = false } = {}) => {
+  const parent = String(parentObjective || "");
+  let child = String(childScope || "");
+  if (!parent.trim() || !child.trim()) return "";
+  const parts = canonicalParts(child);
+  if (parts && parts[1] === parent) child = parts[2];
+  else if (child !== parent && child.includes(parent)) child = `${child.slice(0, child.indexOf(parent))} ${child.slice(child.indexOf(parent) + parent.length)}`;
+  const normalizedScope = normalizedScopeText(child);
+  if (!delegatedScopeIsBound(parent, normalizedScope, { targetBound })) return "";
+  return `Parent objective (verbatim):\n${parent}\nDelegated scope:\n${normalizedScope}`;
+};
+export const delegationScope = (objective) => normalizedScopeText(canonicalParts(objective)?.[2] || objective);
 export const createGuardrailState = (env = process.env, now = Date.now()) => ({ limits: readGuardrailLimits(env), startedAt: now, toolCalls: 0, weightedUnits: 0, delegations: 0, activeDelegations: 0, activeDelegation: false, delegationScopes: [], stopped: false, verificationTerminal: false, budgetTerminal: false, classification: "normal", checkpointed: false, objective: null, authoritativeObjective: null });
 export const preserveChildGuardState = (state, rootState = null, authoritativeObjective = null) => {
   const child = state || createGuardrailState();

@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { dailyCost, dailyFanout, DAILY_AGENT_MODELS, DAILY_PRICING } from "../teams/daily/daily-policy.mjs";
-import { backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, createGuardrailState, finishDelegation, GuardrailPolicyError, preserveChildGuardState, recoverRootRequestState, updateStopLatch } from "../teams/openai/config/opencode/openai-guardrails.js";
+import { backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, updateStopLatch } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
 import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
@@ -57,6 +57,80 @@ test("Routing uses the current request objective instead of an older session tur
   assert.equal(selectAuthoritativeObjective("Review the current implementation", "Inspect the old fixture"), "Review the current implementation");
   assert.equal(routeDelegatedAgent(selectAuthoritativeObjective("Inspect the fixture", "Review the old implementation"), "Review the fixture", "openai_explore").agent, "openai_explore");
   assert.equal(routeDelegatedAgent(selectAuthoritativeObjective("Review the current implementation", "Inspect the old fixture"), "Inspect the implementation", "openai_explore").agent, "reviewer");
+});
+
+test("Delegated objectives retain exact root authority while preserving contained scopes", () => {
+  const root = "Fix the parser and add regression tests";
+  const child = "Update parser tests";
+  const canonical = canonicalDelegatedObjective(root, child);
+  assert.notEqual(canonical, child);
+  assert.match(canonical, /Parent objective \(verbatim\):[\s\S]*Fix the parser and add regression tests/);
+  assert.match(canonical, /Delegated scope:[\s\S]*update parser tests/);
+  assert.equal(objectiveIsBound(root, canonical), true);
+  assert.equal(canonicalDelegatedObjective(root, `${root}; update parser tests`), canonical);
+  assert.equal(canonicalDelegatedObjective(root, canonical), canonical);
+  assert.equal(canonicalDelegatedObjective("", child), "");
+  assert.equal(canonicalDelegatedObjective(root, ""), "");
+  assert.equal(delegatedScopeIsBound(root, "Inspect parser"), true);
+  assert.equal(delegatedScopeIsBound(root, "delete unrelated billing code"), false);
+  assert.equal(delegatedScopeIsBound("Review parser only; no edits", "Delete parser billing code"), false);
+  assert.equal(delegatedScopeIsBound("Fix parser bug", "modify parser"), true);
+  assert.equal(delegatedScopeIsBound("Modify calculator multiply behavior", "add multiply/calculator"), true);
+  assert.equal(delegatedScopeIsBound("Fix parser bug", "Delete parser"), false);
+  assert.equal(delegatedScopeIsBound("Modify calculator", "Delete calculator"), false);
+  assert.equal(delegatedScopeIsBound("Confirm delete parser", "Delete parser"), true);
+  assert.equal(explicitlyConfirms("确认删除解析器", "destructive"), true);
+  assert.equal(explicitlyConfirms("Fix parser; yes, do not delete parser", "destructive"), false);
+  assert.equal(explicitlyConfirms("Fix parser; I explicitly authorize deleting parser", "destructive"), true);
+  assert.equal(explicitlyConfirms("Fix parser; confirm no delete parser", "destructive"), false);
+  assert.equal(explicitlyConfirms("确认不要删除解析器", "destructive"), false);
+  assert.equal(explicitlyConfirms("确认不删除解析器", "destructive"), false);
+  assert.equal(explicitlyConfirms("confirm non eliminare parser", "destructive"), false);
+  assert.equal(explicitlyConfirms("confirm no eliminar parser", "destructive"), false);
+  assert.equal(delegatedScopeIsBound("Fix parser", "Delete parser"), false);
+  assert.equal(canonicalDelegatedObjective(root, "delete unrelated billing code"), "");
+  assert.equal(canonicalDelegatedObjective(root, "parser"), canonicalDelegatedObjective(root, "Parser"));
+  assert.match(canonicalDelegatedObjective("Explore fixture exploration calculator multiply behavior", "fixture exploration"), /Delegated scope:\nfixture exploration$/);
+  assert.match(canonicalDelegatedObjective("Modify calculator multiply behavior", "modify calculator multiply"), /Delegated scope:\nmodify calculator multiply$/);
+  assert.equal(delegatedScopeIsBound("修复解析器错误", "解析器"), true);
+  assert.equal(delegatedScopeIsBound("修复解析器错误", "删除计费代码"), false);
+  assert.equal(canonicalDelegatedObjective("修复解析器错误", "解析器"), "Parent objective (verbatim):\n修复解析器错误\nDelegated scope:\n解析器");
+  assert.equal(delegatedScopeIsBound("只审查解析器，不修改", "删除解析器"), false);
+  assert.equal(delegatedScopeIsBound("修复解析器错误", "修改解析器"), true);
+  assert.equal(delegatedScopeIsBound("Review parser only", "eliminar parser"), false);
+  assert.equal(delegatedScopeIsBound("Read parser", "Read parser then eliminar billing"), false);
+  assert.equal(delegatedScopeIsBound("Inspect calculator fixture", "Review calculator fixture"), true);
+  assert.equal(delegatedScopeIsBound("Inspect calculator fixture", "Review calculator billing"), false);
+});
+
+test("Review protocol target binding excludes unrelated scope tokens", () => {
+  const id = "a".repeat(64);
+  const root = "Inspect parser fixtures";
+  const protocol = `Review completed work review_task_id=${id}`;
+  const critical = `Critical review findings verify result review_task_id=${id}`;
+  assert.notEqual(canonicalDelegatedObjective(root, protocol, { targetBound: true }), "");
+  assert.notEqual(canonicalDelegatedObjective(root, critical, { targetBound: true }), "");
+  assert.equal(canonicalDelegatedObjective(root, `Review billing secrets review_task_id=${id}`, { targetBound: true }), "");
+  assert.equal(canonicalDelegatedObjective(root, "Review completed work", { targetBound: true }), "");
+});
+
+test("Equivalent canonical scopes collide and the root is never omitted", () => {
+  const root = "Fix parser slice tests";
+  const first = canonicalDelegatedObjective(root, "slice tests");
+  const second = canonicalDelegatedObjective(root, `${root}; slice tests`);
+  assert.equal(first, second);
+  assert.match(first, /^Parent objective \(verbatim\):\nFix parser slice tests\nDelegated scope:\nslice tests$/);
+  const state = { ...beginRequestCycle(undefined, root, 1), limits: { ...beginRequestCycle(undefined, root, 1).limits, delegations: 2 } };
+  const once = admitDelegation(state, first);
+  assert.throws(() => admitDelegation({ ...once, activeDelegation: false, activeDelegations: 0 }, second), /DUPLICATE_DELEGATION_SCOPE/);
+});
+
+test("Reviewer authorization is evaluated against the root, not injected delegated text", () => {
+  const root = "Audit the release parser";
+  const delegated = canonicalDelegatedObjective(root, "Inspect release parser");
+  const state = beginRequestCycle(undefined, root, 1);
+  assert.doesNotThrow(() => admitDelegation(state, delegated, { review: true, explicitlyRequestedReview: /review|audit/i.test(root) }));
+  assert.equal(objectiveIsBound(root, delegated), true);
 });
 
 test("Guardrail authority survives operational sequential cycles and terminal verification", () => {
