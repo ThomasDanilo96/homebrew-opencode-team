@@ -103,6 +103,39 @@ test("Delegated objectives retain exact root authority while preserving containe
   assert.equal(delegatedScopeIsBound("Inspect calculator fixture", "Review calculator billing"), false);
 });
 
+test("Delegated scope token normalization ignores temp paths and binds calculator stems", () => {
+  const parent = "Inspect this fixture and add multiply to calculator.js.";
+  const captured = "Inspect /private/var/folders/ab/random-id/opencode/fixture/calculator.test.js and add multiply.";
+  assert.equal(delegatedScopeIsBound(parent, captured), true);
+  assert.equal(delegatedScopeIsBound("read calculator.js", "read calculator.test.js"), true);
+  assert.equal(delegatedScopeIsBound("read calculator.js", "read /private/var/folders/random/opencode/notes.txt"), false);
+  assert.equal(delegatedScopeIsBound("modify calculator.js", "modify /private/var/folders/random/opencode/notes.txt"), false);
+});
+
+test("Equivalent absolute path spellings share canonical delegated identity", () => {
+  const parent = "Inspect fixture calculator.js and add multiply.";
+  const posix = canonicalDelegatedObjective(parent, 'read /private/var/folders/one/opencode/fixture/calculator.test.js with multiply');
+  const windows = canonicalDelegatedObjective(parent, 'read C:\\Users\\two\\opencode\\fixture\\calculator.test.js with multiply');
+  assert.equal(posix, windows);
+});
+
+test("Quoted absolute paths with spaces are stripped as one path", () => {
+  const parent = "Inspect fixture calculator.js and add multiply.";
+  assert.equal(delegatedScopeIsBound(parent, 'read "/private/var/folders/random/opencode fixture/calculator.test.js" with multiply'), true);
+  assert.equal(delegatedScopeIsBound(parent, 'read "C:\\Users\\random\\opencode fixture\\calculator.test.js" with multiply'), true);
+  assert.equal(delegatedScopeIsBound("read billing secrets", "read billing secrets"), true);
+  assert.equal(delegatedScopeIsBound("read billing secrets", "read calculator multiply"), false);
+  assert.equal(delegatedScopeIsBound(parent, "read /private/var/folders/billing/random-id/opencode/notes.txt"), false);
+});
+
+test("Captured live calculator parent and child scopes remain canonically bound", () => {
+  const parent = "Identify calculator.js, existing tests, package/test commands, conventions relevant to adding multiply. Do not edit files. Return concise findings with paths and recommended focused test location.";
+  const child = "Identify calculator.js, existing tests, package/test commands, conventions relevant to adding multiply. Do not edit files. Return concise findings with paths and recommended focused test location: /private/var/folders/7k/9x3q8m2n0p1q2r3s4t5u6v7w8x9y0z/opencode-daily-cert.6aFpe3/fixture";
+  const canonical = canonicalDelegatedObjective(parent, child);
+  assert.notEqual(canonical, "");
+  assert.equal(objectiveIsBound(parent, canonical), true);
+});
+
 test("Review protocol target binding excludes unrelated scope tokens", () => {
   const id = "a".repeat(64);
   const root = "Inspect parser fixtures";

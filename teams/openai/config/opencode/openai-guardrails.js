@@ -68,10 +68,18 @@ export const explicitlyConfirms = (request, category) => Boolean(category && CAT
 export const requiresExplicitConfirmation = (operation) => confirmationCategory(operation) !== null;
 export class GuardrailPolicyError extends Error { constructor(reason, details = {}) { super(`OPENAI_GUARDRAIL_${reason}: stop and report state; do not create todos or retry.`); this.name = "GuardrailPolicyError"; this.code = `OPENAI_GUARDRAIL_${reason}`; this.policy = { type: "policy_error", reason, stop: true, retry: false, ...details }; } }
 export const objectiveIsBound = (authoritative, delegated) => { const a = String(authoritative || "").trim().replace(/\s+/g, " ").toLowerCase(), d = String(delegated || "").trim().replace(/\s+/g, " ").toLowerCase(); return Boolean(a && d && (a === d || d.includes(a) || a.includes(d))); };
-const GENERIC_OBJECTIVE_TOKENS = new Set(["a", "an", "and", "add", "all", "apply", "change", "code", "create", "delete", "do", "file", "files", "fix", "for", "implement", "in", "inspect", "into", "make", "modify", "of", "on", "or", "patch", "read", "refactor", "rename", "review", "task", "test", "tests", "the", "to", "update", "work"]);
-const normalizedScopeText = (value) => String(value || "").normalize("NFKC").trim().replace(/^[;,.:\-]+\s*|\s*[;,.:\-]+$/gu, "").replace(/\s+/gu, " ").toLowerCase();
+const GENERIC_OBJECTIVE_TOKENS = new Set(["a", "an", "and", "add", "adding", "all", "apply", "change", "code", "command", "commands", "concise", "convention", "conventions", "create", "delete", "do", "edit", "existing", "file", "files", "finding", "findings", "fix", "for", "identify", "implement", "in", "inspect", "into", "location", "make", "modify", "not", "of", "on", "or", "package", "path", "paths", "patch", "read", "recommended", "refactor", "relevant", "rename", "return", "review", "task", "test", "tests", "the", "to", "update", "with", "work"]);
+const GENERIC_FILENAME_COMPONENTS = new Set(["c", "cc", "cpp", "css", "h", "hpp", "html", "java", "js", "json", "jsx", "mjs", "py", "rb", "rs", "sh", "sql", "test", "tests", "ts", "tsx", "xml"]);
+const safePathBasename = (path) => {
+  const basename = path.split(/[\\/]/u).filter(Boolean).pop() || "";
+  return /^[\p{L}\p{N}][\p{L}\p{N}._-]*\.[\p{L}\p{N}]+$/u.test(basename) ? basename : "";
+};
+const quotedAbsolutePath = /(["'])((?:[A-Za-z]:[\\/]|\/)[^"']+)\1/gu;
+const absolutePath = /(^|[\s("'`=:])((?:[A-Za-z]:[\\/]|\/)[^\s"'`;,)\]}]+)/gu;
+const stripAbsolutePaths = (value) => String(value || "").replace(quotedAbsolutePath, (_, _quote, path) => safePathBasename(path)).replace(absolutePath, (_, prefix, path) => `${prefix}${safePathBasename(path)}`);
+const normalizedScopeText = (value) => stripAbsolutePaths(String(value || "").normalize("NFKC")).trim().replace(/^[;,.:\-]+\s*|\s*[;,.:\-]+$/gu, "").replace(/\s+/gu, " ").toLowerCase();
 const SCOPE_ACTION_WORDS = /\b(?:add|create|modify|change|implement|refactor|patch|delete|remove|drop|reset|rm|rename|update|fix|deploy|review|inspect|verify|approve|reject|confirm|completed?|work)\b|新增|添加|修改|更改|实现|重构|补丁|删除|移除|丢弃|重置|修复|确认|同意|批准|\b(?:aggiungi|crea|modifica|cambia|implementa|rifattorizza|elimina|rimuovi|reimposta|correggi|recensisci|verifica|approva|rifiuta|revisar|revisa|eliminar|elimina|borrar|borra)\b/giu;
-const objectiveTokens = (value) => normalizedScopeText(value).replace(SCOPE_ACTION_WORDS, " ").match(/[\p{L}\p{N}]+(?:[._-][\p{L}\p{N}]+)*/gu)?.filter((token) => token.length > 2 && !GENERIC_OBJECTIVE_TOKENS.has(token)) || [];
+const objectiveTokens = (value) => normalizedScopeText(value).replace(SCOPE_ACTION_WORDS, " ").match(/[\p{L}\p{N}]+(?:[._-][\p{L}\p{N}]+)*/gu)?.flatMap((token) => token.split(/[._-]/u).filter((component) => component.length > 2 && !GENERIC_FILENAME_COMPONENTS.has(component))).filter((token) => !GENERIC_OBJECTIVE_TOKENS.has(token)) || [];
 const canonicalParts = (value) => String(value || "").match(/^Parent objective \(verbatim\):\n([\s\S]*?)\nDelegated scope:\n([\s\S]*)$/);
 const MUTATING_INTENT = /(?:\b(?:add|create|modify|change|implement|refactor|patch|delete|remove|drop|reset|rm|rename|update|fix|deploy)\b|新增|添加|修改|更改|实现|重构|补丁|删除|移除|丢弃|重置|修复|\b(?:aggiungi|crea|modifica|cambia|implementa|rifattorizza|elimina|rimuovi|reimposta|correggi|revisar|revisa|eliminar|elimina|borrar|borra)\b)/iu;
 const DESTRUCTIVE_INTENT = /(?:\b(?:delet(?:e|ing|ed|ion)|remov(?:e|ing|ed)|drop(?:ping|ped)?|reset(?:ting|ted)?|rm|destroy|erase)\b|删除|移除|丢弃|重置|消除|\b(?:elimina|eliminare|rimuovi|rimuovere|cancella|cancellare|reimposta|eliminar|borrar|borra)\b)/iu;
@@ -103,6 +111,7 @@ export const delegatedScopeIsBound = (parentObjective, normalizedScope, { target
   const childTokens = objectiveTokens(scope);
   const parentDomain = normalizedScopeText(parent.replace(SCOPE_ACTION_WORDS, " "));
   const scopeDomain = normalizedScopeText(scope.replace(SCOPE_ACTION_WORDS, " "));
+  if (!scopeDomain || childTokens.length === 0) return false;
   if (scopeDomain.includes(parentDomain) || parentDomain.includes(scopeDomain)) return true;
   if (scopeAnalysis.classification === "AMBIGUOUS") return false;
   return childTokens.length > 0 && childTokens.every((token) => parentTokens.has(token));
