@@ -59,3 +59,50 @@ test("Codex bootstrap reports representative fail-closed reason codes", async ()
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Codex bootstrap waits for a durably visible first-child packet", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openai-bootstrap-race-"));
+  const previousRoot = process.env.OPENAI_TEAM_STATE_ROOT;
+  const previousWait = process.env.OPENAI_CODEX_CANDIDATE_WAIT_MS;
+  const previousPoll = process.env.OPENAI_CODEX_CANDIDATE_POLL_MS;
+  process.env.OPENAI_TEAM_STATE_ROOT = root;
+  process.env.OPENAI_CODEX_CANDIDATE_WAIT_MS = "50";
+  process.env.OPENAI_CODEX_CANDIDATE_POLL_MS = "10";
+  try {
+    const objective_sha256 = createHash("sha256").update(prompt).digest("hex");
+    const claimed = await claimTask({ task_fingerprint: "race-task", objective_sha256, parent_session_id: parent, agent: "codex_executor" });
+    const task = await transitionTask(claimed.record.task_fingerprint, { expectedVersion: claimed.record.version, expectedStates: ["CLAIMED"], leaseId: claimed.record.lease_id, expectedAttempt: claimed.record.attempt, expectedLease: claimed.record.lease_id, patch: { state: "ADMITTED" } });
+    const packet = { agent: "codex_executor", parent_session_id: parent, objective_sha256, phase: "admitted", outcome: "pending", child_session_id: null, task_fingerprint: task.task_fingerprint, task_lease_id: task.lease_id, attempt: task.attempt, packet_id: task.packet_id, task_call_id: "race-call" };
+    let calls = 0;
+    const result = await bootstrapCodexPolicy({ ...baseInput(), listWorkPackets: async () => calls++ === 0 ? [] : [packet], updateWorkPacketByID: async () => ({ ...packet, child_session_id: child }) }, child, "codex_executor");
+    assert.equal(result.reason, null);
+  } finally {
+    if (previousRoot === undefined) delete process.env.OPENAI_TEAM_STATE_ROOT; else process.env.OPENAI_TEAM_STATE_ROOT = previousRoot;
+    if (previousWait === undefined) delete process.env.OPENAI_CODEX_CANDIDATE_WAIT_MS; else process.env.OPENAI_CODEX_CANDIDATE_WAIT_MS = previousWait;
+    if (previousPoll === undefined) delete process.env.OPENAI_CODEX_CANDIDATE_POLL_MS; else process.env.OPENAI_CODEX_CANDIDATE_POLL_MS = previousPoll;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Codex bootstrap denies ambiguous candidates without waiting", async () => {
+  const started = Date.now();
+  const objective_sha256 = createHash("sha256").update(prompt).digest("hex");
+  const candidates = [1, 2].map((id) => ({ agent: "codex_executor", parent_session_id: parent, objective_sha256, phase: "admitted", outcome: "pending", packet_id: `ambiguous-${id}` }));
+  const result = await bootstrapCodexPolicy({ ...baseInput(), listWorkPackets: async () => candidates }, child, "codex_executor");
+  assert.equal(result.reason, CODEX_BOOTSTRAP_REASONS.CANDIDATE_COUNT);
+  assert.ok(Date.now() - started < 100);
+});
+
+test("Codex bootstrap denies when the candidate never becomes visible", async () => {
+  const previousWait = process.env.OPENAI_CODEX_CANDIDATE_WAIT_MS;
+  const previousPoll = process.env.OPENAI_CODEX_CANDIDATE_POLL_MS;
+  process.env.OPENAI_CODEX_CANDIDATE_WAIT_MS = "10";
+  process.env.OPENAI_CODEX_CANDIDATE_POLL_MS = "10";
+  try {
+    const result = await bootstrapCodexPolicy(baseInput(), child, "codex_executor");
+    assert.equal(result.reason, CODEX_BOOTSTRAP_REASONS.CANDIDATE_COUNT);
+  } finally {
+    if (previousWait === undefined) delete process.env.OPENAI_CODEX_CANDIDATE_WAIT_MS; else process.env.OPENAI_CODEX_CANDIDATE_WAIT_MS = previousWait;
+    if (previousPoll === undefined) delete process.env.OPENAI_CODEX_CANDIDATE_POLL_MS; else process.env.OPENAI_CODEX_CANDIDATE_POLL_MS = previousPoll;
+  }
+});

@@ -58,6 +58,9 @@ const GUARDED_AGENTS = new Set([
 
 const stateRoot = () => process.env.OPENAI_TEAM_STATE_ROOT;
 const logPath = () => join(stateRoot() || "/tmp", "logs", "authorship-guard.log");
+const candidateWaitMs = () => Math.min(2000, Math.max(0, Number(process.env.OPENAI_CODEX_CANDIDATE_WAIT_MS ?? 750) || 750));
+const candidatePollMs = () => Math.min(25, Math.max(10, Number(process.env.OPENAI_CODEX_CANDIDATE_POLL_MS ?? 15) || 15));
+const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 const arrayValue = (value) => {
   if (Array.isArray(value)) return value;
   try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
@@ -116,7 +119,7 @@ export const bootstrapCodexPolicy = async (pluginInput, sessionID, agent) => {
     const prompt = childPrompt(messages);
     if (!prompt) return blocked(CODEX_BOOTSTRAP_REASONS.PROMPT);
     const objective_sha256 = createHash("sha256").update(prompt).digest("hex");
-    const packets = await (pluginInput.listWorkPackets || listWorkPackets)();
+    const listPackets = pluginInput.listWorkPackets || listWorkPackets;
     const parentIDs = new Set([parentID]);
     let cursor = parentID;
     let rootID = parentID;
@@ -127,12 +130,18 @@ export const bootstrapCodexPolicy = async (pluginInput, sessionID, agent) => {
       cursor = next;
     }
     parentIDs.add(rootID);
-    const candidates = (Array.isArray(packets) ? packets : []).filter((packet) =>
-      packet?.agent === "codex_executor" && parentIDs.has(packet.parent_session_id) &&
-      packet.objective_sha256 === objective_sha256 &&
-      ["admitted", "codex_running", "foreground_bound", "running"].includes(String(packet.phase || "").toLowerCase()) &&
-      ["pending", "running"].includes(String(packet.outcome || "").toLowerCase()) &&
-      (packet.child_session_id == null || packet.child_session_id === sessionID));
+    const eligibleCandidates = (packets) => (Array.isArray(packets) ? packets : []).filter((packet) =>
+        packet?.agent === "codex_executor" && parentIDs.has(packet.parent_session_id) &&
+        packet.objective_sha256 === objective_sha256 &&
+        ["admitted", "codex_running", "foreground_bound", "running"].includes(String(packet.phase || "").toLowerCase()) &&
+        ["pending", "running"].includes(String(packet.outcome || "").toLowerCase()) &&
+        (packet.child_session_id == null || packet.child_session_id === sessionID));
+    let candidates = eligibleCandidates(await listPackets());
+    const deadline = Date.now() + candidateWaitMs();
+    while (candidates.length === 0 && Date.now() < deadline) {
+      await delay(Math.min(candidatePollMs(), deadline - Date.now()));
+      candidates = eligibleCandidates(await listPackets());
+    }
     if (candidates.length !== 1) return blocked(CODEX_BOOTSTRAP_REASONS.CANDIDATE_COUNT);
     const packet = candidates[0];
     const task = await (pluginInput.readTask || readTask)(packet.task_fingerprint);
