@@ -186,6 +186,15 @@ test("Second live parent and child inspection scope remains read-only and bound"
 	assert.equal(canonicalDelegatedObjective(parent, "Inspect unrelated billing secrets and include the reason"), "");
 });
 
+test("Third live root/task inspection ignores response formatting while routing explore", () => {
+  const root = "Use one read-only openai_explore task to inspect calculator.js and verify it defines add(a,b) and exports add(a,b). Return exactly CALCULATOR_READONLY_OK and nothing else.";
+  const child = "Inspect calculator.js and verify it defines add(a,b) and exports add(a,b). Otherwise return CALCULATOR_READONLY_OK and nothing else.";
+  const canonical = canonicalDelegatedObjective(root, child);
+  assert.notEqual(canonical, "");
+  assert.equal(routeDelegatedAgent(root, child, "openai_explore").agent, "openai_explore");
+  assert.equal(canonicalDelegatedObjective(root, "Inspect unrelated billing secrets. Return exactly CALCULATOR_READONLY_OK."), "");
+});
+
 test("Review protocol target binding excludes unrelated scope tokens", () => {
   const id = "a".repeat(64);
   const root = "Inspect parser fixtures";
