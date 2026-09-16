@@ -18,7 +18,7 @@ import { addWorkPacketTokens, createWorkPacket, incrementWorkPacket, listWorkPac
 import { TaskStateError, claimTask, completeTask, readTask, transitionTask } from "./task-state.js";
 import { workspaceFingerprint } from "./read-cache.js";
 import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
-import { GuardrailPolicyError, admitDelegation, admitToolCall, beginRequestCycle, createGuardrailState, explicitlyConfirms, finishDelegation, isInternalContinuation, readStopLatch, updateStopLatch, writeStopLatch } from "./openai-guardrails.js";
+import { GuardrailPolicyError, admitDelegation, admitToolCall, backgroundDelegationAllowed, beginRequestCycle, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, readStopLatch, updateStopLatch, writeStopLatch } from "./openai-guardrails.js";
 import { guardToolExecution } from "../../../../shared/tool-output-guard.js";
 import {
   CODEX_REQUIRED,
@@ -533,7 +533,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       if (record.pending_steps.includes("release")) { await release(cleanup.token); record.pending_steps = record.pending_steps.filter((step) => step !== "release"); await saveReconciliation(key, record); }
       if ((terminal || manualRecovery) && cleanup.master_parent_session_id) {
         const parentGuard = guardrails.get(cleanup.master_parent_session_id);
-        if (parentGuard) guardrails.set(cleanup.master_parent_session_id, finishDelegation(parentGuard, ["tester", "reviewer", "reviewer_critical"].includes(cleanup.role)));
+        if (parentGuard) guardrails.set(cleanup.master_parent_session_id, finishDelegation(parentGuard, ["tester", "reviewer", "reviewer_critical"].includes(cleanup.role), cleanup.delegation_scope));
       }
       if (record.pending_steps.includes("policy_terminal")) {
         const policy = cleanup.sessionID ? await readPolicy(cleanup.sessionID) : null;
@@ -1440,7 +1440,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     }
     if (toolName !== "task") return;
     const args = output.args || {};
-     if (args.run_in_background === true) throw new GuardrailPolicyError("BACKGROUND_DENIED");
+     if (args.run_in_background === true && !backgroundDelegationAllowed()) throw new GuardrailPolicyError("BACKGROUND_DENIED");
     const currentTaskObjective = String(args.prompt || args.description || "").trim();
     const requestedAgent = String(output.args?.subagent_type || output.args?.agent || "");
      const analysis = analyzeObjective(currentTaskObjective);
@@ -1477,7 +1477,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
          try {
            await readFile(join(process.env.OPENAI_TEAM_STATE_ROOT || "/tmp", "active", `${active?.token}.json`), "utf8");
          } catch {
-           const released = finishDelegation(guard);
+            const released = finishDelegation(guard, false, delegationScope(currentTaskObjective));
            guardrails.set(input.sessionID, { ...released, objective: currentTaskObjective, delegations: 0, weightedUnits: 0 });
          }
        }
@@ -1608,7 +1608,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        review_task_id: reviewTaskID, test_task_id: testTaskID, gate_target: gateTarget,
        objective_sha256: objectiveHash(currentTaskObjective),
         classification: route.classification, cacheable_read: cacheableRead, ...packetMetadata, test_task_id: testTaskID,
-       task_id: fingerprint, task_state_version: claim.record.version, task_lease_id: claim.record.lease_id, task_fingerprint: fingerprint, packet_id: claim.record.packet_id,
+        task_id: fingerprint, task_state_version: claim.record.version, task_lease_id: claim.record.lease_id, task_fingerprint: fingerprint, packet_id: claim.record.packet_id, delegation_scope: delegationScope(currentTaskObjective),
     });
     try {
       await createWorkPacket(input.callID, {
@@ -1631,7 +1631,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     const pending = reservations.get(input.callID) || [...reservations.values()].find((entry) => entry.task_call_id === input.callID);
     if (!pending) return;
     const parentGuard = guardrails.get(input.sessionID);
-    if (parentGuard) guardrails.set(input.sessionID, finishDelegation(parentGuard, ["tester", "reviewer", "reviewer_critical"].includes(pending.role)));
+      if (parentGuard) guardrails.set(input.sessionID, finishDelegation(parentGuard, ["tester", "reviewer", "reviewer_critical"].includes(pending.role), pending.delegation_scope));
     try {
     let gateEvent = null;
     let gateError = null;
