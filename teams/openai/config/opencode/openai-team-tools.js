@@ -18,7 +18,7 @@ import { addWorkPacketTokens, createWorkPacket, incrementWorkPacket, listWorkPac
 import { TaskStateError, claimTask, completeTask, readTask, transitionTask } from "./task-state.js";
 import { workspaceFingerprint } from "./read-cache.js";
 import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
-import { GuardrailPolicyError, admitDelegation, admitToolCall, backgroundDelegationAllowed, beginRequestCycle, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, updateStopLatch, writeStopLatch } from "./openai-guardrails.js";
+import { GuardrailPolicyError, admitDelegation, admitToolCall, backgroundDelegationAllowed, beginRequestCycle, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, updateStopLatch, writeStopLatch } from "./openai-guardrails.js";
 import { guardToolExecution } from "../../../../shared/tool-output-guard.js";
 import {
   CODEX_REQUIRED,
@@ -1433,9 +1433,20 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     guardToolExecution({ team: "openai", input, output });
     const toolName = String(input.tool || "").toLowerCase();
      let guard = await guardrailFor(input.sessionID);
-     if (toolName === "task" && guard && !guard.activeDelegation && guard.delegations > 0 && !guard.verificationTerminal) {
-        guard = beginRequestCycle(guard, String(output.args?.prompt || output.args?.description || ""), Date.now(), process.env, { preserveVerificationTerminal: true });
+     if (toolName === "task" && guard && !guard.authoritativeObjective) {
+       const initialObjective = await resolveInitialObjective(input.sessionID);
+       if (initialObjective?.objective && initialObjective.rootSessionID === input.sessionID && initialObjective.parentSessionID == null) {
+         guard = recoverRootRequestState(guard, initialObjective.objective, Date.now(), process.env);
+       } else if (initialObjective?.objective && initialObjective.rootSessionID) {
+         masterParentBySession.set(input.sessionID, initialObjective.rootSessionID);
+         const rootGuard = await guardrailFor(initialObjective.rootSessionID);
+         guard = preserveChildGuardState(guard, rootGuard, initialObjective.objective);
+       }
        guardrails.set(input.sessionID, guard);
+     }
+      if (toolName === "task" && guard && !guard.activeDelegation && guard.delegations > 0 && !guard.verificationTerminal) {
+         guard = beginRequestCycle(guard, String(output.args?.prompt || output.args?.description || ""), Date.now(), process.env, { preserveVerificationTerminal: true });
+        guardrails.set(input.sessionID, guard);
      }
     if (guard && toolName !== "openai_run_codex") guardrails.set(input.sessionID, admitToolCall(guard, toolName));
     const sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);

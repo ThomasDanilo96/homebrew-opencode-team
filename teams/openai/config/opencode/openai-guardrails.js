@@ -43,6 +43,25 @@ export const beginRequestCycle = (state = createGuardrailState(), text, now = Da
   const resumed = isExplicitResumeText(text);
   return { ...state, objective: String(text || "").trim(), authoritativeObjective: preserveVerificationTerminal ? state.authoritativeObjective || state.objective || null : String(text || "").trim(), limits, startedAt: now, toolCalls: 0, weightedUnits: 0, delegations: 0, activeDelegations: 0, activeDelegation: false, verificationTerminal: false, budgetTerminal: false, classification, complexity: analysis?.complexity ?? null, fanoutLimit: analysis?.fanout_limit ?? null, checkpointed: classification === "long", stopped: resumed ? false : Boolean(state.stopped) || isStopText(text) };
 };
+export const recoverRootRequestState = (state = createGuardrailState(), objective, now = Date.now(), env = process.env) => {
+  const existing = state || createGuardrailState(env, now);
+  const derived = beginRequestCycle(createGuardrailState(env, now), objective, now, env);
+  const activeDelegations = Math.max(existing.activeDelegations || 0, existing.activeDelegation ? 1 : 0);
+  return {
+    ...derived,
+    limits: derived.limits,
+    startedAt: Math.min(Number.isFinite(existing.startedAt) ? existing.startedAt : now, derived.startedAt),
+    toolCalls: Math.max(existing.toolCalls || 0, derived.toolCalls || 0),
+    weightedUnits: Math.max(existing.weightedUnits || 0, derived.weightedUnits || 0),
+    delegations: Math.max(existing.delegations || 0, derived.delegations || 0),
+    activeDelegations,
+    activeDelegation: activeDelegations > 0,
+    delegationScopes: [...new Set([...(existing.delegationScopes || []), ...(derived.delegationScopes || [])])],
+    stopped: Boolean(existing.stopped || derived.stopped),
+    verificationTerminal: Boolean(existing.verificationTerminal || derived.verificationTerminal),
+    budgetTerminal: Boolean(existing.budgetTerminal || derived.budgetTerminal),
+  };
+};
 export const confirmationCategory = (operation) => Object.entries(CATEGORIES).find(([, pattern]) => pattern.test(String(operation || "")))?.[0] || null;
 export const explicitlyConfirms = (request, category) => Boolean(category && CATEGORIES[category] && !/\b(?:continue|go ahead|proceed)\b/i.test(String(request || "")) && /\b(?:authorize|authorise|confirm|explicitly|approved?|consent|yes|do)\b/i.test(String(request || "")) && CATEGORIES[category].test(String(request || "")));
 export const requiresExplicitConfirmation = (operation) => confirmationCategory(operation) !== null;

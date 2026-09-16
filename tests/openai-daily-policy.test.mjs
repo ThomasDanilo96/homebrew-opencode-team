@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { dailyCost, dailyFanout, DAILY_AGENT_MODELS, DAILY_PRICING } from "../teams/daily/daily-policy.mjs";
-import { backgroundDelegationAllowed, beginRequestCycle, admitDelegation, finishDelegation, GuardrailPolicyError, preserveChildGuardState, updateStopLatch } from "../teams/openai/config/opencode/openai-guardrails.js";
+import { backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, createGuardrailState, finishDelegation, GuardrailPolicyError, preserveChildGuardState, recoverRootRequestState, updateStopLatch } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
 import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
@@ -202,6 +202,52 @@ test("Daily runtime maps every complexity to its policy fanout", () => {
     assert.equal(state.limits.delegations, expected);
     assert.equal(state.fanoutLimit, expected);
   }
+});
+
+test("Recovered Daily HEAVY root objective admits six delegations", () => {
+  let state = recoverRootRequestState(createGuardrailState({}, 0), "implement a shared runtime change", 0, { OPENAI_DAILY_PROFILE: "1" });
+  state = admitToolCall(state, "task", 1);
+  assert.equal(state.limits.delegations, 6);
+  for (let index = 0; index < 6; index += 1) state = admitDelegation(state, `implement a shared runtime change; slice-${index}`);
+  assert.equal(state.delegations, 6);
+});
+
+test("Late root recovery preserves consumed and terminal state", () => {
+  const state = recoverRootRequestState({ ...createGuardrailState({}, 100), toolCalls: 9, weightedUnits: 12, delegations: 2, activeDelegations: 2, activeDelegation: true, delegationScopes: ["existing"], stopped: true, budgetTerminal: true, verificationTerminal: true }, "implement a shared runtime change", 200, { OPENAI_DAILY_PROFILE: "1" });
+  assert.equal(state.startedAt, 100);
+  assert.equal(state.toolCalls, 9);
+  assert.equal(state.weightedUnits, 12);
+  assert.equal(state.delegations, 2);
+  assert.equal(state.activeDelegations, 2);
+  assert.equal(state.activeDelegation, true);
+  assert.deepEqual(state.delegationScopes, ["existing"]);
+  assert.equal(state.limits.delegations, 6);
+  assert.equal(state.stopped, true);
+  assert.equal(state.budgetTerminal, true);
+  assert.equal(state.verificationTerminal, true);
+});
+
+test("Recovered child guard stays active without starting a fresh budget", () => {
+  const root = { ...beginRequestCycle(createGuardrailState(), "implement a shared runtime change", 10, { OPENAI_DAILY_PROFILE: "1" }), activeDelegations: 2, activeDelegation: true, toolCalls: 4, weightedUnits: 6 };
+  const child = preserveChildGuardState(beginRequestCycle(createGuardrailState(), "child slice", 100, { OPENAI_DAILY_PROFILE: "1" }), root, "implement a shared runtime change");
+  assert.equal(child.activeDelegation, true);
+  assert.equal(child.startedAt, 10);
+  assert.equal(child.toolCalls, 4);
+  assert.equal(child.weightedUnits, 6);
+});
+
+test("Unresolved objective remains fail-closed without review or extra budget", () => {
+  const state = createGuardrailState({}, 0);
+  assert.equal(state.authoritativeObjective, null);
+  assert.deepEqual(state.limits, { minutes: 15, toolCalls: 20, delegations: 1 });
+  assert.throws(() => admitDelegation(state, "review the repository", { review: true }), /OBJECTIVE_UNBOUND/);
+});
+
+test("Recovered root objective leaves premium limits unchanged", () => {
+  const state = beginRequestCycle(createGuardrailState(), "implement an architecture change", 0, {});
+  assert.equal(state.limits.delegations, 2);
+  assert.equal(state.limits.minutes, 45);
+  assert.equal(state.limits.toolCalls, 50);
 });
 
 test("Daily admission stress keeps 1, 2, 4, 6, and 10 siblings bounded", () => {
