@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tool } from "./plugin-api.js";
-import { childSessionIdFromAfter } from "./reservation-correlation.js";
+import { bindExactChildReservation, childSessionIdFromAfter, reservationEligibleForSessionCreated, sessionCreatedCorrelationDecision } from "./reservation-correlation.js";
 import { handoffMatchesInvocation, handoffPathFromStdout, removeConsumedArtifacts, safeHandoffID, safeInvocationID } from "./openai-handoff.js";
 import { readRecovery, removeRecovery, removeRecoveryAndHome, removeRecoveryHome, recoveryHomeRoot, registerCodexHome, clearCodexHomePointer, RecoveryConflictError } from "./codex-recovery.js";
 import { openCodexCircuit, readCodexCircuitGeneration } from "./codex-circuit.js";
@@ -567,7 +567,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         if (policy && policy.status !== CODEX_SUCCESS) await transitionPolicy(cleanup.sessionID, CODEX_SUCCESS, { expectedVersion: policy.version, error: "manual_recovery_approved" });
         record.pending_steps = record.pending_steps.filter((step) => step !== "policy_terminal"); await saveReconciliation(key, record);
       }
-      if (record.pending_steps.includes("packet")) { const packetPatch = { phase: manualRecovery ? "foreground_completion" : "background_completion", outcome: manualRecovery ? "completed" : outcome, duration_ms: elapsed(cleanup.started_at) }; if (cleanup.packet_id) await updateWorkPacketByID(cleanup.packet_id, packetPatch); else await updateWorkPacket(key, packetPatch); record.pending_steps = record.pending_steps.filter((step) => step !== "packet"); await saveReconciliation(key, record); }
+      if (record.pending_steps.includes("packet")) { const packetPatch = { phase: manualRecovery ? "foreground_completion" : "background_completion", outcome: manualRecovery ? "completed" : outcome, duration_ms: elapsed(cleanup.started_at) }; const packet = cleanup.packet_id ? await updateWorkPacketByID(cleanup.packet_id, packetPatch) : await updateWorkPacket(key, packetPatch); if (!packet) throw new Error("FINALIZE_PACKET_UPDATE_FAILED"); record.pending_steps = record.pending_steps.filter((step) => step !== "packet"); await saveReconciliation(key, record); }
       if (record.pending_steps.includes("task")) {
         const task = await readTask(cleanup.task_fingerprint);
         if (task && !["COMPLETED", "FAILED"].includes(task.state)) {
@@ -1660,6 +1660,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     const parentGuard = guardrails.get(input.sessionID);
       if (parentGuard) guardrails.set(input.sessionID, finishDelegation(parentGuard, ["tester", "reviewer", "reviewer_critical"].includes(pending.role), pending.delegation_scope));
     try {
+    const foregroundChildID = !pending.background ? childSessionIdFromAfter(output?.metadata) : null;
+    if (!pending.background) await bindExactChildReservation(pending, foregroundChildID, { readTask, advanceTask, updateWorkPacket });
     let gateEvent = null;
     let gateError = null;
     if (["reviewer", "reviewer_critical"].includes(pending.role) && pending.review_task_id) {
@@ -1710,11 +1712,12 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     if (!pending.background) {
         // UI telemetry is best-effort only: a missing/failed SDK client must never
         // affect foreground task completion.
-        await enrichTaskInvocationFromClient(output, pluginInput.client, childSessionIdFromAfter(output?.metadata) || pending.child_session_id);
-        const finalized = await finalizeReservation(pending, { outcome: "completed", result_summary: resultSummary(output), sessionID: pending.child_session_id || null });
-        if (finalized.code === "LIFECYCLE_ALREADY_FINALIZED") return;
+        await enrichTaskInvocationFromClient(output, pluginInput.client, foregroundChildID);
+        const finalized = await finalizeReservation(pending, { outcome: "completed", result_summary: resultSummary(output), sessionID: foregroundChildID || null });
+        if (finalized.code !== "LIFECYCLE_FINALIZED") throw new Error(finalized.code || "FOREGROUND_FINALIZATION_INCOMPLETE");
          await recordLatency({ stage: "task_foreground_total", outcome: "completed", duration_ms: elapsed(pending.started_at), agent: pending.role, call_id: input.callID, ...eventMetadata(pending) });
-         await updateWorkPacket(pending.task_call_id, { phase: "foreground_completion", outcome: "completed", duration_ms: elapsed(pending.started_at), cache_status: pending.cacheable_read ? "stored" : pending.cache_status, ...(pending.role === "tester" && !pending.test_task_id ? { tester_status: "passed" } : {}) });
+        const completedPacket = await updateWorkPacket(pending.task_call_id, { phase: "foreground_completion", outcome: "completed", duration_ms: elapsed(pending.started_at), cache_status: pending.cacheable_read ? "stored" : pending.cache_status, ...(pending.role === "tester" && !pending.test_task_id ? { tester_status: "passed" } : {}) });
+        if (!completedPacket) throw new Error("FOREGROUND_PACKET_UPDATE_FAILED");
         if (pending.child_session_id) {
           packetCallBySession.delete(pending.child_session_id); bufferedOpenCodeTokens.delete(pending.child_session_id);
         }
@@ -1729,27 +1732,27 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       throw new Error("Native background task returned no exact child session ID; reservation released fail-closed.");
     }
     const bindingStartedAt = Date.now();
+    if (pending.child_session_id && pending.child_session_id !== childID) throw new Error("BACKGROUND_CHILD_SESSION_ID_CONFLICT");
     const bound = await runProcessAsync(BIND, [pending.token, childID], { env: process.env });
      await recordLatency({ stage: "task_background_binding", outcome: bound.status === 0 ? "bound" : "binding_failed", duration_ms: elapsed(bindingStartedAt), handoff_ms: elapsed(bindingStartedAt), agent: pending.role, call_id: input.callID, session_id: childID, ...eventMetadata(pending) });
-    if (bound.status !== 0) {
+     if (bound.status !== 0) {
       await finalizeReservation(pending, { outcome: "error", result_summary: "BINDING_FAILED", terminal: false });
       await updateWorkPacket(pending.task_call_id, { phase: "background_binding", outcome: "error", duration_ms: elapsed(pending.started_at) });
       await advanceTask(pending, "FAILED", { retryable: true, error_code: "BINDING_FAILED" });
-      throw new Error("Could not bind reservation to the exact native child session.");
-    }
-    if (pending.role === "codex_executor") {
+       throw new Error("Could not bind reservation to the exact native child session.");
+     }
+     await bindExactChildReservation(pending, childID, { readTask, advanceTask, updateWorkPacket, packetPatch: { phase: "background_bound", outcome: "running" } });
+     if (pending.role === "codex_executor") {
       const boundPacket = (await listWorkPackets()).find((packet) => packet.packet_id === pending.packet_id || packet.task_call_id === pending.packet_id);
       await ensurePolicy(childID, { agent: "codex_executor", master_parent_session_id: pending.master_parent_session_id, task_call_id: boundPacket?.packet_id || pending.packet_id, task_id: pending.task_id, task_fingerprint: pending.task_fingerprint, attempt: pending.attempt, task_lease_id: pending.task_lease_id, packet_id: boundPacket?.packet_id || pending.packet_id });
-    }
-    packetCallBySession.set(childID, pending.task_call_id);
-    await updateWorkPacket(pending.task_call_id, { child_session_id: childID, phase: "background_bound", outcome: "running" });
-    await advanceTask(pending, "BOUND", { child_session_id: childID });
-    reservations.set(childID, { ...pending, child_session_id: childID });
+      }
+      packetCallBySession.set(childID, pending.task_call_id);
+     reservations.set(childID, { ...pending, child_session_id: childID });
     await flushBufferedOpenCodeTokens(childID);
     reservations.delete(input.callID);
     } catch (error) {
       if (reservations.has(input.callID) || (pending.child_session_id && reservations.has(pending.child_session_id))) {
-        await finalizeReservation(pending, { outcome: "error", result_summary: error?.code || "TASK_AFTER_ERROR", sessionID: pending.child_session_id || null, terminal: false, taskAction: "fail" });
+        await finalizeReservation(pending, { outcome: "error", result_summary: error?.code || "TASK_AFTER_ERROR", sessionID: pending.child_session_id || pending.provisional_child_session_id || null, terminal: false, taskAction: "fail" });
       }
       throw error;
     }
@@ -1767,18 +1770,29 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         const rootParent = masterParent(parent);
         const candidates = [...reservations.entries()].filter(([, pending]) =>
           pending.role === child.agent &&
-          !pending.child_session_id &&
-          pending.master_parent_session_id === rootParent &&
-          (!child.reservation_id && !child.reservationID && !child.task_call_id && !child.callID && !child.call_id
-            || [child.reservation_id, child.reservationID, child.task_call_id, child.callID, child.call_id].includes(pending.task_call_id)),
+          reservationEligibleForSessionCreated(pending) &&
+          pending.master_parent_session_id === rootParent,
         );
-        if (candidates.length === 1) {
-          const [[callID, pending]] = candidates;
+        const explicitCallID = [child.reservation_id, child.reservationID, child.task_call_id, child.callID, child.call_id].find((value) => typeof value === "string" && value) || null;
+        const decision = sessionCreatedCorrelationDecision({
+          background: candidates.some(([, pending]) => pending.background),
+          explicitCallID,
+          candidateCallIDs: candidates.map(([, pending]) => pending.task_call_id),
+        });
+        if (decision === "rejected") throw new Error("SESSION_CREATED_CORRELATION_REJECTED");
+        if (["durable", "provisional"].includes(decision)) {
+          const [[callID, pending]] = explicitCallID
+            ? candidates.filter(([, candidate]) => candidate.task_call_id === explicitCallID)
+            : candidates;
           const bindingStartedAt = Date.now();
-          const bound = await runProcessAsync(BIND, [pending.token, child.id], { env: process.env });
-           await recordLatency({ stage: "task_background_binding", outcome: bound.status === 0 ? "bound" : "binding_failed", duration_ms: elapsed(bindingStartedAt), handoff_ms: elapsed(bindingStartedAt), agent: pending.role, call_id: pending.task_call_id, session_id: child.id, ...eventMetadata(pending) });
-          if (bound.status === 0) {
-            if (pending.role === "codex_executor") await ensurePolicy(child.id, {
+          const bound = decision === "durable" ? await runProcessAsync(BIND, [pending.token, child.id], { env: process.env }) : { status: 0 };
+            await recordLatency({ stage: "task_background_binding", outcome: decision === "provisional" ? "provisional" : (bound.status === 0 ? "bound" : "binding_failed"), duration_ms: elapsed(bindingStartedAt), handoff_ms: elapsed(bindingStartedAt), agent: pending.role, call_id: pending.task_call_id, session_id: child.id, ...eventMetadata(pending) });
+           if (bound.status === 0) {
+             if (decision === "provisional") pending.provisional_child_session_id = child.id;
+             if (decision === "durable") {
+                await bindExactChildReservation(pending, child.id, { readTask, advanceTask, updateWorkPacket, packetPatch: { phase: "background_bound", outcome: "running" } });
+              }
+             if (pending.role === "codex_executor") await ensurePolicy(child.id, {
               agent: "codex_executor",
               master_parent_session_id: pending.master_parent_session_id,
                task_call_id: pending.packet_id,
@@ -1789,13 +1803,13 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
               task_lease_id: pending.task_lease_id,
               packet_id: pending.packet_id,
             });
-            packetCallBySession.set(child.id, pending.task_call_id);
-            await updateWorkPacket(pending.task_call_id, { child_session_id: child.id, phase: "background_bound", outcome: "running" });
-            await advanceTask(pending, "BOUND", { child_session_id: child.id });
-            reservations.set(child.id, { ...pending, child_session_id: child.id });
-            await flushBufferedOpenCodeTokens(child.id);
-            reservations.delete(callID);
-            await recordObjectiveEvent("objective_bound", child.id, pending.master_parent_session_id, pending.task_call_id, CODEX_REQUIRED, "BOUND");
+             packetCallBySession.set(child.id, pending.task_call_id);
+              if (decision === "durable") {
+                reservations.set(child.id, { ...pending, child_session_id: child.id });
+                reservations.delete(callID);
+              }
+             await flushBufferedOpenCodeTokens(child.id);
+             await recordObjectiveEvent("objective_bound", child.id, pending.master_parent_session_id, pending.task_call_id, CODEX_REQUIRED, "BOUND");
           }
         }
       }
@@ -1872,4 +1886,4 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
   return plugin;
 };
 
-export default { server: OpenAITeamTools };
+export default { id: "openai-team-tools", server: OpenAITeamTools };

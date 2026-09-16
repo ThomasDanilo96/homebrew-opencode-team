@@ -6,6 +6,7 @@ const REPOSITORY_MUTATING_TOOLS = new Set([
 ]);
 const READ_ONLY_AGENTS = new Set(["openai_explore", "openai_librarian", "specialist", "reviewer", "reviewer_critical", "tester"]);
 const MUTATING_ACTION = /\b(?:create|modify|change|implement|refactor|migrat(?:e|ion)?|patch|delete|rename|update|deploy)\b|\bfix(?:es|ed|ing)?\s+(?!(?:already|existing|applied)\b)|\bwrite\s+(?:code|file|files|script|tests?|implementation|changes?)\b|\b(?:apply|make)\s+(?:the\s+)?(?:changes?|fix(?:es)?|patch(?:es)?)\b/i;
+const NEGATED_MUTATION = /\b(?:do\s+not|don['’]t|must\s+not|never)\s+(?:(?:ever|also|actually|just)\s+)*(?:create|modify|change|implement|refactor|migrat(?:e|ion)?|patch|delete|rename|update|deploy|fix(?:es|ed|ing)?|write\s+(?:code|file|files|script|tests?|implementation|changes?)|(?:apply|make)\s+(?:the\s+)?(?:changes?|fix(?:es)?|patch(?:es)?))(?:\s+(?:or|and)\s+(?:create|modify|change|implement|refactor|migrat(?:e|ion)?|patch|delete|rename|update|deploy|fix(?:es|ed|ing)?|write\s+(?:code|file|files|script|tests?|implementation|changes?)|(?:apply|make)\s+(?:the\s+)?(?:changes?|fix(?:es)?|patch(?:es)?)))*\b/gi;
 const READ_ONLY_ACTION = /\b(?:analy[sz]e|inspect|audit|research|compare|review|map|understand|report|profile|investigate|find|read|propose|document|test|verify)\b/i;
 const REMOTE_CONTEXT = /\b(?:ssh|remote|server|vps|docker(?:\s+(?:ps|inspect|logs|images|stats|info)|\s+containers?)?|systemctl|journalctl|remote\s+logs?|host\s+diagnostics?|deployment\s+state)\b/i;
 const REMOTE_MUTATION = /\b(?:restart|start|stop|reload|enable|disable|exec|run|kill|rm|pull|push|checkout|switch|reset|clean|commit|merge|rebase|deploy|delete|remove|change|modify)\b/i;
@@ -23,6 +24,7 @@ const STRONG_MUTATION = /\b(?:create|modify|change|implement|refactor|migrat(?:e
 const HIGH_RISK = /\b(?:security|auth(?:entication|orization)?|schema|data\s+(?:delet(?:e|ion)|removal)|delete\s+(?:production\s+)?data|shared\s+runtime|concurren(?:cy|t)|cleanup|deploy(?:ment)?)\b/i;
 
 const unquoted = (text) => text.replace(QUOTED_TERM, " ");
+const withoutNegatedMutations = (text) => text.replace(NEGATED_MUTATION, " ");
 const complexityFor = (text) => /\b(?:multi[- ]service|rollback|cross[- ](?:service|repository)|end[- ]to[- ]end)\b/i.test(text) ? "EXTREME"
   : /\b(?:shared\s+runtime|concurren(?:cy|t)|cleanup|multi(?:ple)?\s+(?:module|service))\b/i.test(text) ? "HEAVY"
   : /\b(?:refactor|migration|schema|architecture|external\s+documentation|security|correctness|audit)\b/i.test(text) ? "COMPLEX"
@@ -31,14 +33,16 @@ const complexityFor = (text) => /\b(?:multi[- ]service|rollback|cross[- ](?:serv
 export const analyzeObjective = (objective) => {
   const text = String(objective || "").trim();
   const plain = unquoted(text);
-  const clauses = text.split(/(?:\s*(?:;|\.|\bthen\b|\band\b)\s*)+/i).filter(Boolean).map((clause) => {
+  const mutationPlain = withoutNegatedMutations(plain);
+  const clauses = text.split(/(?:\s*(?:;|\.|\bthen\b)\s*)+/i).filter(Boolean).map((clause) => {
     const clauseText = clause.trim();
     const clausePlain = unquoted(clauseText);
+    const mutationClausePlain = withoutNegatedMutations(clausePlain);
     return {
       text: clauseText,
       // History/proposal language may qualify a request, but never neutralizes an
       // unquoted mutation verb in that same clause.
-      intent: MUTATING_ACTION.test(clausePlain) && !PROPOSAL.test(clausePlain) ? "MUTATING" : READ_ONLY_ACTION.test(clausePlain) ? "READ_ONLY" : "AMBIGUOUS",
+      intent: MUTATING_ACTION.test(mutationClausePlain) && !PROPOSAL.test(clausePlain) ? "MUTATING" : READ_ONLY_ACTION.test(clausePlain) ? "READ_ONLY" : "AMBIGUOUS",
       remote: REMOTE_CONTEXT.test(clausePlain),
     };
   });
@@ -46,12 +50,12 @@ export const analyzeObjective = (objective) => {
   const repository = REPOSITORY_CONTEXT.test(plain);
   const hasMutatingClause = clauses.some(({ intent }) => intent === "MUTATING");
   const hasLocalMutatingClause = clauses.some(({ intent, remote: clauseRemote }) => intent === "MUTATING" && !clauseRemote);
-  const hasRemoteMutationClause = clauses.some(({ text: clause, remote: clauseRemote }) => clauseRemote && REMOTE_MUTATION.test(unquoted(clause)));
+  const hasRemoteMutationClause = clauses.some(({ text: clause, remote: clauseRemote }) => clauseRemote && REMOTE_MUTATION.test(withoutNegatedMutations(unquoted(clause))));
   const explicitReview = /^(?:\s*)(?:audit|review(?!\s+architecture)|correctness|security\s+review|architecture\s+review|critical\s+review)\b/i.test(plain) && !PROPOSAL.test(text) && !HISTORY.test(text);
-  const reviewOnly = explicitReview && !STRONG_MUTATION.test(plain);
+  const reviewOnly = explicitReview && !STRONG_MUTATION.test(withoutNegatedMutations(plain));
   const classification = reviewOnly ? "READ_ONLY" : hasRemoteMutationClause && !repository && !hasLocalMutatingClause ? "REMOTE_MUTATION"
     : hasMutatingClause ? "MUTATING"
-    : remote ? "REMOTE_READ_ONLY" : READ_ONLY_ACTION.test(plain) ? "READ_ONLY" : "AMBIGUOUS";
+    : remote ? "REMOTE_READ_ONLY" : READ_ONLY_ACTION.test(mutationPlain) || mutationPlain !== plain ? "READ_ONLY" : "AMBIGUOUS";
   const complexity = complexityFor(plain);
   const risk = HIGH_RISK.test(plain) ? (/\b(?:schema|data\s+(?:delet(?:e|ion)|removal)|delete\s+(?:production\s+)?data|shared\s+runtime|concurren(?:cy|t)|cleanup|deploy(?:ment)?|multi[- ]service)\b/i.test(plain) ? "critical" : "high") : "low";
   const tester = /\b(?:test|verify)\b/i.test(plain) && (HISTORY.test(text) || /\b(?:session|fix)\b/i.test(plain));

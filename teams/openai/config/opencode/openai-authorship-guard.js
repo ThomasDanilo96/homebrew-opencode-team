@@ -149,4 +149,4 @@ export const OpenAIAuthorshipGuard = async (pluginInput = {}) => ({
   },
 });
 
-export default { server: OpenAIAuthorshipGuard };
+export default { id: "openai-authorship-guard", server: OpenAIAuthorshipGuard };

@@ -1,8 +1,10 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { dailyCost, dailyFanout, DAILY_AGENT_MODELS, DAILY_PRICING } from "../teams/daily/daily-policy.mjs";
 import { backgroundDelegationAllowed, beginRequestCycle, admitDelegation, finishDelegation, GuardrailPolicyError } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
+import { analyzeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 
 test("Daily uses OpenAI-only model tiers", () => {
   assert.equal(DAILY_AGENT_MODELS.openai_orchestrator, "openai/gpt-5.6-luna");
@@ -19,6 +21,29 @@ test("Daily pricing is optional observability math", () => {
   assert.equal(dailyCost({ model: "gpt-5.6-luna", input: 4000, cached: 0, output: 1000 }), 0.002);
   assert.equal(dailyCost({ model: "unknown", input: 4000, cached: 0, output: 1000 }), null);
   assert.equal(DAILY_PRICING.effective_date, "2026-09-16");
+});
+
+test("Routing ignores explicitly negated mutations without hiding genuine mutations", () => {
+  assert.equal(analyzeObjective("Read only README.md line 3. Do not modify anything and do not call task.").classification, "READ_ONLY");
+  assert.equal(analyzeObjective("do not analyze, modify the file").classification, "MUTATING");
+  assert.equal(analyzeObjective("Do not modify or delete files; review them").classification, "READ_ONLY");
+  assert.equal(analyzeObjective("Do not modify and delete files; review them").classification, "READ_ONLY");
+  assert.equal(analyzeObjective("do not modify and then delete the file").classification, "MUTATING");
+  assert.equal(analyzeObjective("Don’t modify files").classification, "READ_ONLY");
+  assert.equal(analyzeObjective("do not ever modify files").classification, "READ_ONLY");
+  assert.equal(analyzeObjective("do not modify files, but delete the file").classification, "MUTATING");
+  assert.equal(analyzeObjective("do not modify files; then delete the file").classification, "MUTATING");
+});
+
+test("OpenCode path plugins expose ids on their default objects", async () => {
+  for (const [file, id, server] of [
+    ["../teams/openai/config/opencode/openai-team-tools.js", "openai-team-tools", "OpenAITeamTools"],
+    ["../teams/openai/config/opencode/openai-authorship-guard.js", "openai-authorship-guard", "OpenAIAuthorshipGuard"],
+  ]) {
+    const source = await readFile(new URL(file, import.meta.url), "utf8");
+    assert.match(source, new RegExp(`export default \\{ id: "${id}", server: ${server} \\};`));
+    assert.doesNotMatch(source, new RegExp(`export const id = "${id}"`));
+  }
 });
 
 test("Daily guardrails allow bounded concurrent delegation", () => {
