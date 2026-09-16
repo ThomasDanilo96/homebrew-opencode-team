@@ -166,6 +166,15 @@ test("Captured live calculator parent and child scopes remain canonically bound"
   assert.equal(objectiveIsBound(parent, canonical), true);
 });
 
+test("Recovered Daily inspection scope remains bound without admitting unrelated domains", () => {
+  const parent = "Delegate exactly one read-only subagent using openai_explore to inspect calculator.js. It must make no edits and return exactly the fixed sentinel DAILY_READONLY_CHILD_OK if calculator.js defines add(a, b) and exports add. Do not start any other child. Return the child's sentinel and nothing else.";
+  const child = "Read-only inspection only. Inspect calculator.js in the workspace. If it defines add(a, b) and exports add, return exactly: DAILY_READONLY_CHILD_OK. Make no edits and return nothing else.";
+  const canonical = canonicalDelegatedObjective(parent, child);
+  assert.notEqual(canonical, "");
+  assert.equal(objectiveIsBound(parent, canonical), true);
+  assert.equal(canonicalDelegatedObjective(parent, "Read-only inspection only. Inspect billing secrets in the workspace."), "");
+});
+
 test("Review protocol target binding excludes unrelated scope tokens", () => {
   const id = "a".repeat(64);
   const root = "Inspect parser fixtures";
