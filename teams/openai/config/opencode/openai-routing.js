@@ -1,3 +1,5 @@
+import { dailyFanout } from "../../../daily/daily-policy.mjs";
+
 const REPOSITORY_MUTATING_TOOLS = new Set([
   "apply_patch", "edit", "write", "delete", "rename", "file_create", "file_delete", "file_rename",
   "create_file", "remove_file", "move_file", "multi_edit", "write_file", "patch",
@@ -59,7 +61,7 @@ export const analyzeObjective = (objective) => {
   const discovery_agents = classification === "READ_ONLY" && repository && LIBRARY.test(plain) ? [...new Set([agent, "openai_librarian"])] : [];
   const intent_evidence = [...clauses.map(({ intent }, index) => `clause-${index + 1}:${intent.toLowerCase()}`), ...(repository ? ["scope:repository"] : []), ...(remote ? ["scope:remote"] : []), ...(LIBRARY.test(plain) ? ["scope:external-docs"] : []), ...(HIGH_RISK.test(plain) ? ["scope:high-risk"] : [])].slice(0, 8);
   const codex_profile = classification !== "MUTATING" ? null : complexity === "TRIVIAL" ? "quick" : risk === "critical" || ["COMPLEX", "HEAVY", "EXTREME"].includes(complexity) ? "complex" : "standard";
-  return { classification, clauses, agent, complexity, reasoning_effort: complexity === "EXTREME" ? "high" : complexity === "HEAVY" ? "medium" : "low", risk, review_required: classification === "MUTATING" && (risk === "high" || risk === "critical"), codex_profile, discovery_agents, intent_evidence };
+  return { classification, clauses, agent, complexity, fanout_limit: dailyFanout(complexity), reasoning_effort: complexity === "EXTREME" ? "high" : complexity === "HEAVY" ? "medium" : "low", risk, review_required: classification === "MUTATING" && (risk === "high" || risk === "critical"), codex_profile, discovery_agents, intent_evidence };
 };
 
 export const classifyObjective = (objective) => analyzeObjective(objective).classification;

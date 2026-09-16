@@ -1,5 +1,14 @@
 const tier = (model, input, cached, output) => ({ model, input_per_million: input, cached_per_million: cached, output_per_million: output });
 
+export const TRIVIAL = 0;
+export const NORMAL = 1;
+export const COMPLEX = 3;
+export const HEAVY = 6;
+export const EXTREME = 10;
+
+export const DAILY_FANOUT = Object.freeze({ TRIVIAL, NORMAL, COMPLEX, HEAVY, EXTREME });
+export const DAILY_COMPLEXITY_TO_GUARDRAIL = Object.freeze({ TRIVIAL: "quick", NORMAL: "normal", COMPLEX: "complex", HEAVY: "long", EXTREME: "long" });
+
 export const DAILY_AGENT_MODELS = Object.freeze({
   openai_orchestrator: "openai/gpt-5.6-luna",
   openai_explore: "openai/gpt-5.6-luna",
@@ -22,8 +31,7 @@ export const DAILY_PRICING = Object.freeze({
   }),
 });
 
-const FANOUT = Object.freeze({ TRIVIAL: 0, NORMAL: 1, COMPLEX: 3, HEAVY: 6, EXTREME: 10 });
-export const dailyFanout = (complexity) => FANOUT[String(complexity || "NORMAL").toUpperCase()] ?? FANOUT.NORMAL;
+export const dailyFanout = (complexity) => DAILY_FANOUT[String(complexity || "NORMAL").toUpperCase()] ?? NORMAL;
 
 export const dailyCost = ({ model, input = 0, cached = 0, output = 0 } = {}) => {
   const pricing = DAILY_PRICING.models[String(model || "")];
