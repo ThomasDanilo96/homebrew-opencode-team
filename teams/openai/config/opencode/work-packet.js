@@ -8,7 +8,7 @@ const idFor = (value) => createHash("sha256").update(String(value || "")).digest
 const pathFor = (callID) => join(root(), `${idFor(callID)}.json`);
 const packetPathFor = (id) => join(root(), `${/^[a-f0-9]{64}$/i.test(String(id || "")) ? String(id) : idFor(id)}.json`);
 const finite = (value) => typeof value === "number" && Number.isFinite(value) ? value : undefined;
-const strings = new Set(["packet_id", "task_call_id", "objective_sha256", "parent_session_id", "child_session_id", "agent", "classification", "phase", "outcome", "codex_outcome", "codex_run_id", "codex_thread_id", "codex_last_kind", "parent_codex_run_id", "profile", "requested_model", "executed_model", "fallback_model", "fallback_reason", "created_at", "updated_at", "completed_at", "codex_budget_status", "opencode_budget_status", "discovery_group_id"]);
+const strings = new Set(["packet_id", "task_call_id", "task_lease_id", "objective_sha256", "parent_session_id", "child_session_id", "agent", "classification", "phase", "outcome", "codex_outcome", "codex_run_id", "codex_thread_id", "codex_last_kind", "parent_codex_run_id", "profile", "requested_model", "executed_model", "fallback_model", "fallback_reason", "created_at", "updated_at", "completed_at", "codex_budget_status", "opencode_budget_status", "discovery_group_id"]);
 const safeStrings = new Set(["task_fingerprint", "benchmark_run_id", "benchmark_task_id", "variant", "complexity", "reasoning_effort", "risk", "codex_profile", "review_status", "tester_status", "verification_status", "error_code", "error_phase", "cache_status", "workspace_fingerprint", "test_task_id", "review_task_id", "gate_target"]);
 const listStrings = new Set(["acceptance_criteria", "verification_commands", "expected_verification_hashes", "verification_evidence", "discovery_required_lanes", "next_agents", "policy_reasons"]);
 const numbers = new Set(["schema_version", "duration_ms", "admission_wait_ms", "codex_input_tokens", "codex_cached_input_tokens", "codex_cache_write_input_tokens", "codex_output_tokens", "codex_reasoning_tokens", "codex_total_tokens", "codex_threshold_tokens", "codex_overage_tokens", "opencode_input_tokens", "opencode_cached_input_tokens", "opencode_cache_write_input_tokens", "opencode_output_tokens", "opencode_reasoning_tokens", "opencode_total_tokens", "opencode_threshold_tokens", "opencode_overage_tokens", "attempt", "recovery_attempt", "retry_count", "codex_resume_count", "fallback_count", "mutation_count", "tool_call_count", "compaction_count", "compaction_input_chars", "compaction_output_chars", "correctness_score", "cost", "first_event_ms", "wrapper_round_trips", "verification_recognized_count", "verification_passed_count", "verification_failed_count", "verification_truncated_count"]);
@@ -141,6 +141,7 @@ export const updateWorkPacket = async (callID, fields = {}) => withLock(callID, 
   const file = pathFor(callID);
   let current;
   try { current = JSON.parse(await readFile(file, "utf8")); } catch { return null; }
+  if (fields.child_session_id && current.child_session_id && current.child_session_id !== fields.child_session_id) return null;
   const now = new Date().toISOString();
   const next = clean({ ...current, ...clean(fields), updated_at: now });
   if ((next.phase === "foreground_completion" || next.phase === "background_completion" || (next.phase === "codex_terminal" && next.outcome && next.outcome !== "pending")) && !next.completed_at) next.completed_at = now;
@@ -157,6 +158,7 @@ export const updateWorkPacketByID = async (packetID, fields = {}) => {
     let current;
     try { current = JSON.parse(await readFile(file, "utf8")); } catch { return null; }
     if (String(current.packet_id || "").toLowerCase() !== id) return null;
+    if (fields.child_session_id && current.child_session_id && current.child_session_id !== fields.child_session_id) return null;
     const now = new Date().toISOString();
     const next = clean({ ...current, ...clean(fields), updated_at: now });
     if ((next.phase === "foreground_completion" || next.phase === "background_completion" || (next.phase === "codex_terminal" && next.outcome && next.outcome !== "pending")) && !next.completed_at) next.completed_at = now;
@@ -175,6 +177,7 @@ export const updateWorkPacketByIDIfCurrent = async (packetID, expected = {}, fie
     let current;
     try { current = JSON.parse(await readFile(file, "utf8")); } catch { return { packet: null, matched: false }; }
     if (String(current.packet_id || "").toLowerCase() !== id) return { packet: null, matched: false };
+    if (fields.child_session_id && current.child_session_id && current.child_session_id !== fields.child_session_id) return { packet: clean(current), matched: false };
     const matched = Object.entries(expected).every(([key, value]) => Array.isArray(value)
       ? value.includes(current[key])
       : current[key] === value);
@@ -209,6 +212,25 @@ export const addWorkPacketTokens = async (callID, source, tokens = {}, eventHash
   await atomicWrite(file, next);
   return clean(next);
 });
+export const addWorkPacketTokensByID = async (packetID, source, tokens = {}, eventHash = null) => {
+  const id = String(packetID || "").toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(id)) return null;
+  return withLock(id, async () => {
+    const file = packetPathFor(id); let current;
+    try { current = JSON.parse(await readFile(file, "utf8")); } catch { return null; }
+    if (String(current.packet_id || "").toLowerCase() !== id) return null;
+    const prefix = source === "codex" ? "codex" : source === "opencode" ? "opencode" : null;
+    if (!prefix) return clean(current);
+    const hash = /^[a-f0-9]{64}$/i.test(String(eventHash || "")) ? String(eventHash).toLowerCase() : null;
+    const processed = tokenEventHashes(current.processed_token_event_hashes);
+    if (hash && processed.includes(hash)) return clean(current);
+    const next = { ...current, updated_at: new Date().toISOString() };
+    for (const [name, value] of Object.entries(tokens)) { const key = `${prefix}_${name}`; if (numbers.has(key) && finite(value) !== undefined) next[key] = (finite(current[key]) || 0) + value; }
+    const threshold = thresholdFor(prefix, next.agent), input = finite(next[`${prefix}_input_tokens`]) || 0;
+    next[`${prefix}_threshold_tokens`] = threshold; next[`${prefix}_overage_tokens`] = Math.max(0, input - threshold); next[`${prefix}_budget_status`] = input > threshold ? "exceeded" : "within";
+    if (hash) next.processed_token_event_hashes = JSON.stringify([...processed, hash]); await atomicWrite(file, next); return clean(next);
+  }, true);
+};
 export const incrementWorkPacket = async (callID, counters = {}) => withLock(callID, async () => {
   const file = packetPathFor(callID);
   let current;
@@ -220,6 +242,18 @@ export const incrementWorkPacket = async (callID, counters = {}) => withLock(cal
   await atomicWrite(file, next);
   return clean(next);
 });
+export const incrementWorkPacketByID = async (packetID, counters = {}) => {
+  const id = String(packetID || "").toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(id)) return null;
+  return withLock(id, async () => {
+    const file = packetPathFor(id); let current;
+    try { current = JSON.parse(await readFile(file, "utf8")); } catch { return null; }
+    if (String(current.packet_id || "").toLowerCase() !== id) return null;
+    const next = { ...current, updated_at: new Date().toISOString() };
+    for (const [key, value] of Object.entries(counters)) if (cumulativeNumbers.has(key) && finite(value) !== undefined && value >= 0) next[key] = (finite(current[key]) || 0) + value;
+    await atomicWrite(file, next); return clean(next);
+  }, true);
+};
 export const pruneWorkPackets = async () => {
   const days = Number(process.env.OPENAI_WORK_PACKET_RETENTION_DAYS ?? 7);
   const retentionMs = (Number.isFinite(days) && days >= 0 ? days : 7) * 86400000;

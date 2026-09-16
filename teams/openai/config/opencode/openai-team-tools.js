@@ -14,7 +14,7 @@ import { createRemoteReadTool } from "./openai-remote-ops.js";
 import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective, REPOSITORY_MUTATING_TOOLS } from "./openai-routing.js";
 import { parseVerificationEvidence, postExecutionPolicy, verificationCommandCategory, isAllowlistedVerificationCommand } from "./execution-policy.js";
 import { DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, runProcessAsync } from "./process-async.js";
-import { addWorkPacketTokens, createWorkPacket, incrementWorkPacket, listWorkPackets, pruneWorkPackets, tokenEventHash, updateWorkPacket, updateWorkPacketByID, updateWorkPacketByIDIfCurrent } from "./work-packet.js";
+import { addWorkPacketTokensByID, createWorkPacket, incrementWorkPacketByID, listWorkPackets, pruneWorkPackets, tokenEventHash, updateWorkPacket, updateWorkPacketByID, updateWorkPacketByIDIfCurrent } from "./work-packet.js";
 import { TaskStateError, claimTask, completeTask, readTask, transitionTask } from "./task-state.js";
 import { workspaceFingerprint } from "./read-cache.js";
 import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
@@ -871,10 +871,10 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
   };
   const taskCallForSession = async (sessionID) => {
     const pending = reservations.get(sessionID);
-    if (pending?.task_call_id) return pending.task_call_id;
-    if (packetCallBySession.has(sessionID)) return packetCallBySession.get(sessionID);
+     if (pending?.packet_id) return pending.packet_id;
+     if (packetCallBySession.has(sessionID)) return packetCallBySession.get(sessionID);
     const policy = await readPolicy(sessionID);
-    return policy?.task_call_id || null;
+     return policy?.packet_id || null;
   };
   const flushBufferedOpenCodeTokens = async (sessionID) => {
     const events = bufferedOpenCodeTokens.get(sessionID);
@@ -882,7 +882,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     const packetCallID = await taskCallForSession(sessionID);
     if (!packetCallID) return;
     for (const [hash, tokens] of events) {
-      if (await addWorkPacketTokens(packetCallID, "opencode", tokens, hash)) events.delete(hash);
+       if (await addWorkPacketTokensByID(packetCallID, "opencode", tokens, hash)) events.delete(hash);
     }
     if (!events.size) bufferedOpenCodeTokens.delete(sessionID);
   };
@@ -900,6 +900,21 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     const result = await resolveInitialObjectiveFromClient(pluginInput.client, sessionID, new Set(), new Map());
     if (result?.rootSessionID && result.rootSessionID !== sessionID) masterParentBySession.set(sessionID, result.rootSessionID);
     return result;
+  };
+  const recoverCodexReservation = async (sessionID) => {
+    try {
+      const packets = await (pluginInput.listWorkPackets || listWorkPackets)();
+      const packet = packets.find((entry) => entry.child_session_id === sessionID && entry.agent === "codex_executor" && ["pending", "running"].includes(String(entry.outcome || "").toLowerCase()));
+      if (!packet) return null;
+      const task = await readTask(packet.task_fingerprint);
+      const messages = await pluginInput.client?.session?.messages({ path: { id: sessionID } });
+      const objective = latestUserObjective(unwrapData(messages));
+      if (!task || !objective || objectiveHash(objective) !== packet.objective_sha256 || task.child_session_id !== sessionID || task.packet_id !== packet.packet_id || task.agent !== "codex_executor" || task.lease_id !== packet.task_lease_id || task.attempt !== packet.attempt || ["COMPLETED", "FAILED"].includes(task.state)) return null;
+      const recovered = { ...packet, authoritative_objective: objective, master_parent_session_id: packet.parent_session_id, task_call_id: packet.task_call_id || packet.packet_id, task_id: task.task_fingerprint, task_fingerprint: task.task_fingerprint, packet_id: packet.packet_id, task_state_version: task.version, task_lease_id: task.lease_id, attempt: task.attempt, role: "codex_executor", child_session_id: sessionID };
+      reservations.set(sessionID, recovered);
+      packetCallBySession.set(sessionID, recovered.packet_id);
+      return recovered;
+    } catch { return null; }
   };
 
   const plugin = ({
@@ -927,7 +942,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       .map(({ packet }) => packet);
     const incompleteTodos = (Array.isArray(todos) ? todos : []).filter((todo) => !["completed", "cancelled"].includes(String(todo?.status || todo?.state || "").toLowerCase())).slice(0, 12);
     const context = renderSemanticCompactionContext(relevantPackets, incompleteTodos);
-    await Promise.all(relevantPackets.map((packet) => incrementWorkPacket(packet.packet_id || packet.task_call_id, {
+     await Promise.all(relevantPackets.map((packet) => incrementWorkPacketByID(packet.packet_id, {
       compaction_count: 1, compaction_input_chars: context.length, compaction_output_chars: context.length,
     })));
     output.context = Array.isArray(output.context) ? output.context : [];
@@ -959,7 +974,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         if (/\breturn\s+fallback_required\b|\bsimulat(?:e|ing)\s+(?:a\s+)?provider\s+failure\b|\bauthoriz(?:e|ing)\s+(?:native\s+)?terra\s+(?:editing|fallback)\b|\bopen\s+the\s+circuit\s+breaker\b|\bmanufactur(?:e|ing)\s+(?:a\s+)?fallback\b/i.test(task)) {
           throw new Error("Codex task rejected: fallback state must come only from structured runtime/provider results; submit the actual coding objective.");
         }
-        let reservation = reservations.get(context.sessionID);
+         let reservation = reservations.get(context.sessionID);
+         if (!reservation && context.agent === "codex_executor") reservation = await recoverCodexReservation(context.sessionID);
         const testObjective = await pluginInput.authoritativeObjectiveForSession?.(context.sessionID);
         const initialObjective = reservation ? null : await resolveInitialObjective(context.sessionID);
         const authoritativeObjective = reservation?.authoritative_objective || initialObjective?.objective || testObjective;
@@ -988,9 +1004,10 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           reservations.set(context.sessionID, reservation);
           await recordObjectiveEvent("objective_bound", context.sessionID, initialObjective.parentSessionID, context.callID, policy.status, "BOUND");
         }
-         const packetCallID = await taskCallForSession(context.sessionID);
-         const packet = packetCallID ? await updateWorkPacket(packetCallID, { phase: "codex_running", codex_outcome: "running" }) : null;
-         if (packetCallID) await incrementWorkPacket(packetCallID, { wrapper_round_trips: 1 });
+          const packetCallID = await taskCallForSession(context.sessionID);
+          const packet = packetCallID ? await updateWorkPacketByID(packetCallID, { phase: "codex_running", codex_outcome: "running" }) : null;
+          if (packetCallID && !packet) throw new Error("CODEX_PACKET_UPDATE_FAILED");
+          if (packetCallID) await incrementWorkPacketByID(packetCallID, { wrapper_round_trips: 1 });
          await recordObjectiveEvent("codex_execution_admitted", context.sessionID, reservation?.master_parent_session_id, context.callID, policy.status, "ALLOW");
         await transitionCurrentPolicy(context.sessionID, CODEX_RUNNING);
         await advanceTask(reservation, "RUNNING");
@@ -1292,7 +1309,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
              if (reservationFingerprint && currentRecovery && currentRecovery.fingerprint === reservationFingerprint && currentRecovery.attempt === (reservation?.attempt || 1) && currentRecovery.task_lease_id === reservation.task_lease_id && currentRecovery.resume_count === 0 && currentRecovery.termination_sealed === true && currentRecovery.journal_scan_complete === true && currentRecovery.journal_incomplete === false && Array.isArray(currentRecovery.command_journal) && currentRecovery.command_journal.length === 0 && currentRecovery.sealed_run_id === currentRecovery.codex_run_id && currentRecovery.sealed_lease_id === reservation.task_lease_id) { await removeRecoveryAndHome(reservationFingerprint, currentRecovery); if (laneHome) { try { await removeOwnedHome(laneHome); } catch {} } }
           const failure = handoff || structuredCircuitOpen() || {};
           fallbackReason = failure.fallback_reason || failure.reason || "provider_failure";
-           if (packetCallID && handoff?.schema_version === 3) await addWorkPacketTokens(packetCallID, "codex", handoff.token_usage || {}, tokenEventHash("codex", handoff.codex_run_id, handoff.codex_run_id));
+         if (packetCallID && handoff?.schema_version === 3) await addWorkPacketTokensByID(packetCallID, "codex", handoff.token_usage || {}, tokenEventHash("codex", handoff.codex_run_id, handoff.codex_run_id));
           fallbackCount = 1; executedModel = modelPlan.fallback_model;
           try {
             result = await runLane(executedModel, { OPENAI_CODEX_FALLBACK_COUNT: "1", OPENAI_CODEX_FALLBACK_REASON: fallbackReason });
@@ -1326,7 +1343,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         }
         if (packetCallID && handoff?.codex_run_id) {
           await updateWorkPacket(packetCallID, { codex_run_id: handoff.codex_run_id, codex_thread_id: handoff.thread_id || "", codex_resume_count: handoff.resume_count || 0, codex_last_kind: handoff.reason || "", parent_codex_run_id: handoff.parent_codex_run_id || "" });
-          await addWorkPacketTokens(packetCallID, "codex", handoff.token_usage || {}, tokenEventHash("codex", handoff.codex_run_id, handoff.codex_run_id));
+           await addWorkPacketTokensByID(packetCallID, "codex", handoff.token_usage || {}, tokenEventHash("codex", handoff.codex_run_id, handoff.codex_run_id));
         }
         // `handoff` is absent for a circuit-open result, so retain the
         // machine-readable provider classification parsed from output.
@@ -1340,9 +1357,9 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
            await transitionCurrentPolicy(context.sessionID, CODEX_TASK_FAILED, { error: "HANDOFF_INVALID" });
            const terminal = taskFailure("HANDOFF_INVALID", "handoff_invalid", handoff.codex_run_id);
            await report(terminal); await recordCodexTerminal("HANDOFF_INVALID", result); return JSON.stringify(terminal);
-         }
-         if (result.status === 0) {
-          const verificationEvidence = parseVerificationEvidence(result.stdout);
+          }
+          if (result.status === 0) {
+           const verificationEvidence = parseVerificationEvidence(result.stdout);
           const executionPolicy = postExecutionPolicy({
             classification: reservation?.classification || packet?.classification,
             complexity: reservation?.complexity || packet?.complexity,
@@ -1468,7 +1485,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     }
     if (toolName !== "task" && toolName !== "openai_run_codex" && input.sessionID) {
       const callID = await taskCallForSession(input.sessionID);
-      if (callID) await incrementWorkPacket(callID, { tool_call_count: 1 });
+     if (callID) await incrementWorkPacketByID(callID, { tool_call_count: 1 });
     }
     if (isMutationCapableTool(toolName)) {
       if (sessionAgent === "openai_orchestrator" && REPOSITORY_MUTATING_TOOLS.has(toolName)) {
@@ -1678,7 +1695,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     try {
       await createWorkPacket(input.callID, {
         objective_sha256: objectiveHash(delegatedObjective), parent_session_id: rootParent,
-        agent, classification: route.classification, phase: "admitted", outcome: "pending",
+        agent, task_fingerprint: fingerprint, attempt: claim.record.attempt, task_lease_id: claim.record.lease_id, classification: route.classification, phase: "admitted", outcome: "pending",
          admission_wait_ms: elapsed(admissionStartedAt),
          ...packetMetadata, review_task_id: reviewTaskID, test_task_id: testTaskID, gate_target: gateTarget ? (reviewTaskID || testTaskID) : null,
       });
@@ -1698,9 +1715,20 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     const parentGuard = guardrails.get(input.sessionID);
       if (parentGuard) guardrails.set(input.sessionID, finishDelegation(parentGuard, ["tester", "reviewer", "reviewer_critical"].includes(pending.role), pending.delegation_scope));
     try {
-    const foregroundChildID = !pending.background ? childSessionIdFromAfter(output?.metadata) : null;
-    if (!pending.background) await bindExactChildReservation(pending, foregroundChildID, { readTask, advanceTask, updateWorkPacket });
-    let gateEvent = null;
+     const foregroundChildID = !pending.background ? childSessionIdFromAfter(output?.metadata) : null;
+      if (!pending.background) await bindExactChildReservation(pending, foregroundChildID, { readTask, advanceTask, updateWorkPacket, updateWorkPacketByID });
+     if (!pending.background && pending.role === "codex_executor") {
+       const childPacket = (await listWorkPackets()).find((entry) => entry.packet_id === pending.packet_id && entry.child_session_id === foregroundChildID);
+       const childTask = await readTask(pending.task_fingerprint);
+       const childPolicy = foregroundChildID ? await readPolicy(foregroundChildID) : null;
+       const childIdentity = childPolicy?.schema_version === 1 && childPolicy.session_id === foregroundChildID && childPolicy.agent === "codex_executor" && childPolicy.status === CODEX_SUCCESS && childPolicy.task_fingerprint === pending.task_fingerprint && childPolicy.packet_id === pending.packet_id && childPolicy.task_lease_id === pending.task_lease_id && childPolicy.attempt === pending.attempt && childPolicy.task_call_id === (childPacket?.task_call_id || pending.task_call_id);
+       if (!childIdentity) throw Object.assign(new Error(JSON.stringify({ code: "CODEX_CHILD_NOT_SUCCESSFUL", retryable: false, phase: "codex_child_policy", task_id: pending.task_fingerprint, session_id: foregroundChildID, status: childPolicy?.status || null })), { code: "CODEX_CHILD_NOT_SUCCESSFUL" });
+       if (["PENDING_REVIEW", "PENDING_VERIFICATION"].includes(childTask?.state)) {
+         await finalizeReservation(pending, { outcome: "pending", result_summary: "pending_gates", sessionID: foregroundChildID, terminal: false, packet: false, taskAction: null });
+         return undefined;
+       }
+     }
+     let gateEvent = null;
     let gateError = null;
     if (["reviewer", "reviewer_critical"].includes(pending.role) && pending.review_task_id) {
       const validation = await validateGateTarget(pending, pending.review_task_id);
@@ -1779,12 +1807,12 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       await advanceTask(pending, "FAILED", { retryable: true, error_code: "BINDING_FAILED" });
        throw new Error("Could not bind reservation to the exact native child session.");
      }
-     await bindExactChildReservation(pending, childID, { readTask, advanceTask, updateWorkPacket, packetPatch: { phase: "background_bound", outcome: "running" } });
+      await bindExactChildReservation(pending, childID, { readTask, advanceTask, updateWorkPacket, updateWorkPacketByID, packetPatch: { phase: "background_bound", outcome: "running" } });
      if (pending.role === "codex_executor") {
       const boundPacket = (await listWorkPackets()).find((packet) => packet.packet_id === pending.packet_id || packet.task_call_id === pending.packet_id);
       await ensurePolicy(childID, { agent: "codex_executor", master_parent_session_id: pending.master_parent_session_id, task_call_id: boundPacket?.packet_id || pending.packet_id, task_id: pending.task_id, task_fingerprint: pending.task_fingerprint, attempt: pending.attempt, task_lease_id: pending.task_lease_id, packet_id: boundPacket?.packet_id || pending.packet_id });
       }
-      packetCallBySession.set(childID, pending.task_call_id);
+       packetCallBySession.set(childID, pending.packet_id);
      reservations.set(childID, { ...pending, child_session_id: childID });
     await flushBufferedOpenCodeTokens(childID);
     reservations.delete(input.callID);
@@ -1828,7 +1856,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
            if (bound.status === 0) {
              if (decision === "provisional") pending.provisional_child_session_id = child.id;
              if (decision === "durable") {
-                await bindExactChildReservation(pending, child.id, { readTask, advanceTask, updateWorkPacket, packetPatch: { phase: "background_bound", outcome: "running" } });
+      await bindExactChildReservation(pending, child.id, { readTask, advanceTask, updateWorkPacket, updateWorkPacketByID, packetPatch: { phase: "background_bound", outcome: "running" } });
               }
              if (pending.role === "codex_executor") await ensurePolicy(child.id, {
               agent: "codex_executor",
@@ -1841,7 +1869,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
               task_lease_id: pending.task_lease_id,
               packet_id: pending.packet_id,
             });
-             packetCallBySession.set(child.id, pending.task_call_id);
+      packetCallBySession.set(child.id, pending.packet_id);
               if (decision === "durable") {
                 reservations.set(child.id, { ...pending, child_session_id: child.id });
                 reservations.delete(callID);
@@ -1937,7 +1965,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
             input_tokens: input, cached_input_tokens: cacheRead, cache_write_input_tokens: cacheWrite,
             output_tokens: output, reasoning_tokens: reasoning, total_tokens: metric.total_tokens,
           };
-          if (typeof sessionID === "string" && packetCallID) await addWorkPacketTokens(packetCallID, "opencode", eventTokens, eventHash);
+     if (typeof sessionID === "string" && packetCallID) await addWorkPacketTokensByID(packetCallID, "opencode", eventTokens, eventHash);
           else if (typeof sessionID === "string") {
             const events = bufferedOpenCodeTokens.get(sessionID) || new Map();
             events.set(eventHash, eventTokens);

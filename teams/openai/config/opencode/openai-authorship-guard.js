@@ -1,9 +1,11 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
-import { CODEX_REQUIRED, CODEX_SUCCESS, TERRA_FALLBACK, readPolicy } from "./codex-authority.js";
+import { CODEX_REQUIRED, CODEX_SUCCESS, TERRA_FALLBACK, ensurePolicy, readPolicy } from "./codex-authority.js";
 import { isAllowlistedVerificationCommand, verificationCommandCategory } from "./execution-policy.js";
 import { createHash } from "node:crypto";
 import { listWorkPackets } from "./work-packet.js";
+import { readTask, transitionTask } from "./task-state.js";
+import { updateWorkPacketByID } from "./work-packet.js";
 
 const READ_ONLY_TOOLS = new Set([
   "read", "glob", "grep", "webfetch", "todowrite", "skill", "skill_mcp",
@@ -61,6 +63,84 @@ const resolveAgent = async (pluginInput, input) => {
   }
 };
 
+const childParent = (session) => session?.parentID || session?.parent_id || session?.parent?.id || null;
+const childPrompt = (messages) => {
+  const latest = [...(Array.isArray(messages) ? messages : [])].reverse().find((message) => message?.info?.role === "user");
+  const text = (latest?.parts || []).filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n").trim();
+  return text || null;
+};
+const bootstrapCodexPolicy = async (pluginInput, sessionID, agent) => {
+  if (agent !== "codex_executor" || !sessionID) return null;
+  try {
+    const session = (await pluginInput.client?.session?.get({ path: { id: sessionID } }))?.data;
+    const parentID = childParent(session);
+    if (!parentID) return null;
+    const messages = (await pluginInput.client?.session?.messages({ path: { id: sessionID } }))?.data;
+    const prompt = childPrompt(messages);
+    if (!prompt) return null;
+    const objective_sha256 = createHash("sha256").update(prompt).digest("hex");
+    const packets = await (pluginInput.listWorkPackets || listWorkPackets)();
+    const parentIDs = new Set([parentID]);
+    let cursor = parentID;
+    let rootID = parentID;
+    for (let i = 0; i < 32; i++) {
+      const parent = (await pluginInput.client?.session?.get({ path: { id: cursor } }))?.data;
+      const next = childParent(parent);
+      if (!next || parentIDs.has(next)) { rootID = cursor; break; }
+      cursor = next;
+    }
+    parentIDs.add(rootID);
+    const candidates = (Array.isArray(packets) ? packets : []).filter((packet) =>
+      packet?.agent === "codex_executor" && parentIDs.has(packet.parent_session_id) &&
+      packet.objective_sha256 === objective_sha256 &&
+      ["admitted", "codex_running", "foreground_bound", "running"].includes(String(packet.phase || "").toLowerCase()) &&
+      ["pending", "running"].includes(String(packet.outcome || "").toLowerCase()) &&
+      (packet.child_session_id == null || packet.child_session_id === sessionID));
+    if (candidates.length !== 1) return null;
+    const packet = candidates[0];
+    const task = await readTask(packet.task_fingerprint);
+    const lease = packet.task_lease_id || packet.lease_id;
+    if (!task || task.agent !== "codex_executor" || task.parent_session_id !== packet.parent_session_id ||
+      task.packet_id !== packet.packet_id || task.attempt !== packet.attempt || task.lease_id !== lease ||
+      !["CLAIMED", "ADMITTED", "BOUND", "RUNNING", "PENDING_REVIEW", "PENDING_VERIFICATION"].includes(task.state) ||
+      (task.child_session_id && task.child_session_id !== sessionID)) return null;
+    if (["CLAIMED", "ADMITTED"].includes(task.state)) {
+      const bound = await transitionTask(task.task_fingerprint, { expectedVersion: task.version, expectedStates: [task.state], leaseId: task.lease_id, expectedAttempt: task.attempt, expectedLease: task.lease_id, patch: { state: "BOUND", child_session_id: sessionID } });
+      if (bound.child_session_id !== sessionID) return null;
+    } else if (!task.child_session_id || task.child_session_id !== sessionID) return null;
+    const expectedPolicy = {
+      agent: task.agent, master_parent_session_id: packet.parent_session_id,
+      task_fingerprint: task.task_fingerprint, packet_id: task.packet_id,
+      task_call_id: packet.task_call_id || packet.packet_id, attempt: task.attempt,
+      task_lease_id: task.lease_id, objective_sha256,
+    };
+    const existingPolicy = await readPolicy(sessionID);
+    if (existingPolicy && Object.entries(expectedPolicy).some(([key, value]) => existingPolicy[key] != null && existingPolicy[key] !== value)) return null;
+    const boundPacket = await updateWorkPacketByID(packet.packet_id, { child_session_id: sessionID, phase: "foreground_bound", outcome: "running" });
+    if (!boundPacket?.child_session_id || boundPacket.child_session_id !== sessionID) return null;
+    const policy = await ensurePolicy(sessionID, {
+      schema_version: 1, ...expectedPolicy,
+    });
+    return policy?.schema_version === 1 && policy.session_id === sessionID && policy.agent === "codex_executor" && policy.status === CODEX_REQUIRED ? policy : null;
+  } catch { return null; }
+};
+
+const validateExistingCodexPolicy = async (pluginInput, sessionID, policy) => {
+  if (!policy || policy.schema_version !== 1 || policy.session_id !== sessionID || policy.agent !== "codex_executor" || policy.status !== CODEX_REQUIRED) return false;
+  try {
+    const session = (await pluginInput.client?.session?.get({ path: { id: sessionID } }))?.data;
+    const parentID = childParent(session);
+    const messages = (await pluginInput.client?.session?.messages({ path: { id: sessionID } }))?.data;
+    const prompt = childPrompt(messages);
+    if (!parentID || !prompt) return false;
+    const hash = createHash("sha256").update(prompt).digest("hex");
+    const packets = await (pluginInput.listWorkPackets || listWorkPackets)();
+    const packet = (Array.isArray(packets) ? packets : []).find((entry) => entry.packet_id === policy.packet_id && entry.child_session_id === sessionID && entry.agent === "codex_executor" && entry.objective_sha256 === hash && ["pending", "running"].includes(String(entry.outcome || "").toLowerCase()) && (entry.parent_session_id === parentID || entry.parent_session_id === policy.master_parent_session_id));
+    const task = packet ? await readTask(packet.task_fingerprint) : null;
+    return Boolean(packet && task && packet.task_lease_id === task.lease_id && packet.attempt === task.attempt && packet.task_call_id === policy.task_call_id && task.agent === "codex_executor" && task.parent_session_id === packet.parent_session_id && task.packet_id === packet.packet_id && task.attempt === policy.attempt && task.lease_id === policy.task_lease_id && task.child_session_id === sessionID && !["COMPLETED", "FAILED"].includes(task.state) && policy.task_fingerprint === task.task_fingerprint && policy.objective_sha256 === hash);
+  } catch { return false; }
+};
+
 const record = async (event, input, agent, authorityState, action) => {
   const path = logPath();
   await mkdir(dirname(path), { recursive: true });
@@ -75,8 +155,9 @@ export const OpenAIAuthorshipGuard = async (pluginInput = {}) => ({
       // This must be independently verifiable: input.agent is caller supplied
       // and cannot authorize native execution on its own.
       const agent = await resolveAgent(pluginInput, { ...input, agent: undefined });
-      const policy = agent === "codex_executor" && typeof input.sessionID === "string" && input.sessionID ? await readPolicy(input.sessionID) : null;
-      const canonicalPolicy = policy?.schema_version === 1 && policy.session_id === input.sessionID && policy.agent === "codex_executor" && policy.status === CODEX_REQUIRED;
+      let policy = agent === "codex_executor" && typeof input.sessionID === "string" && input.sessionID ? await readPolicy(input.sessionID) : null;
+      if (!policy || !(await validateExistingCodexPolicy(pluginInput, input.sessionID, policy))) policy = await bootstrapCodexPolicy(pluginInput, input.sessionID, agent);
+      const canonicalPolicy = policy?.schema_version === 1 && policy.session_id === input.sessionID && policy.agent === "codex_executor" && policy.status === CODEX_REQUIRED && (await validateExistingCodexPolicy(pluginInput, input.sessionID, policy));
       if (!canonicalPolicy) {
         await record("codex_tool_blocked", input, agent, policy?.status || "NONE", "BLOCK");
         throw new Error("OPENAI AUTHORSHIP POLICY: openai_run_codex requires verified codex_executor session attribution and canonical CODEX_REQUIRED policy.");

@@ -5,7 +5,7 @@ import { bindExactChildReservation, childSessionIdFromAfter, reservationEligible
 
 const reservation = () => ({
   task_call_id: "call-1", task_fingerprint: "task-1", task_state_version: 7,
-  task_lease_id: "lease-1", attempt: 2, child_session_id: null,
+  task_lease_id: "lease-1", attempt: 2, packet_id: "packet-1", role: "codex_executor", master_parent_session_id: "parent-1", child_session_id: null,
 });
 
 test("foreground exact child binding is fenced, packet-persistent, and idempotent", async () => {
@@ -14,7 +14,7 @@ test("foreground exact child binding is fenced, packet-persistent, and idempoten
   const packets = [];
   const order = [];
   const result = await bindExactChildReservation(pending, "child-1", {
-    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null }),
+    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null, agent: "codex_executor", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
     advanceTask: async (value, state, patch) => {
       order.push("task");
       transitions.push({ value, state, patch });
@@ -34,7 +34,7 @@ test("foreground exact child binding is fenced, packet-persistent, and idempoten
 
   const backgroundPacket = [];
   await bindExactChildReservation(reservation(), "child-2", {
-    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null }),
+    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null, agent: "codex_executor", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
     advanceTask: async () => {},
     updateWorkPacket: async (callID, patch) => { backgroundPacket.push(patch); return { packet_id: "packet-1" }; },
     packetPatch: { phase: "background_bound", outcome: "running" },
@@ -43,44 +43,44 @@ test("foreground exact child binding is fenced, packet-persistent, and idempoten
 
   const fencedAgain = [];
   const again = await bindExactChildReservation(pending, "child-1", {
-    readTask: async () => ({ state: "BOUND", version: 8, child_session_id: "child-1" }),
+    readTask: async () => ({ state: "BOUND", version: 8, child_session_id: "child-1", agent: "codex_executor", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
     advanceTask: async () => fencedAgain.push(true),
     updateWorkPacket: async () => ({ packet_id: "packet-1" }),
   });
   assert.equal(again.child_session_id, "child-1");
-  assert.equal(fencedAgain.length, 1);
+   assert.equal(fencedAgain.length, 0);
 
   await assert.rejects(() => bindExactChildReservation({ ...reservation(), child_session_id: "child-2" }, "child-1", {
-    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null }),
+    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null, agent: "codex_executor", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
     advanceTask: async () => {}, updateWorkPacket: async () => {},
   }), /CHILD_SESSION_ID_CONFLICT/);
   await assert.rejects(() => bindExactChildReservation(reservation(), "child-1", {
-    readTask: async () => ({ state: "BOUND", version: 7, child_session_id: "child-2" }),
+    readTask: async () => ({ state: "BOUND", version: 7, child_session_id: "child-2", agent: "codex_executor", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
     advanceTask: async () => {}, updateWorkPacket: async () => {},
   }), /CHILD_SESSION_ID_CONFLICT/);
 
   const failedTransition = reservation();
   await assert.rejects(() => bindExactChildReservation(failedTransition, "child-1", {
-    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null }),
+    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null, agent: "codex_executor", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
     advanceTask: async () => { throw new Error("fenced transition failed"); }, updateWorkPacket: async () => {},
   }), /fenced transition failed/);
   assert.equal(failedTransition.child_session_id, null);
 
   const failedPacket = reservation();
   await assert.rejects(() => bindExactChildReservation(failedPacket, "child-1", {
-    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null }),
+    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null, agent: "codex_executor", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
     advanceTask: async () => {}, updateWorkPacket: async () => { throw new Error("packet update failed"); },
   }), /packet update failed/);
   assert.equal(failedPacket.child_session_id, null);
   const nullPacket = reservation();
   await assert.rejects(() => bindExactChildReservation(nullPacket, "child-1", {
-    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null }),
+    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null, agent: "codex_executor", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
     advanceTask: async () => {}, updateWorkPacket: async () => null,
   }), /BINDING_PACKET_UPDATE_FAILED/);
   assert.equal(nullPacket.child_session_id, null);
   assert.equal(childSessionIdFromAfter({}), null);
   await assert.rejects(() => bindExactChildReservation(reservation(), childSessionIdFromAfter({}), {
-    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null }),
+    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null, agent: "codex_executor", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
     advanceTask: async () => {}, updateWorkPacket: async () => {},
   }), /BINDING_MISSING_CHILD/);
 });
@@ -98,7 +98,7 @@ test("session.created correlation only treats authoritative identifiers as durab
 test("exact after binding must match a provisional child", async () => {
   const pending = { ...reservation(), provisional_child_session_id: "child-1" };
   const options = {
-    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null }),
+    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null, agent: "codex_executor", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
     advanceTask: async () => {}, updateWorkPacket: async () => ({ packet_id: "packet-1" }),
   };
   await assert.rejects(() => bindExactChildReservation(pending, "child-2", options), /PROVISIONAL_CHILD_SESSION_ID_CONFLICT/);
@@ -114,4 +114,19 @@ test("background exact-after sequence binds before policy and routing side effec
   const policy = sequence.indexOf("await ensurePolicy");
   const mapping = sequence.indexOf("packetCallBySession.set");
   assert.ok(bind >= 0 && bind < policy && bind < mapping);
+});
+
+test("completed exact binding is idempotent and still fences identity", async () => {
+  const pending = reservation();
+  let updates = 0;
+  await bindExactChildReservation(pending, "child-1", {
+    readTask: async () => ({ state: "COMPLETED", child_session_id: "child-1", agent: "codex_executor", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
+    advanceTask: async () => { throw new Error("must not transition completed task"); },
+    updateWorkPacket: async () => { updates++; return { packet_id: "packet-1" }; },
+  });
+  assert.equal(updates, 1);
+  await assert.rejects(() => bindExactChildReservation(pending, "child-1", {
+    readTask: async () => ({ state: "COMPLETED", child_session_id: "child-1", agent: "other", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
+    advanceTask: async () => {}, updateWorkPacket: async () => ({ packet_id: "packet-1" }),
+  }), /BINDING_TASK_IDENTITY_MISMATCH/);
 });
