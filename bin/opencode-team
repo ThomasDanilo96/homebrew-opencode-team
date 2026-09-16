@@ -463,6 +463,14 @@ start_team() {
     printf 'Runtime is missing or not executable: %s\n' "$PACKAGE_ROOT/core/bin/team-runtime" >&2
     return 1
   }
+  if [ "${TEAM_RUNTIME_HEADLESS:-}" = 1 ]; then
+    exec env \
+      TEAM_RUNTIME_INNER=1 \
+      RUN_ID="$(python3 -c "import secrets; print(secrets.token_hex(4))")" \
+      SESSION_MODE=new \
+      RESUME_SESSION_ID="" \
+      "$PACKAGE_ROOT/core/bin/team-runtime" --config "$config_file" "$@"
+  fi
   exec env \
     -u TEAM_RUNTIME_INNER \
     -u RUN_ID \
@@ -483,7 +491,7 @@ case "${1:-}" in
   daily-report)
     shift
     setup_roots
-    exec env OPENAI_TEAM_STATE_ROOT="$STATE_ROOT/daily" node "$PACKAGE_ROOT/teams/daily/bin/daily-report.mjs" "$@"
+    exec env OPENAI_TEAM_STATE_ROOT="$DATA_ROOT/daily/state/team" node "$PACKAGE_ROOT/teams/daily/bin/daily-report.mjs" "$@"
     ;;
   doctor)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
