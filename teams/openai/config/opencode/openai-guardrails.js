@@ -122,14 +122,22 @@ export const delegatedScopeIsBound = (parentObjective, normalizedScope, { target
   if (childDestructive && !parentDestructive) return false;
   if (childMutating && !parentMutating) return false;
   if (targetBound) return pureReviewProtocolScope(scope);
-  const parentTokens = new Set(objectiveTokens(parent));
-  const childTokens = objectiveTokens(scope);
   const parentDomain = normalizedDomainText(parent.replace(SCOPE_ACTION_WORDS, " "));
   const scopeDomain = normalizedDomainText(scope.replace(SCOPE_ACTION_WORDS, " "));
+  const parentTokens = new Set(objectiveTokens(parent));
+  const childTokens = objectiveTokens(scope);
+  if (/\btests?\b/iu.test(parentDomain)) {
+    parentTokens.add("tests");
+    if (/\btests?\b/iu.test(scopeDomain)) childTokens.push("tests");
+  }
   if (!scopeDomain || childTokens.length === 0) return false;
-  if (scopeDomain.includes(parentDomain) || parentDomain.includes(scopeDomain)) return true;
+  if (parentDomain === scopeDomain) return true;
+  if (parentDomain.includes(scopeDomain)) return true;
+  if (scopeDomain.includes(parentDomain)) return parentTokens.size >= 2 || scopeAnalysis.classification === "READ_ONLY";
   if (scopeAnalysis.classification === "AMBIGUOUS") return false;
-  return childTokens.length > 0 && childTokens.every((token) => parentTokens.has(token));
+  if (parentTokens.size < 2) return childTokens.length > 0 && childTokens.every((token) => parentTokens.has(token));
+  const sharedTokens = new Set(childTokens.filter((token) => parentTokens.has(token)));
+  return sharedTokens.size >= 2 || (scopeAnalysis.classification === "READ_ONLY" && childTokens.every((token) => parentTokens.has(token)));
 };
 export const canonicalDelegatedObjective = (parentObjective, childScope, { targetBound = false } = {}) => {
   const parent = String(parentObjective || "");

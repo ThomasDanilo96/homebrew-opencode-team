@@ -91,6 +91,18 @@ test("Child review wording cannot override an explicitly requested read-only age
   assert.equal(routeDelegatedAgent("Inspect the fixture structure", "Modify the fixture", "openai_explore").agent, "codex_executor");
 });
 
+test("Exact live coding parent/task binding is bounded and routes mutation to Codex", () => {
+  const parent = "Fix parser bug";
+  const task = "Modify parser bug";
+  const canonical = canonicalDelegatedObjective(parent, task);
+  assert.notEqual(canonical, "");
+  assert.equal(routeDelegatedAgent(parent, task, "openai_explore").agent, "codex_executor");
+  assert.equal(canonicalDelegatedObjective(parent, "Modify parser billing"), "");
+  assert.equal(canonicalDelegatedObjective("Fix parser", "Modify parser billing"), "");
+  assert.equal(canonicalDelegatedObjective(parent, "Modify billing secrets"), "");
+  assert.notEqual(canonicalDelegatedObjective("Read parser", "Read parser"), "");
+});
+
 test("Routing uses the current request objective instead of an older session turn", () => {
   assert.equal(selectAuthoritativeObjective("Inspect the fixture structure", "Review the old implementation"), "Inspect the fixture structure");
   assert.equal(selectAuthoritativeObjective("Review the current implementation", "Inspect the old fixture"), "Review the current implementation");
