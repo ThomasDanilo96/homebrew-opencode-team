@@ -193,6 +193,98 @@ run_pre_server_hook() {
   fi
 }
 
+bridge_private_auth_file() {
+  local source_path="$1" destination_path="$2" disposable_root="$3" label="$4"
+  python3 - "$source_path" "$destination_path" "$disposable_root" "$label" <<'PY'
+import os
+import shutil
+import stat
+import sys
+import tempfile
+from pathlib import Path
+
+source, destination, root, label = sys.argv[1:]
+uid = os.getuid()
+
+def fail(message):
+    print(f"{label} auth bridge refused: {message}", file=sys.stderr)
+    sys.exit(1)
+
+def validate(path, name):
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        fail(f"{name} missing")
+    if stat.S_ISLNK(info.st_mode):
+        fail(f"{name} is symlink")
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"{name} is not regular")
+    if info.st_uid != uid:
+        fail(f"{name} owner mismatch")
+    if info.st_nlink != 1:
+        fail(f"{name} link count mismatch")
+    if stat.S_IMODE(info.st_mode) != 0o600:
+        fail(f"{name} mode is not 0600")
+    return info
+
+root_real = os.path.realpath(root)
+dest = Path(destination)
+parent = dest.parent
+parent.mkdir(parents=True, exist_ok=True)
+parent_real = os.path.realpath(parent)
+if not (parent_real == root_real or parent_real.startswith(root_real + os.sep)):
+    fail("destination outside disposable root")
+
+src_before = validate(source, "source")
+flags = os.O_RDONLY
+if hasattr(os, "O_NOFOLLOW"):
+    flags |= os.O_NOFOLLOW
+try:
+    source_fd = os.open(source, flags)
+except OSError as error:
+    fail(f"source open failed: {error.strerror}")
+try:
+    src_after = os.fstat(source_fd)
+    if (src_before.st_dev, src_before.st_ino) != (src_after.st_dev, src_after.st_ino):
+        fail("source changed during validation")
+    fd, tmp = tempfile.mkstemp(prefix=".auth.", dir=parent_real)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(source_fd, "rb", closefd=False) as src, os.fdopen(fd, "wb", closefd=False) as out:
+            shutil.copyfileobj(src, out)
+            out.flush()
+            os.fsync(out.fileno())
+        os.close(fd)
+        fd = -1
+        validate(tmp, "temporary destination")
+        os.replace(tmp, destination)
+        validate(destination, "destination")
+    finally:
+        if fd >= 0:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+finally:
+    try:
+        os.close(source_fd)
+    except OSError:
+        pass
+PY
+}
+
+bridge_opencode_auth() {
+  local source_path="${OPENCODE_AUTH_SOURCE:-${OPENCODE_TEAM_OPENCODE_AUTH_SOURCE:-}}"
+  [ -n "$source_path" ] || return 0
+  local destination="$XDG_DATA_HOME/opencode/auth.json"
+  bridge_private_auth_file "$source_path" "$destination" "$SANDBOX" "OpenCode"
+  log "OpenCode auth bridge installed"
+}
+
 # --- Claims (atomic mkdir, dead-owner fallback) ---
 claim_session() {
   local SID="$1"
@@ -507,6 +599,7 @@ main() {
   # Export env
   export_env
   source_runtime_env_hook
+  bridge_opencode_auth
 
   log "Run ID: $RUN_ID  Port: $PORT  Mode: $session_mode"
 
@@ -541,6 +634,9 @@ main() {
     start_watchdog "$my_tmux"
   fi
 
-  # Foreground attach (blocks)
-  start_attach
+  if [ "${TEAM_RUNTIME_HEADLESS:-}" = 1 ]; then
+    while kill -0 "$SERVER_PID" 2>/dev/null; do sleep 1; done
+  else
+    start_attach
+  fi
 }

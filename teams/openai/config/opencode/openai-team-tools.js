@@ -46,6 +46,34 @@ const reservations = new Map();
 const PREMIUM_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-sol", openai_explore: "openai/gpt-5.6-luna-fast", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-terra", reviewer: "openai/gpt-5.6-sol", reviewer_critical: "openai/gpt-6-astra", specialist: "openai/gpt-6-astra", codex_executor: "openai/gpt-5.6-luna-fast" };
 const DAILY_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-luna", openai_explore: "openai/gpt-5.6-luna", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-luna", reviewer: "openai/gpt-5.6-terra", reviewer_critical: "openai/gpt-5.6-sol", specialist: "openai/gpt-5.6-terra", codex_executor: "openai/gpt-5.6-luna" };
 export const DEFAULT_AGENT_MODELS = process.env.OPENAI_DAILY_PROFILE === "1" ? DAILY_AGENT_MODELS : PREMIUM_AGENT_MODELS;
+const authMetadataError = (label, reason) => Object.assign(new Error(`${label}_AUTH_METADATA_REFUSED:${reason}`), { code: "AUTH_METADATA_REFUSED" });
+const validatePrivateAuthFile = async (path, label) => {
+  const info = await lstat(path);
+  if (info.isSymbolicLink()) throw authMetadataError(label, "symlink");
+  if (!info.isFile()) throw authMetadataError(label, "not_regular");
+  if (typeof process.getuid === "function" && info.uid !== process.getuid()) throw authMetadataError(label, "owner");
+  if (info.nlink !== 1) throw authMetadataError(label, "link_count");
+  if ((info.mode & 0o777) !== 0o600) throw authMetadataError(label, "mode");
+  return info;
+};
+const bridgePrivateAuthFile = async ({ source, destination, root, label }) => {
+  await validatePrivateAuthFile(source, `${label}_SOURCE`);
+  await mkdir(dirname(destination), { recursive: true, mode: 0o700 });
+  const realRoot = await realpath(root);
+  const realParent = await realpath(dirname(destination));
+  if (realParent !== realRoot && !realParent.startsWith(`${realRoot}/`)) throw authMetadataError(label, "destination_root");
+  const temporary = join(dirname(destination), `.auth.${process.pid}.${randomUUID()}`);
+  try {
+    await copyFile(source, temporary, 0);
+    await chmod(temporary, 0o600);
+    await validatePrivateAuthFile(temporary, `${label}_TEMP`);
+    await rename(temporary, destination);
+    await validatePrivateAuthFile(destination, `${label}_DESTINATION`);
+  } catch (error) {
+    try { await rm(temporary, { force: true }); } catch {}
+    throw error;
+  }
+};
 // Codex persists more than credentials in CODEX_HOME.  Every lane therefore
 // gets a new, private home containing only the host authentication document.
 // It is deliberately not inherited from the OpenCode process.
@@ -68,14 +96,13 @@ const freshCodexHome = async (recovery = null) => {
   const home = await mkdtemp(join(recoveryHomeRoot(), "codex-home-"));
   await registerCodexHome(home);
   try { await chmod(home, 0o700); } catch (error) { try { await rm(home, { recursive: true, force: true }); await clearCodexHomePointer(home); } catch {} throw error; }
-  const auth = join(process.env.HOME || "", ".codex", "auth.json");
+  const auth = process.env.OPENAI_CODEX_AUTH_SOURCE || join(process.env.HOME || "", ".codex", "auth.json");
   try {
-    await copyFile(auth, join(home, "auth.json"), 0);
-    await chmod(join(home, "auth.json"), 0o600);
+    await bridgePrivateAuthFile({ source: auth, destination: join(home, "auth.json"), root: home, label: "CODEX" });
   } catch (error) {
     // Test doubles do not need a local credential.  A real lane will report
     // its own non-fallback-eligible authentication failure if it cannot use it.
-    if (error?.code !== "ENOENT") {
+    if (process.env.OPENAI_CODEX_AUTH_SOURCE || error?.code !== "ENOENT") {
       try { await rm(home, { recursive: true, force: true }); await clearCodexHomePointer(home); } catch {}
       throw error;
     }
