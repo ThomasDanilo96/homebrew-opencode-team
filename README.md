@@ -43,6 +43,10 @@ state isolated from `openai`.
 
 Use `opencode-team openai` for maximum-capability or high-risk work.
 
+Run `opencode-team daily-report` to summarize completed Daily work packets,
+token usage, estimated cost, model mix, fanout, and latency. Missing telemetry
+is reported as `null`/`unmeasured`.
+
 `best`, `go`, `openai`, and `daily` are aliases for `start <team>`. Resume is forwarded
 to the shared runtime with `--resume ses_...`.
 
