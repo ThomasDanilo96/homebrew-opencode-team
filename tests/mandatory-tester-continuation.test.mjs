@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
 
 const root = "root-session";
@@ -29,6 +29,28 @@ const productionDriverFor = (packets, prompts, failures = []) => createMandatory
   updateWorkPacketByID: async (_id, fields) => Object.assign(packets[0], fields),
   reconcileGateTarget: async () => undefined,
   ...(failures ? { updateWorkPacketByID: async (_id, fields) => { failures.push(fields.error_code); Object.assign(packets[0], fields); } } : {}),
+});
+
+test("pending Codex retains only the exact parent call alias after terminal cleanup", async () => {
+  const reservations = new Map();
+  const reservation = { task_call_id: "parent-call", child_session_id: "child-session", token: "released-token", role: "codex_executor" };
+  reservations.set(reservation.task_call_id, reservation);
+  reservations.set(reservation.child_session_id, reservation);
+  reservations.delete(reservation.task_call_id);
+  reservations.delete(reservation.child_session_id);
+  assert.equal(reservations.get(reservation.task_call_id), undefined, "missing reservation would early-return before the parent after-hook");
+  assert.equal(retainParentCallReservation(reservations, reservation, "success", true), true);
+  assert.deepEqual(reservations.get(reservation.task_call_id), { ...reservation, token: null });
+  assert.equal(reservations.get(reservation.task_call_id).child_session_id, "child-session");
+});
+
+test("Codex reservation retention is fail-closed for terminal, no-gate, and failure outcomes", () => {
+  for (const [outcome, gatesPending] of [["success", false], ["failed", true], ["completed", true]]) {
+    const reservations = new Map();
+    const reservation = { task_call_id: "parent-call", child_session_id: "child-session", token: "released-token" };
+    assert.equal(retainParentCallReservation(reservations, reservation, outcome, gatesPending), false);
+    assert.equal(reservations.has("parent-call"), false);
+  }
 });
 
 test("codex after-hook path immediately prompts the canonical root once with the exact task ID", async () => {

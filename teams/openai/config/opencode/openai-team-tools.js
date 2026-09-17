@@ -45,6 +45,11 @@ const ADMIT = join(TEAM_ROOT, "bin", "openai-admit.sh");
 const RELEASE = join(TEAM_ROOT, "bin", "openai-release.sh");
 const BIND = join(TEAM_ROOT, "bin", "openai-bind.sh");
 const reservations = new Map();
+export const retainParentCallReservation = (reservationMap, reservation, outcome, gatesPending) => {
+  if (!(reservationMap instanceof Map) || outcome !== "success" || gatesPending !== true || !reservation?.task_call_id) return false;
+  reservationMap.set(reservation.task_call_id, { ...reservation, token: null });
+  return true;
+};
 const PREMIUM_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-sol", openai_explore: "openai/gpt-5.6-luna-fast", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-terra", reviewer: "openai/gpt-5.6-sol", reviewer_critical: "openai/gpt-6-astra", specialist: "openai/gpt-6-astra", codex_executor: "openai/gpt-5.6-luna-fast" };
 const DAILY_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-luna", openai_explore: "openai/gpt-5.6-luna", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-luna", reviewer: "openai/gpt-5.6-terra", reviewer_critical: "openai/gpt-5.6-sol", specialist: "openai/gpt-5.6-terra", codex_executor: "openai/gpt-5.6-luna" };
 export const DEFAULT_AGENT_MODELS = process.env.OPENAI_DAILY_PROFILE === "1" ? DAILY_AGENT_MODELS : PREMIUM_AGENT_MODELS;
@@ -1203,11 +1208,12 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
             // intentionally retained for the parent-side authority guard.
              reservation.lane_homes = [...allocatedHomes];
              const finalized = await finalizeReservation(reservation, { outcome, result_summary: outcome, terminal: false, packet: false });
-            if (finalized.code === "LIFECYCLE_FINALIZED") {
-              reservations.delete(context.sessionID);
-              packetCallBySession.delete(context.sessionID);
-              bufferedOpenCodeTokens.delete(context.sessionID);
-              }
+             if (finalized.code === "LIFECYCLE_FINALIZED") {
+               reservations.delete(context.sessionID);
+               packetCallBySession.delete(context.sessionID);
+               bufferedOpenCodeTokens.delete(context.sessionID);
+               retainParentCallReservation(reservations, reservation, outcome, result.gates_pending);
+               }
             }
             const preservedHome = preservePending ? (await readRecovery(reservation?.task_fingerprint))?.codex_home : null;
             for (const home of [...allocatedHomes]) {
