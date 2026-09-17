@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext, isMandatoryTesterPacketForSession, mandatoryTesterToolDecision, mandatoryTesterCommandOnlyError } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { gateTerminalPacketPatch } from "../teams/openai/config/opencode/gate-state.js";
 import { claimTask, completeTask, readTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
 import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
@@ -162,12 +162,39 @@ test("spoofed and wrong-packet continuations fail closed", async () => {
 
 test("mandatory tester objective preserves authority without fuzzy scope matching", () => {
   const parent = "Fix calculator fixture";
-  const validHash = "a".repeat(64);
-  const objective = exactMandatoryTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "observed", expected_verification_hashes: [validHash] });
-  assert.equal(objective, "Parent objective (verbatim):\nFix calculator fixture\nDelegated scope:\nverify calculator fixture");
-  assert.match(exactMandatoryTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "requested", expected_verification_hashes: [validHash] }), /^Parent objective/);
+  const command = "node calculator.test.js";
+  const hash = createHash("sha256").update(command).digest("hex");
+  const objective = exactMandatoryTesterObjective(parent, "ignored generic scope", { verification_commands: [command], expected_verification_hashes: [hash] });
+  assert.match(objective, /^Parent objective \(verbatim\):\nFix calculator fixture\n\nMandatory verification gate\./);
+  assert.match(objective, /Execute exactly this verification command via Bash:\nnode calculator\.test\.js/);
+  assert.match(objective, /Do not glob, grep, read, inspect, use Serena, use MCP, delegate, or modify anything\./);
+  assert.doesNotMatch(objective, /likely|appropriate|inspect if needed/);
+  assert.equal(exactMandatoryTesterObjective(parent, "ignored", { verification_commands: [command], expected_verification_hashes: [] }), "");
   assert.equal(exactMandatoryTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "observed", expected_verification_hashes: [] }), "");
   assert.equal(exactMandatoryTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "observed", expected_verification_hashes: ["not-a-hash"] }), "");
+});
+
+test("mandatory tester objective orders multiple authorized commands exactly", () => {
+  const commands = ["node first.test.js", "node second.test.js"];
+  const hashes = commands.map((command) => createHash("sha256").update(command).digest("hex"));
+  const objective = exactMandatoryTesterObjective("Parent", "ignored", { verification_commands: commands, expected_verification_hashes: hashes });
+  assert.match(objective, /Execute exactly these verification commands via Bash, once each, in order:\n1\. node first\.test\.js\n2\. node second\.test\.js/);
+});
+
+test("mandatory tester tool decision restricts exploratory tools but preserves generic testers", () => {
+  const packet = { agent: "tester", child_session_id: "tester-child", test_task_id: packetID, tester_status: "pending", verification_commands: [calculatorCommand], expected_verification_hashes: [calculatorHash] };
+  assert.equal(isMandatoryTesterPacketForSession(packet, "tester-child"), true);
+  assert.deepEqual(mandatoryTesterToolDecision(packet, "glob", "**/*.js"), { allowed: false, reason: "MANDATORY_TESTER_COMMAND_ONLY", instruction: "Execute the authorized verification command via Bash." });
+  assert.deepEqual(mandatoryTesterToolDecision(packet, "bash", calculatorCommand), { allowed: true });
+  assert.deepEqual(mandatoryTesterToolDecision(packet, "bash", "node other.test.js"), { allowed: false, reason: "Tester Bash is restricted to allowlisted verification commands." });
+  assert.deepEqual(mandatoryTesterToolDecision(null, "glob", "**/*.js"), { allowed: true });
+  const error = mandatoryTesterCommandOnlyError();
+  assert.equal(error.code, "MANDATORY_TESTER_COMMAND_ONLY");
+  assert.equal(error.retryable, true);
+  assert.match(error.message, /MANDATORY_TESTER_COMMAND_ONLY: Execute the authorized verification command via Bash\./);
+  assert.doesNotMatch(error.message, /stop|do not retry/i);
+  assert.equal(packet.tester_status, "pending");
+  assert.equal(packet.error_code, undefined);
 });
 
 test("deterministic mandatory tester lifecycle reaches completed PASS", async () => {
@@ -182,7 +209,7 @@ test("deterministic mandatory tester lifecycle reaches completed PASS", async ()
   });
   assert.equal(observed.handled, true);
   const testerObjective = exactMandatoryTesterObjective(original.authoritativeObjective, "Verify calculator fixture", packet);
-  assert.match(testerObjective, /^Parent objective \(verbatim\):\nImplement unrelated repository change\nDelegated scope:\nverify calculator fixture$/);
+  assert.match(testerObjective, /^Parent objective \(verbatim\):\nImplement unrelated repository change\n\nMandatory verification gate\./);
   const evidence = testerEvidenceFromMessages([{ info: { role: "assistant", agent: "tester", sessionID: "tester-child", time: { created: 1 } }, parts: [{ type: "tool", tool: "bash", state: { status: "completed", input: { command }, metadata: { exit_code: 0 } } }] }], packet);
   assert.equal(evidence.summary.status, "passed");
   Object.assign(packet, gateTerminalPacketPatch(packet, true));

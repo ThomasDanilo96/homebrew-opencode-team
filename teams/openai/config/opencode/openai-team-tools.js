@@ -418,8 +418,6 @@ const messageTextFromParts = (parts) => Array.isArray(parts)
   ? parts.filter((part) => part?.type === "text" && typeof part.text === "string" && part.text.trim()).map((part) => part.text).join(" ").trim()
   : "";
 const unwrapMessage = (response) => response?.data ?? response;
-const hasExpectedVerificationHash = (gate) => parseSerializedArray(gate?.expected_verification_hashes).some((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/i.test(hash));
-
 export const resolveUpdatedUserMessageText = async (event, client) => {
   const properties = event?.properties || {};
   const info = properties.info || {};
@@ -465,10 +463,14 @@ export const handleMandatoryTesterContinuation = async (event, { client, rootFor
 };
 
 export const exactMandatoryTesterObjective = (parentObjective, testerObjective, gate) => {
-  if (!gate || !hasExpectedVerificationHash(gate)) return "";
+  const authorization = validatedVerificationAuthorization(gate);
+  if (authorization.commands.length === 0) return "";
   const parent = String(parentObjective || "");
-  const scope = delegationScope(testerObjective);
-  return parent.trim() && scope ? `Parent objective (verbatim):\n${parent}\nDelegated scope:\n${scope}` : "";
+  if (!parent) return "";
+  const commands = authorization.commands.length === 1
+    ? `Execute exactly this verification command via Bash:\n${authorization.commands[0]}`
+    : `Execute exactly these verification commands via Bash, once each, in order:\n${authorization.commands.map((command, index) => `${index + 1}. ${command}`).join("\n")}`;
+  return `Parent objective (verbatim):\n${parent}\n\nMandatory verification gate.\n${commands}\nRun each command exactly once. Do not glob, grep, read, inspect, use Serena, use MCP, delegate, or modify anything. Report the exact command, exit code, and output for each.`;
 };
 
 export const decideDelegatedTaskAgent = (requestedAgent, routeClassification, exactMandatoryTesterGate) =>
@@ -613,6 +615,26 @@ export const isAuthorizedTesterVerificationCommand = (packet, command) => {
   const hash = createHash("sha256").update(normalizedCommand).digest("hex");
   return authorization.commands.some((authorized, index) => authorized === normalizedCommand && authorization.hashes[index] === hash);
 };
+export const isMandatoryTesterPacketForSession = (packet, sessionID) => {
+  const authorization = validatedVerificationAuthorization(packet);
+  return packet?.agent === "tester" && packet?.child_session_id === sessionID &&
+    /^[a-f0-9]{64}$/i.test(String(packet?.test_task_id || "")) &&
+    ["pending", "required"].includes(packet?.tester_status) && authorization.commands.length > 0;
+};
+export const mandatoryTesterToolDecision = (packet, toolName, command) => {
+  if (!packet) return { allowed: true };
+  if (String(toolName || "").toLowerCase() !== "bash") return {
+    allowed: false,
+    reason: "MANDATORY_TESTER_COMMAND_ONLY",
+    instruction: "Execute the authorized verification command via Bash.",
+  };
+  if (isAuthorizedTesterVerificationCommand(packet, command)) return { allowed: true };
+  return { allowed: false, reason: "Tester Bash is restricted to allowlisted verification commands." };
+};
+export const mandatoryTesterCommandOnlyError = () => Object.assign(
+  new Error("MANDATORY_TESTER_COMMAND_ONLY: Execute the authorized verification command via Bash."),
+  { code: "MANDATORY_TESTER_COMMAND_ONLY", retryable: true },
+);
 export const testerVerificationMetadata = (gateTarget = {}) => ({
   verification_commands: [...(gateTarget.verification_commands || [])],
   expected_verification_hashes: [...(gateTarget.expected_verification_hashes || [])],
@@ -1801,9 +1823,17 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
      guard = beginRequestCycle(guard, String(output.args?.prompt || output.args?.description || ""), Date.now(), process.env, { preserveVerificationTerminal: true, preserveCodexFailureTerminal: true, preserveVerificationGate: true });
         guardrails.set(input.sessionID, guard);
      }
-      const sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
-      const rootParentForGate = masterParent(input.sessionID);
-      const rootGuardForGate = guardrails.get(rootParentForGate) || (rootParentForGate === input.sessionID ? guard : null);
+       const sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
+       const rootParentForGate = masterParent(input.sessionID);
+       const mandatoryTesterPacket = sessionAgent === "tester" && typeof input.sessionID === "string"
+         ? (await (pluginInput.listWorkPackets || listWorkPackets)()).find((packet) => isMandatoryTesterPacketForSession(packet, input.sessionID))
+         : null;
+       const mandatoryTesterDecision = mandatoryTesterToolDecision(mandatoryTesterPacket, toolName, output.args?.command ?? output.args?.cmd);
+       if (!mandatoryTesterDecision.allowed) {
+         if (mandatoryTesterDecision.reason === "MANDATORY_TESTER_COMMAND_ONLY") throw mandatoryTesterCommandOnlyError();
+         throw new Error(mandatoryTesterDecision.reason);
+       }
+       const rootGuardForGate = guardrails.get(rootParentForGate) || (rootParentForGate === input.sessionID ? guard : null);
        const durableGate = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator"
          ? await findPendingMandatoryTesterGate(rootParentForGate, { listWorkPackets: pluginInput.listWorkPackets, readTask: pluginInput.readTask })
          : null;
@@ -1825,15 +1855,18 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const gateDecision = verificationGateDecision(gateStateForDecision, toolName, toolName === "task" ? String(output.args?.subagent_type || output.args?.agent || "") : sessionAgent, output.args?.prompt || output.args?.description || "", [...reservations.values()].some((entry) => entry.master_parent_session_id === rootParentForGate && entry.role === "tester" && entry.test_task_id === gateStateForDecision?.pendingVerificationPacketID && entry.token));
      if (!gateDecision.allowed) throw new GuardrailPolicyError(gateDecision.reason);
     if (guard && toolName !== "openai_run_codex") guardrails.set(input.sessionID, admitToolCall(guard, toolName));
-    if (toolName === "bash" && sessionAgent === "tester") {
-      const command = output.args?.command ?? output.args?.cmd;
-      const target = typeof input.sessionID === "string"
-        ? (await listWorkPackets()).find((packet) => packet.child_session_id === input.sessionID
-          && packet.agent === "tester" && ["pending", "required"].includes(packet.tester_status))
-        : null;
-       if (target != null && isAuthorizedTesterVerificationCommand(target, command)) return;
-      throw new Error("Tester Bash is restricted to allowlisted verification commands.");
-    }
+     if (toolName === "bash" && sessionAgent === "tester") {
+       const command = output.args?.command ?? output.args?.cmd;
+       if (mandatoryTesterPacket && isAuthorizedTesterVerificationCommand(mandatoryTesterPacket, command)) return;
+       if (!mandatoryTesterPacket) {
+         const target = typeof input.sessionID === "string"
+           ? (await listWorkPackets()).find((packet) => packet.child_session_id === input.sessionID
+             && packet.agent === "tester" && ["pending", "required"].includes(packet.tester_status))
+           : null;
+         if (target != null && isAuthorizedTesterVerificationCommand(target, command)) return;
+       }
+       throw new Error("Tester Bash is restricted to allowlisted verification commands.");
+     }
     if (toolName !== "task" && toolName !== "openai_run_codex" && input.sessionID) {
       const callID = await taskCallForSession(input.sessionID);
      if (callID) await incrementWorkPacketByID(callID, { tool_call_count: 1 });
