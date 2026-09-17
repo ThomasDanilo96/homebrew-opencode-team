@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { gateTerminalPacketPatch } from "../teams/openai/config/opencode/gate-state.js";
 import { claimTask, completeTask, readTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
 import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
@@ -36,6 +36,28 @@ const productionDriverFor = (packets, prompts, failures = []) => createMandatory
 
 const continuationEvent = (id = packetID, sessionID = root) => ({ type: "message.updated", properties: { sessionID, info: { id: "message-1", sessionID, role: "user" } } });
 const continuationText = (id = packetID) => `<!-- OMO_INTERNAL_INITIATOR --> MANDATORY_TESTER_GATE test_task_id=${id}\nCall the native task exactly once.`;
+
+const calculatorCommand = "node calculator.test.js";
+const calculatorHash = createHash("sha256").update(calculatorCommand).digest("hex");
+
+test("tester authorization validates and carries the original command/hash pair", () => {
+  const gatePacket = { verification_commands: [calculatorCommand], expected_verification_hashes: [calculatorHash] };
+  const authorization = validatedVerificationAuthorization(gatePacket);
+  assert.deepEqual(authorization, { commands: [calculatorCommand], hashes: [calculatorHash] });
+  assert.deepEqual(testerVerificationMetadata({ verification_commands: authorization.commands, expected_verification_hashes: authorization.hashes }), { verification_commands: [calculatorCommand], expected_verification_hashes: [calculatorHash] });
+  assert.equal(isAuthorizedTesterVerificationCommand(gatePacket, calculatorCommand), true);
+});
+
+test("tester Bash authorization requires the exact normalized command and paired hash", () => {
+  const packet = { verification_commands: [calculatorCommand], expected_verification_hashes: [calculatorHash] };
+  assert.equal(isAuthorizedTesterVerificationCommand(packet, " node   calculator.test.js "), true);
+  assert.equal(isAuthorizedTesterVerificationCommand(packet, "node other.test.js"), false);
+  assert.equal(isAuthorizedTesterVerificationCommand(packet, "node ./calculator.test.js"), false);
+  assert.equal(isAuthorizedTesterVerificationCommand(packet, `${calculatorCommand}\r\n`), false);
+  assert.equal(isAuthorizedTesterVerificationCommand({ verification_commands: [calculatorCommand], expected_verification_hashes: ["0".repeat(64)] }, calculatorCommand), false);
+  assert.equal(isAuthorizedTesterVerificationCommand({ expected_verification_hashes: [calculatorHash] }, calculatorCommand), false);
+  assert.equal(isAuthorizedTesterVerificationCommand({ verification_commands: [calculatorCommand] }, calculatorCommand), false);
+});
 
 test("exact mandatory tester gate wins over a mutating delegated route", () => {
   assert.equal(decideDelegatedTaskAgent("tester", "MUTATING", true), "tester");

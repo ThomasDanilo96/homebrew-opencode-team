@@ -572,6 +572,37 @@ const criteriaFrom = (objective) => String(objective || "").split(/\r?\n/).flatM
   return match ? [match[1].trim()] : [];
 });
 const normalizeVerificationCommand = (command) => String(command || "").trim().replace(/\s+/g, " ");
+export const validatedVerificationAuthorization = (packet = {}) => {
+  const recordedHashes = new Set(parseSerializedArray(packet?.expected_verification_hashes)
+    .filter((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/i.test(hash))
+    .map((hash) => hash.toLowerCase()));
+  const commands = [];
+  const hashes = [];
+  const seen = new Set();
+  for (const candidate of parseSerializedArray(packet?.verification_commands)) {
+    if (typeof candidate !== "string" || /[\r\n]/.test(candidate)) continue;
+    const command = normalizeVerificationCommand(candidate);
+    if (!command || seen.has(command) || !isAllowlistedVerificationCommand(command)) continue;
+    const hash = createHash("sha256").update(command).digest("hex");
+    if (!recordedHashes.has(hash)) continue;
+    seen.add(command);
+    commands.push(command);
+    hashes.push(hash);
+  }
+  return { commands, hashes };
+};
+export const isAuthorizedTesterVerificationCommand = (packet, command) => {
+  if (typeof command !== "string" || /[\r\n]/.test(command)) return false;
+  const normalizedCommand = normalizeVerificationCommand(command);
+  if (!normalizedCommand || !isAllowlistedVerificationCommand(normalizedCommand)) return false;
+  const authorization = validatedVerificationAuthorization(packet);
+  const hash = createHash("sha256").update(normalizedCommand).digest("hex");
+  return authorization.commands.some((authorized, index) => authorized === normalizedCommand && authorization.hashes[index] === hash);
+};
+export const testerVerificationMetadata = (gateTarget = {}) => ({
+  verification_commands: [...(gateTarget.verification_commands || [])],
+  expected_verification_hashes: [...(gateTarget.expected_verification_hashes || [])],
+});
 const commandsFromAuthorizedText = (text) => {
   const value = String(text || "");
   const candidates = [...value.matchAll(/`([^`]+)`/g)].map((match) => match[1]);
@@ -1069,16 +1100,17 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const evidenceHashes = evidence.map((entry) => entry?.command_hash).filter((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/i.test(hash)).map((hash) => hash.toLowerCase());
       return recorded.length ? recorded : [...new Set([...commandHashes, ...evidenceHashes])];
     };
-  const gateTargetSnapshot = async (packet) => {
-    const task = packet?.task_fingerprint ? await readTask(packet.task_fingerprint) : null;
-    if (!packet || !task || Number(task.attempt) !== Number(packet.attempt) || !task.lease_id) return null;
-     return { packet_id: packet.packet_id, parent_session_id: packet.parent_session_id, task_fingerprint: packet.task_fingerprint, attempt: task.attempt, task_lease_id: task.lease_id, expected_verification_hashes: parseExpectedVerificationHashes(packet) };
+   const gateTargetSnapshot = async (packet) => {
+     const task = packet?.task_fingerprint ? await readTask(packet.task_fingerprint) : null;
+     if (!packet || !task || Number(task.attempt) !== Number(packet.attempt) || !task.lease_id) return null;
+     const authorization = validatedVerificationAuthorization(packet);
+      return { packet_id: packet.packet_id, parent_session_id: packet.parent_session_id, task_fingerprint: packet.task_fingerprint, attempt: task.attempt, task_lease_id: task.lease_id, verification_commands: authorization.commands, expected_verification_hashes: authorization.hashes };
   };
   const validateGateTarget = async (pending, packetID) => {
     const snapshot = pending?.gate_target;
     const packet = (await listWorkPackets()).find((candidate) => candidate.packet_id === packetID);
     const task = snapshot?.task_fingerprint ? await readTask(snapshot.task_fingerprint) : null;
-     const expectedHashes = parseExpectedVerificationHashes(packet);
+      const expectedHashes = validatedVerificationAuthorization(packet).hashes;
      if (!snapshot || !packet || packet.packet_id !== snapshot.packet_id || packet.parent_session_id !== snapshot.parent_session_id || packet.task_fingerprint !== snapshot.task_fingerprint || Number(packet.attempt) !== Number(snapshot.attempt) || (packet.task_lease_id != null && packet.task_lease_id !== snapshot.task_lease_id) || JSON.stringify(expectedHashes) !== JSON.stringify(snapshot.expected_verification_hashes || []) || !task || task.parent_session_id !== snapshot.parent_session_id || Number(task.attempt) !== Number(snapshot.attempt) || task.lease_id !== snapshot.task_lease_id) return { code: "STALE_GATE_EVENT", packet: null };
      return { code: null, packet };
    };
@@ -1785,14 +1817,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         ? (await listWorkPackets()).find((packet) => packet.child_session_id === input.sessionID
           && packet.agent === "tester" && ["pending", "required"].includes(packet.tester_status))
         : null;
-      const expected = new Set([
-        ...parseSerializedArray(target?.verification_commands),
-        ...parseSerializedArray(target?.verification_evidence).map((entry) => entry?.command_hash),
-        ...parseSerializedArray(target?.expected_verification_hashes),
-      ].filter((value) => typeof value === "string" && (isAllowlistedVerificationCommand(value) || /^[a-f0-9]{64}$/i.test(value)))
-        .map((value) => /^[a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : createHash("sha256").update(value).digest("hex")));
-      const commandHash = typeof command === "string" ? createHash("sha256").update(command).digest("hex") : "";
-      if (target != null && typeof command === "string" && isAllowlistedVerificationCommand(command) && expected.has(commandHash)) return;
+       if (target != null && isAuthorizedTesterVerificationCommand(target, command)) return;
       throw new Error("Tester Bash is restricted to allowlisted verification commands.");
     }
     if (toolName !== "task" && toolName !== "openai_run_codex" && input.sessionID) {
@@ -1948,19 +1973,11 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       if (testTaskID) {
         const target = packets.find((packet) => packet.packet_id === testTaskID);
         if (!target || target.parent_session_id !== rootParent || !["pending", "required"].includes(target.tester_status)) throw new Error("TEST_TARGET_DENIED");
-        const targetHashes = parseSerializedArray(target.expected_verification_hashes).filter((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/i.test(hash));
-        const testerCommands = criteriaFrom(currentTaskObjective).filter(isAllowlistedVerificationCommand);
-        if (targetHashes.length === 0 && testerCommands.length === 0) {
-          const error = new Error("TEST_COMMAND_REQUIRED"); error.code = "TEST_COMMAND_REQUIRED"; throw error;
-        }
-        if (targetHashes.length === 0) {
-          const promoted = testerCommands.map((command) => createHash("sha256").update(command).digest("hex"));
-          const promotion = await updateWorkPacketByIDIfCurrent(testTaskID,
-            { parent_session_id: rootParent, task_fingerprint: target.task_fingerprint, tester_status: ["pending", "required"] },
-            { verification_commands: testerCommands, acceptance_criteria: testerCommands, expected_verification_hashes: promoted });
-          if (!promotion.matched) throw new Error("TEST_TARGET_DENIED");
-        }
-        const refreshedTarget = (await listWorkPackets()).find((packet) => packet.packet_id === testTaskID);
+         const authorization = validatedVerificationAuthorization(target);
+         if (authorization.commands.length === 0) {
+           const error = new Error("TEST_COMMAND_REQUIRED"); error.code = "TEST_COMMAND_REQUIRED"; throw error;
+         }
+         const refreshedTarget = (await listWorkPackets()).find((packet) => packet.packet_id === testTaskID);
         gateTarget = await gateTargetSnapshot(refreshedTarget);
         if (!gateTarget) throw new Error("TEST_TARGET_DENIED");
       }
@@ -1987,8 +2004,9 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     const admission = await runProcessAsync(ADMIT, ownerArgs, {
        env: { ...process.env, OPENAI_OWNER_PID: String(process.pid), OPENAI_OWNER_START_IDENTITY: ownerStart },
     });
-       const verificationCommands = agent === "tester" && gateTarget ? [] : criteriaFrom(currentTaskObjective);
-      const expectedVerificationHashes = agent === "tester" && gateTarget ? gateTarget.expected_verification_hashes : verificationCommands.filter(isAllowlistedVerificationCommand).map((command) => createHash("sha256").update(command).digest("hex"));
+       const testerMetadata = agent === "tester" && gateTarget ? testerVerificationMetadata(gateTarget) : null;
+       const verificationCommands = testerMetadata?.verification_commands || criteriaFrom(currentTaskObjective);
+       const expectedVerificationHashes = testerMetadata?.expected_verification_hashes || verificationCommands.filter(isAllowlistedVerificationCommand).map((command) => createHash("sha256").update(command).digest("hex"));
        const packetMetadata = { task_id: fingerprint, task_fingerprint: fingerprint, task_lease_id: claim.record.lease_id, packet_id: claim.record.packet_id, workspace_fingerprint: workspace.fingerprint, cache_status: cacheableRead ? "miss" : "bypass", complexity: analysis.complexity, codex_profile: analysis.codex_profile, reasoning_effort: analysis.reasoning_effort, risk: analysis.risk, review_required: analysis.review_required, discovery_group_id: discoveryGroupID, discovery_required_lanes: analysis.discovery_agents, attempt: claim.record.attempt, retry_count: claim.record.attempt - 1, tool_call_count: 0, wrapper_round_trips: 0, acceptance_criteria: verificationCommands, verification_commands: verificationCommands, expected_verification_hashes: expectedVerificationHashes, tester_status: agent === "tester" ? "pending" : undefined, test_task_id: agent === "tester" ? (testTaskID || claim.record.packet_id) : testTaskID || undefined };
      await recordLatency({ stage: "task_admission", outcome: admission.status === 0 ? "admitted" : "deferred", duration_ms: elapsed(admissionStartedAt), admission_wait_ms: elapsed(admissionStartedAt), agent, call_id: input.callID, ...eventMetadata({ ...packetMetadata, classification: route.classification, task_call_id: input.callID }) });
      if (admission.status !== 0) {
