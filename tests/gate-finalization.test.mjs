@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorkPacket, updateWorkPacketByID } from "../teams/openai/config/opencode/work-packet.js";
 import { gateTerminalPacketPatch, lifecycleCleanupOptions } from "../teams/openai/config/opencode/gate-state.js";
+import { createGuardrailState, settleVerificationGateState } from "../teams/openai/config/opencode/openai-guardrails.js";
 
 test("idle cleanup is packet/task neutral", () => {
   assert.deepEqual(lifecycleCleanupOptions("session.idle", { packet: true, taskAction: "complete", terminal: false }), {
@@ -43,4 +44,18 @@ test("tester failure is terminal failure and never success", () => {
   assert.equal(patch.outcome, "failed");
   assert.equal(patch.codex_outcome, "failed");
   assert.notEqual(patch.outcome, "completed");
+});
+
+test("tester settlement clears the mandatory gate only after PASS or FAIL is terminal", () => {
+  const packetID = "c".repeat(64);
+  const pending = { ...createGuardrailState(), pendingVerificationPacketID: packetID, pendingTesterActive: true };
+  const pass = gateTerminalPacketPatch({ review_status: "approved", tester_status: "pending" }, true);
+  assert.equal(pass.outcome, "completed");
+  assert.equal(pass.tester_status, "passed");
+  assert.equal(settleVerificationGateState(pending, packetID, "RUNNING").pendingVerificationPacketID, packetID);
+  assert.equal(settleVerificationGateState(pending, packetID, "COMPLETED").pendingVerificationPacketID, null);
+  const fail = gateTerminalPacketPatch({ tester_status: "failed" }, false);
+  assert.equal(fail.outcome, "failed");
+  assert.equal(fail.codex_outcome, "failed");
+  assert.equal(settleVerificationGateState(pending, packetID, "FAILED").pendingTesterActive, false);
 });

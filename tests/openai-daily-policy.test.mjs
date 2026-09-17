@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { dailyCost, dailyFanout, DAILY_AGENT_MODELS, DAILY_PRICING } from "../teams/daily/daily-policy.mjs";
-import { allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, updateStopLatch } from "../teams/openai/config/opencode/openai-guardrails.js";
+import { allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
 import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
@@ -19,6 +19,18 @@ test("Daily shell policy is bounded by the genuine objective", () => {
   assert.equal(allowsDailyOrchestratorShell("bash", "rm file", "Do not delete anything", env), false);
   assert.equal(allowsDailyOrchestratorShell("bash", "rm file", "I explicitly confirm deletion", env), true);
   assert.equal(allowsDailyOrchestratorShell("bash", "printf ok", "Inspect", {}), false);
+});
+
+test("mandatory tester gate allows only the exact tester task and blocks root shell", () => {
+  const packetID = "a".repeat(64);
+  const pending = { ...createGuardrailState(), pendingVerificationPacketID: packetID };
+  assert.equal(verificationGateDecision(pending, "bash", "openai_orchestrator", "printf ok").reason, "MANDATORY_TESTER_GATE");
+  assert.equal(verificationGateDecision(createGuardrailState(), "bash", "openai_orchestrator", "printf ok").allowed, true);
+  assert.equal(verificationGateDecision(pending, "task", "tester", `verify test_task_id=${packetID}`).allowed, true);
+  for (const [agent, prompt] of [["tester", "verify"], ["tester", `verify test_task_id=${"b".repeat(64)}`], ["specialist", `verify test_task_id=${packetID}`]]) {
+    assert.equal(verificationGateDecision(pending, "task", agent, prompt).reason, "MANDATORY_TESTER_GATE");
+  }
+  assert.equal(verificationGateDecision({ ...pending, pendingTesterActive: true }, "task", "tester", `verify test_task_id=${packetID}`).reason, "TESTER_ALREADY_ACTIVE");
 });
 
 test("Daily template enables only orchestrator shell access and runtime forwards SSH vars conditionally", async () => {

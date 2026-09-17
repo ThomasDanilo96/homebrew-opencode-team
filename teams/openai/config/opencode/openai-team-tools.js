@@ -19,7 +19,7 @@ import { TaskStateError, claimTask, completeTask, readTask, transitionTask } fro
 import { workspaceFingerprint } from "./read-cache.js";
 import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
 import { gateTerminalPacketPatch, lifecycleCleanupOptions } from "./gate-state.js";
-import { GuardrailPolicyError, admitDelegation, admitToolCall, allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, updateStopLatch, writeStopLatch } from "./openai-guardrails.js";
+import { GuardrailPolicyError, admitDelegation, admitToolCall, allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision, writeStopLatch } from "./openai-guardrails.js";
 import { guardToolExecution } from "../../../../shared/tool-output-guard.js";
 import { appendTaskPacketMarker, extractTaskPacketMarker, objectiveBeforeMarker } from "./correlation-marker.js";
 import {
@@ -840,7 +840,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
      if (!snapshot || !packet || packet.packet_id !== snapshot.packet_id || packet.parent_session_id !== snapshot.parent_session_id || packet.task_fingerprint !== snapshot.task_fingerprint || Number(packet.attempt) !== Number(snapshot.attempt) || (packet.task_lease_id != null && packet.task_lease_id !== snapshot.task_lease_id) || JSON.stringify(expectedHashes) !== JSON.stringify(snapshot.expected_verification_hashes || []) || !task || task.parent_session_id !== snapshot.parent_session_id || Number(task.attempt) !== Number(snapshot.attempt) || task.lease_id !== snapshot.task_lease_id) return { code: "STALE_GATE_EVENT", packet: null };
      return { code: null, packet };
    };
-  const settleTesterGate = async (pending, childID) => {
+   const settleTesterGate = async (pending, childID) => {
     if (!pending?.test_task_id || !childID || pending.child_session_id !== childID) return { pending: true };
     const response = await pluginInput.client?.session.messages({ path: { id: childID } });
     const messages = unwrapData(response);
@@ -859,14 +859,22 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     const passed = evidence.summary?.status === "passed";
      if (evidence.summary?.status === "missing" || evidence.length === 0) {
        await updateWorkPacketByIDIfCurrent(pending.test_task_id, { tester_status: ["pending", "required"] }, { tester_status: "failed", error_code: "TEST_RESULT_INVALID", verification_evidence: evidence });
-       const target = (await listWorkPackets()).find((entry) => entry.packet_id === pending.test_task_id);
-       await reconcileGateTarget(target);
-       return { passed: false, code: "TEST_RESULT_INVALID" };
+        const target = (await listWorkPackets()).find((entry) => entry.packet_id === pending.test_task_id);
+        await reconcileGateTarget(target);
+        const terminalTask = await readTask(target?.task_fingerprint);
+        const root = guardrails.get(pending.master_parent_session_id);
+        if (root && terminalTask) guardrails.set(pending.master_parent_session_id, settleVerificationGateState(root, pending.test_task_id, terminalTask.state));
+        return { passed: false, code: "TEST_RESULT_INVALID" };
      }
     const update = await updateWorkPacketByIDIfCurrent(pending.test_task_id, { tester_status: ["pending", "required"] }, { tester_status: passed ? "passed" : "failed", verification_evidence: evidence, ...(passed ? {} : { error_code: "TEST_RESULT_INVALID" }) });
-    const target = update.packet || validation.packet;
-    await reconcileGateTarget(target);
-    return { passed, code: passed ? null : "TEST_RESULT_INVALID" };
+     const target = update.packet || validation.packet;
+     await reconcileGateTarget(target);
+     const terminalTask = await readTask(target?.task_fingerprint);
+     if (terminalTask && ["COMPLETED", "FAILED"].includes(terminalTask.state)) {
+       const root = guardrails.get(pending.master_parent_session_id);
+       if (root) guardrails.set(pending.master_parent_session_id, settleVerificationGateState(root, pending.test_task_id, terminalTask.state));
+     }
+     return { passed, code: passed ? null : "TEST_RESULT_INVALID" };
   };
   const rememberCompletedMessage = (id) => {
     if (!id || completedMessageIDs.has(id)) return false;
@@ -1425,7 +1433,12 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
              phase: gatesPending ? (testerRequired ? "pending_verification" : "pending_review") : "codex_terminal", outcome: gatesPending ? "pending" : "success", codex_outcome: "success",
           });
           await transitionCurrentPolicy(context.sessionID, CODEX_SUCCESS);
-          if (gatesPending) await advanceTask(reservation, testerRequired ? "PENDING_VERIFICATION" : "PENDING_REVIEW", { result_summary: "pending_gates" });
+           if (gatesPending) await advanceTask(reservation, testerRequired ? "PENDING_VERIFICATION" : "PENDING_REVIEW", { result_summary: "pending_gates" });
+           if (testerRequired && packetCallID && reservation?.master_parent_session_id) {
+             const rootID = reservation.master_parent_session_id;
+             const root = guardrails.get(rootID);
+             if (root) guardrails.set(rootID, { ...root, pendingVerificationPacketID: packetCallID, pendingTesterActive: false });
+           }
            const terminal = codexResult({ status: "success", kind: "success", code: "CODEX_SUCCESS", task_id: reservation?.task_fingerprint || null, packet_id: packet?.packet_id || null, attempt: reservation?.attempt || 1, complexity: reservation?.complexity || packet?.complexity || null, codex_profile: reservation?.codex_profile || packet?.codex_profile || null, requested_model: modelPlan.requested_model, executed_model: executedModel, fallback_model: modelPlan.fallback_model, fallback_reason: fallbackReason, fallback_count: fallbackCount, risk: reservation?.risk || packet?.risk || null, review_required: Boolean(reservation?.review_required || packet?.review_required), review_status: reviewPending ? "pending" : "not_required", tester_required: testerRequired, tester_status: testerRequired ? "pending" : "not_required", verification_status: executionPolicy.verification_status, next_agents: executionPolicy.next_agents, reasons: executionPolicy.reasons, codex_run_id: handoff?.codex_run_id || null, handoff_id: safeHandoffID(handoff, handoffPath), summary: safeTodoContent(codexSummaryFromStdout(result.stdout)), progress: progressState });
           await report({ status: terminal.status, kind: terminal.kind });
            await recordCodexTerminal("success", { ...result, gates_pending: gatesPending, validated_handoff: true });
@@ -1474,11 +1487,15 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        guardrails.set(input.sessionID, guard);
      }
       if (toolName === "task" && guard && !guard.activeDelegation && guard.delegations > 0 && !guard.verificationTerminal) {
-          guard = beginRequestCycle(guard, String(output.args?.prompt || output.args?.description || ""), Date.now(), process.env, { preserveVerificationTerminal: true, preserveCodexFailureTerminal: true });
+     guard = beginRequestCycle(guard, String(output.args?.prompt || output.args?.description || ""), Date.now(), process.env, { preserveVerificationTerminal: true, preserveCodexFailureTerminal: true, preserveVerificationGate: true });
         guardrails.set(input.sessionID, guard);
      }
+     const sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
+     const rootParentForGate = masterParent(input.sessionID);
+     const rootGuardForGate = guardrails.get(rootParentForGate) || (rootParentForGate === input.sessionID ? guard : null);
+     const gateDecision = verificationGateDecision(rootGuardForGate, toolName, toolName === "task" ? String(output.args?.subagent_type || output.args?.agent || "") : sessionAgent, output.args?.prompt || output.args?.description || "", [...reservations.values()].some((entry) => entry.master_parent_session_id === rootParentForGate && entry.role === "tester" && entry.test_task_id === rootGuardForGate?.pendingVerificationPacketID && entry.token));
+     if (!gateDecision.allowed) throw new GuardrailPolicyError(gateDecision.reason);
     if (guard && toolName !== "openai_run_codex") guardrails.set(input.sessionID, admitToolCall(guard, toolName));
-    const sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
     if (toolName === "bash" && sessionAgent === "tester") {
       const command = output.args?.command ?? output.args?.cmd;
       const target = typeof input.sessionID === "string"
@@ -1596,16 +1613,23 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
          const currentGuard = guardrails.get(input.sessionID) || guard;
          if (!currentGuard.activeDelegation && currentGuard.delegations > 0 && !currentGuard.verificationTerminal) {
            const rootAuthority = currentGuard.authoritativeObjective || authoritativeParentObjective;
-           guardrails.set(input.sessionID, { ...beginRequestCycle(currentGuard, currentTaskObjective, Date.now(), process.env, { preserveVerificationTerminal: true }), authoritativeObjective: rootAuthority });
+            guardrails.set(input.sessionID, { ...beginRequestCycle(currentGuard, currentTaskObjective, Date.now(), process.env, { preserveVerificationTerminal: true, preserveVerificationGate: true }), authoritativeObjective: rootAuthority });
          }
         const requestGuard = guardrails.get(input.sessionID) || currentGuard;
          const parentObjective = selectAuthoritativeObjective(requestGuard.authoritativeObjective, authoritativeParentObjective);
          requestGuard.objective = parentObjective;
         const reviewDelegation = ["reviewer", "reviewer_critical"].includes(agent);
-         guardrails.set(input.sessionID, admitDelegation({ ...requestGuard, objective: parentObjective }, delegatedObjective, {
-          review: reviewDelegation,
-           explicitlyRequestedReview: /\b(?:review|audit)\b/i.test(parentObjective || "") || Boolean(reviewTarget),
-        }));
+          const admittedGuard = admitDelegation({ ...requestGuard, objective: parentObjective }, delegatedObjective, {
+           review: reviewDelegation,
+            explicitlyRequestedReview: /\b(?:review|audit)\b/i.test(parentObjective || "") || Boolean(reviewTarget),
+         });
+         const gateRoot = rootParent === input.sessionID ? rootGuard : guardrails.get(rootParent);
+         const admittedWithGate = agent === "tester" && gateRoot?.pendingVerificationPacketID === testTaskID
+           ? { ...admittedGuard, pendingTesterActive: true } : admittedGuard;
+         guardrails.set(input.sessionID, admittedWithGate);
+         if (agent === "tester" && gateRoot?.pendingVerificationPacketID === testTaskID && rootParent !== input.sessionID) {
+           guardrails.set(rootParent, { ...gateRoot, pendingTesterActive: true });
+         }
      }
     const resolvedModel = String(output.args?.model || "");
     if (resolvedModel && !resolvedModel.startsWith("openai/")) {
@@ -1672,9 +1696,10 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const expectedVerificationHashes = agent === "tester" && gateTarget ? gateTarget.expected_verification_hashes : verificationCommands.filter(isAllowlistedVerificationCommand).map((command) => createHash("sha256").update(command).digest("hex"));
        const packetMetadata = { task_id: fingerprint, task_fingerprint: fingerprint, task_lease_id: claim.record.lease_id, packet_id: claim.record.packet_id, workspace_fingerprint: workspace.fingerprint, cache_status: cacheableRead ? "miss" : "bypass", complexity: analysis.complexity, codex_profile: analysis.codex_profile, reasoning_effort: analysis.reasoning_effort, risk: analysis.risk, review_required: analysis.review_required, discovery_group_id: discoveryGroupID, discovery_required_lanes: analysis.discovery_agents, attempt: claim.record.attempt, retry_count: claim.record.attempt - 1, tool_call_count: 0, wrapper_round_trips: 0, acceptance_criteria: verificationCommands, verification_commands: verificationCommands, expected_verification_hashes: expectedVerificationHashes, tester_status: agent === "tester" ? "pending" : undefined, test_task_id: agent === "tester" ? (testTaskID || claim.record.packet_id) : testTaskID || undefined };
      await recordLatency({ stage: "task_admission", outcome: admission.status === 0 ? "admitted" : "deferred", duration_ms: elapsed(admissionStartedAt), admission_wait_ms: elapsed(admissionStartedAt), agent, call_id: input.callID, ...eventMetadata({ ...packetMetadata, classification: route.classification, task_call_id: input.callID }) });
-    if (admission.status !== 0) {
+     if (admission.status !== 0) {
+       if (agent === "tester" && rootGuardForGate?.pendingVerificationPacketID === testTaskID) guardrails.set(rootParent, { ...rootGuardForGate, pendingTesterActive: false });
       await transitionTask(fingerprint, { expectedVersion: claim.record.version, expectedStates: ["CLAIMED"], leaseId: claim.record.lease_id, patch: { state: "FAILED", retryable: true, error_code: "ADMISSION_DEFERRED" } });
-      throw new Error("OpenAI global worker budget is full; task admission deferred.");
+       throw new Error("OpenAI global worker budget is full; task admission deferred.");
     }
     const admissionToken = admission.stdout.trim();
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(admissionToken)) {
@@ -1688,7 +1713,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         } catch {}
       }
       await transitionTask(fingerprint, { expectedVersion: claim.record.version, expectedStates: ["CLAIMED"], leaseId: claim.record.lease_id, patch: { state: "FAILED", retryable: true, error_code: "ADMISSION_TOKEN_INVALID" } });
-      const error = new Error("ADMISSION_TOKEN_INVALID"); error.code = "ADMISSION_TOKEN_INVALID"; throw error;
+       if (agent === "tester" && rootGuardForGate?.pendingVerificationPacketID === testTaskID) guardrails.set(rootParent, { ...rootGuardForGate, pendingTesterActive: false });
+       const error = new Error("ADMISSION_TOKEN_INVALID"); error.code = "ADMISSION_TOKEN_INVALID"; throw error;
     }
     try {
       const activePath = join(process.env.OPENAI_TEAM_STATE_ROOT || "/tmp", "active", `${admissionToken}.json`);
@@ -1697,7 +1723,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     } catch (error) {
       await release(admissionToken);
       await transitionTask(fingerprint, { expectedVersion: claim.record.version, expectedStates: ["CLAIMED"], leaseId: claim.record.lease_id, patch: { state: "FAILED", retryable: true, error_code: "ADMISSION_METADATA_FAILED" } });
-      throw error;
+       if (agent === "tester" && rootGuardForGate?.pendingVerificationPacketID === testTaskID) guardrails.set(rootParent, { ...rootGuardForGate, pendingTesterActive: false });
+       throw error;
     }
     reservations.set(input.callID, {
       token: admissionToken,
@@ -1952,7 +1979,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
                guardrails.set(sessionID, state);
                return;
              }
-             const cycled = beginRequestCycle(state, text, Date.now(), process.env, { preserveVerificationTerminal: !positivelyIdentifiedRoot });
+              const cycled = beginRequestCycle(state, text, Date.now(), process.env, { preserveVerificationTerminal: !positivelyIdentifiedRoot, preserveVerificationGate: !positivelyIdentifiedRoot });
              const next = positivelyIdentifiedRoot ? updateStopLatch(cycled, text, true) : {
                ...cycled,
                stopped: state.stopped,
