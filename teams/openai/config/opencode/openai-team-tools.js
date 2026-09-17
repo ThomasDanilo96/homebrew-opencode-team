@@ -694,8 +694,14 @@ const commandsFromAuthorizedText = (text) => {
   const starters = new Set(["node", "npm", "pnpm", "yarn", "pytest", "python", "go", "cargo", "bash", "bun", "dotnet", "mvn", "mvnw", "gradle", "gradlew", "phpunit", "rspec", "tsc", "eslint"]);
   const proseBoundaries = [["and", "report"], ["then", "report"], ["to", "verify"], ["to", "check"], ["and", "return"]];
   const cleanToken = (token) => {
-    const cleaned = token.replace(/^[([{:,]+|[)\]},!?;]+$/g, "");
-    return cleaned.endsWith("./...") ? cleaned : cleaned.replace(/\.$/, "");
+    let cleaned = token.replace(/^[([{:,]+/, "");
+    if (cleaned.endsWith("./...")) return cleaned;
+    let previous;
+    do {
+      previous = cleaned;
+      cleaned = cleaned.replace(/[)\]},!?;.:]+$/, "");
+    } while (cleaned !== previous);
+    return cleaned;
   };
   for (const line of value.replace(/`[^`]*`/g, " ").split(/\r?\n/)) {
     const tokens = line.split(/\s+/).filter(Boolean).map(cleanToken);

@@ -55,6 +55,14 @@ const persistedTesterFields = (command = continuationCommand) => ({
   expected_verification_hashes: JSON.stringify([continuationCommandHash]),
 });
 
+test("delegated verification command survives parenthesized terminal prose punctuation", () => {
+  const result = promoteVerificationCommands({}, "run the appropriate verification command (node calculator.test.js). report changed files...");
+  assert.deepEqual({ commands: result.commands, hashes: result.hashes }, {
+    commands: [calculatorCommand],
+    hashes: [calculatorHash],
+  });
+});
+
 test("A: serialized tester authorization has the exact known hash and admits Bash", () => {
   assert.equal(createHash("sha256").update(continuationCommand).digest("hex"), continuationCommandHash);
   const packet = persistedTesterFields();
