@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
 
 const root = "root-session";
 const packetID = "a".repeat(64);
 const task = { task_fingerprint: "task", state: "PENDING_VERIFICATION", attempt: 1, lease_id: "lease", parent_session_id: root };
-const gate = () => ({ packet_id: packetID, parent_session_id: root, task_fingerprint: "task", attempt: 1, task_lease_id: "lease", tester_required: true, tester_status: "pending", codex_outcome: "success", outcome: "pending", phase: "pending_verification" });
+const gate = (id = packetID, parent = root) => ({ packet_id: id, test_task_id: id, parent_session_id: parent, task_fingerprint: "task", attempt: 1, task_lease_id: "lease", tester_required: true, tester_status: "pending", codex_outcome: "success", outcome: "pending", phase: "pending_verification" });
 const depsFor = (packets, extra = {}) => ({
   listWorkPackets: async () => packets,
   readTask: async () => task,
@@ -124,4 +124,102 @@ test("existing terminal tester PASS settles the gate without another prompt", as
   assert.equal(result.status, "noop");
   assert.equal(prompts.length, 0);
   assert.equal(packet.tester_status, "passed");
+});
+
+const durableDeps = (packets, transitions = [], extra = {}) => ({
+  listWorkPackets: async () => packets,
+  readTask: async () => ({ ...task, parent_session_id: packets[0]?.parent_session_id || root }),
+  readWorkPacketByID: async (id) => packets.find((packet) => packet.packet_id === id) || null,
+  updateWorkPacketByIDIfCurrent: async (_id, expected, fields) => {
+    const current = packets.find((packet) => packet.packet_id === packets[0].packet_id);
+    const matched = Object.entries(expected).every(([key, value]) => (Array.isArray(value) ? value.includes(current[key]) : current[key] === value));
+    if (matched) { transitions.push([current.tester_dispatch_state, fields.tester_dispatch_state]); Object.assign(current, fields); }
+    return { matched, packet: current };
+  },
+  ...extra,
+});
+
+for (const [label, response] of [["throw", null], ["explicit SDK error", { error: { status: 400 } }]]) {
+  test(`enqueue ${label} is terminal and never requested`, async () => {
+    const testRoot = `failure-${label}`, packet = gate(`${label === "throw" ? "b" : "c"}`.repeat(64), testRoot), packets = [packet], failures = [], transitions = [], prompts = [];
+    const result = await driveMandatoryTesterContinuation(testRoot, durableDeps(packets, transitions, {
+      enqueue: async () => { prompts.push(true); if (label === "throw") throw new Error("sdk failure"); return response; },
+      fail: async (_gate, code) => failures.push(code),
+    }));
+    assert.equal(result.status, "failed");
+    assert.equal(prompts.length, 1);
+    assert.equal(packet.tester_dispatch_state, "pending");
+    assert.notEqual(packet.tester_dispatch_state, "requested");
+    assert.deepEqual(failures, ["MANDATORY_TESTER_ENQUEUE_FAILED"]);
+    assert.equal(packets.filter((item) => item.agent === "tester").length, 0);
+  });
+}
+
+test("successful enqueue durably records dispatching then requested exactly once", async () => {
+  const testRoot = "success-root", packet = gate("d".repeat(64), testRoot), transitions = [], prompts = [];
+  const result = await driveMandatoryTesterContinuation(testRoot, durableDeps([packet], transitions, {
+    enqueue: async () => { prompts.push(true); return undefined; },
+  }));
+  assert.equal(result.status, "requested");
+  assert.deepEqual(transitions, [[undefined, "dispatching"], ["dispatching", "requested"]]);
+  assert.equal(prompts.length, 1);
+});
+
+for (const initial of ["dispatching", "requested"]) {
+  test(`observation helper durably accepts ${initial} and preserves objective`, async () => {
+    const testRoot = `observe-${initial}`, testPacketID = `${initial === "dispatching" ? "e" : "f"}`.repeat(64), packet = { ...gate(testPacketID, testRoot), tester_dispatch_state: initial, objective: "authoritative objective" }, packets = [packet], transitions = [];
+    const result = await observeMandatoryTesterContinuation(testRoot, testPacketID, durableDeps(packets, transitions));
+    assert.equal(result.matched, true);
+    assert.equal(packet.tester_dispatch_state, "observed");
+    assert.equal(packet.objective, "authoritative objective");
+  });
+}
+
+test("observation helper rejects a packet rooted in another session", async () => {
+  const testPacketID = "1".repeat(64), packet = { ...gate(testPacketID, "other-root"), tester_dispatch_state: "requested" }, transitions = [];
+  const result = await observeMandatoryTesterContinuation(root, testPacketID, durableDeps([packet], transitions));
+  assert.equal(result.matched, false);
+  assert.equal(packet.tester_dispatch_state, "requested");
+});
+
+test("observed continuation admits exactly the required tester once", () => {
+  const packet = { ...gate(), tester_dispatch_state: "observed" };
+  assert.equal(enforcePendingMandatoryTesterGate(packet, { tool: "task", agent: "tester", prompt: `test_task_id=${packetID}` }).allowed, true);
+  assert.equal(enforcePendingMandatoryTesterGate(packet, { tool: "task", agent: "tester", prompt: `test_task_id=${packetID}`, active: true }).allowed, false);
+});
+
+test("tester PASS terminal settlement is completed", () => {
+  const packet = { ...gate(), tester_status: "passed", verification_status: "completed", phase: "foreground_completion", outcome: "completed" };
+  assert.equal(packet.phase, "foreground_completion");
+  assert.equal(packet.outcome, "completed");
+  assert.equal(packet.tester_status, "passed");
+  assert.equal(packet.verification_status, "completed");
+});
+
+test("idle dispatch is single-flight and requested does not watchdog-fail", async () => {
+  const testRoot = "idle-root", testPacketID = "2".repeat(64), packet = gate(testPacketID, testRoot), packets = [packet], prompts = [], failures = [], transitions = [];
+  let release;
+  const pending = new Promise((resolve) => { release = resolve; });
+  const deps = durableDeps(packets, transitions, {
+    enqueue: async () => { prompts.push(true); await pending; },
+    fail: async (_gate, code) => failures.push(code),
+  });
+  const first = driveMandatoryTesterContinuation(testRoot, deps);
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(packet.tester_dispatch_state, "dispatching");
+  assert.equal((await driveMandatoryTesterContinuation(testRoot, deps)).status, "waiting");
+  release();
+  assert.equal((await first).status, "requested");
+  assert.equal((await driveMandatoryTesterContinuation(testRoot, deps)).status, "waiting");
+  assert.equal(prompts.length, 1);
+  assert.deepEqual(failures, []);
+  await observeMandatoryTesterContinuation(testRoot, testPacketID, deps);
+  assert.equal((await driveMandatoryTesterContinuation(testRoot, deps)).status, "failed");
+  assert.deepEqual(failures, ["MANDATORY_TESTER_NOT_DISPATCHED"]);
+  assert.equal(prompts.length, 1);
+});
+
+test("Codex after-hook is not an initial mandatory-tester dispatch trigger", () => {
+  assert.equal(mandatoryTesterDispatchTrigger("tool.execute.after"), false);
+  assert.equal(mandatoryTesterDispatchTrigger("session.idle"), true);
 });

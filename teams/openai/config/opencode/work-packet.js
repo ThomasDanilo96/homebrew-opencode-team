@@ -66,7 +66,7 @@ const delay = (milliseconds) => new Promise((resolve) => setTimeout(resolve, mil
 const clean = (value = {}) => Object.fromEntries(Object.entries(value).flatMap(([key, entry]) => {
   if (strings.has(key) && (typeof entry === "string" || typeof entry === "number")) return [[key, String(entry)]];
   if (safeStrings.has(key) && (typeof entry === "string" || typeof entry === "number")) {
-    if (key === "tester_dispatch_state" && !["pending", "requested"].includes(String(entry))) return [];
+    if (key === "tester_dispatch_state" && !["pending", "dispatching", "requested", "observed"].includes(String(entry))) return [];
     const cleaned = redact(entry);
     const fingerprint = key === "task_fingerprint" || key === "workspace_fingerprint";
     return cleaned && (cleaned.length <= 256 || (fingerprint && /^[a-f0-9]{64,128}$/i.test(cleaned))) ? [[key, cleaned]] : [];

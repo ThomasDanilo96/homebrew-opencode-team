@@ -343,7 +343,22 @@ export const findPendingMandatoryTesterGate = async (rootSessionID, deps = {}) =
 
 const mandatoryTesterDispatchFailures = new Set();
 const observedMandatoryTesterContinuations = new Set();
-export const observeMandatoryTesterContinuation = (rootID, packetID) => observedMandatoryTesterContinuations.add(`${rootID}:${packetID}`);
+export const observeMandatoryTesterContinuation = (rootID, packetID, deps = {}) => {
+  const key = `${rootID}:${packetID}`;
+  observedMandatoryTesterContinuations.add(key);
+  if (typeof deps.readWorkPacketByID !== "function" || typeof deps.updateWorkPacketByIDIfCurrent !== "function") return true;
+  return (async () => {
+    const packet = await deps.readWorkPacketByID(packetID);
+    if (packet?.parent_session_id !== rootID || packet.test_task_id !== packetID || packet.tester_required !== true) {
+      observedMandatoryTesterContinuations.delete(key);
+      return { matched: false, packet: packet || null };
+    }
+    const result = await deps.updateWorkPacketByIDIfCurrent(packetID, { parent_session_id: rootID, tester_dispatch_state: ["dispatching", "requested"] }, { tester_dispatch_state: "observed" });
+    if (!result?.matched && result?.packet?.tester_dispatch_state !== "observed") observedMandatoryTesterContinuations.delete(key);
+    return result;
+  })();
+};
+export const mandatoryTesterDispatchTrigger = (eventType) => eventType === "session.idle";
 export const driveMandatoryTesterContinuation = async (rootSessionID, deps = {}) => {
   const gate = await findPendingMandatoryTesterGate(rootSessionID, deps);
   if (!gate) return { status: "noop" };
@@ -354,31 +369,38 @@ export const driveMandatoryTesterContinuation = async (rootSessionID, deps = {})
     !terminal.has(String(packet.outcome || "").toLowerCase())
   );
   if (testerExists) return { status: "existing", packet_id: gate.packet_id };
-  const fail = async () => {
+  const fail = async (code = "MANDATORY_TESTER_NOT_DISPATCHED") => {
     const key = `${rootSessionID}:${gate.packet_id}`;
     if (mandatoryTesterDispatchFailures.has(key)) return;
     mandatoryTesterDispatchFailures.add(key);
-    if (typeof deps.fail === "function") await deps.fail(gate);
+    observedMandatoryTesterContinuations.delete(key);
+    if (typeof deps.fail === "function") await deps.fail(gate, code);
   };
-  if (gate.tester_dispatch_state === "requested") {
-    if (deps.failRequested !== false) {
-      await fail();
-      return { status: "failed", packet_id: gate.packet_id };
-    }
+  const observed = gate.tester_dispatch_state === "observed" || observedMandatoryTesterContinuations.has(`${rootSessionID}:${gate.packet_id}`);
+  if (["dispatching", "requested"].includes(gate.tester_dispatch_state) && !observed) {
     return { status: "waiting", packet_id: gate.packet_id };
+  }
+  if (observed) {
+    await fail();
+    return { status: "failed", packet_id: gate.packet_id };
   }
   const cas = await (deps.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent)(gate.packet_id, {
     tester_status: ["pending", "required"], phase: "pending_verification", outcome: "pending", codex_outcome: "success",
     tester_dispatch_state: [undefined, "pending"],
-  }, { tester_dispatch_state: "requested" });
+  }, { tester_dispatch_state: "dispatching" });
   if (!cas?.matched) return { status: "noop", packet_id: gate.packet_id };
   const text = `<!-- OMO_INTERNAL_INITIATOR --> MANDATORY_TESTER_GATE test_task_id=${gate.packet_id}\nCall the native task exactly once with subagent_type tester. Do not use Bash. Do not report final success.`;
   try {
     if (typeof deps.enqueue !== "function") throw new Error("MANDATORY_TESTER_ENQUEUE_UNAVAILABLE");
-    await deps.enqueue(rootSessionID, text);
+    const response = await deps.enqueue(rootSessionID, text);
+    if (response?.error || response?.failure || response?.status === "error" || response?.status === "failed" || response?.status === "failure") throw new Error("MANDATORY_TESTER_ENQUEUE_FAILED");
+    const requested = await (deps.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent)(gate.packet_id, { tester_dispatch_state: "dispatching" }, { tester_dispatch_state: "requested" });
+    if (!requested?.matched && requested?.packet?.tester_dispatch_state === "observed") return { status: "observed", packet_id: gate.packet_id };
+    if (!requested?.matched) return { status: "waiting", packet_id: gate.packet_id };
     return { status: "requested", packet_id: gate.packet_id };
-  } catch {
-    await fail();
+  } catch (error) {
+    await (deps.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent)(gate.packet_id, { tester_dispatch_state: "dispatching" }, { tester_dispatch_state: "pending", error_code: "MANDATORY_TESTER_ENQUEUE_FAILED" });
+    await fail("MANDATORY_TESTER_ENQUEUE_FAILED");
     return { status: "failed", packet_id: gate.packet_id };
   }
 };
@@ -404,9 +426,9 @@ export const createMandatoryTesterRootDriver = ({ pluginInput = {}, updateWorkPa
       if (typeof prompt !== "function") throw new Error("MANDATORY_TESTER_ENQUEUE_UNAVAILABLE");
       return prompt.call(session, { path: { id: destinationRoot }, body: { parts: [{ type: "text", text }], agent: "openai_orchestrator" } });
     },
-    fail: async (gate) => {
-      await updatePacket(gate.packet_id, { phase: "foreground_completion", outcome: "failed", tester_status: "failed", verification_status: "failed", error_code: "MANDATORY_TESTER_NOT_DISPATCHED" });
-      await reconcileGateTarget({ ...gate, phase: "foreground_completion", outcome: "failed", tester_status: "failed", verification_status: "failed", error_code: "MANDATORY_TESTER_NOT_DISPATCHED" });
+    fail: async (gate, code = "MANDATORY_TESTER_NOT_DISPATCHED") => {
+      await updatePacket(gate.packet_id, { phase: "foreground_completion", outcome: "failed", tester_status: "failed", verification_status: "failed", error_code: code });
+      await reconcileGateTarget({ ...gate, phase: "foreground_completion", outcome: "failed", tester_status: "failed", verification_status: "failed", error_code: code });
     },
   });
   if (result.status === "noop") {
@@ -1896,9 +1918,6 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           throw Object.assign(new Error(JSON.stringify({ code: "CODEX_CHILD_NOT_SUCCESSFUL", retryable: false, phase: "codex_child_policy", task_id: pending.task_fingerprint, session_id: foregroundChildID, status: childPolicy?.status || null })), { code: "CODEX_CHILD_NOT_SUCCESSFUL" });
         }
         if (childTask?.state === "PENDING_VERIFICATION") {
-          if (childPacket?.tester_required === true && ["pending", "required"].includes(childPacket?.tester_status)) {
-            await driveMandatoryTesterForRoot(masterParent(input.sessionID), { failRequested: false });
-          }
           await finalizeReservation(pending, { outcome: "pending", result_summary: "pending_gates", sessionID: foregroundChildID, terminal: false, packet: false, taskAction: null });
           return undefined;
         }
@@ -2080,7 +2099,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         // Policy survives non-terminal lifecycle events: it is the durable
         // authority binding for recovery, quality gates, and duplicate calls.
       if (!pending) { packetCallBySession.delete(sessionID); bufferedOpenCodeTokens.delete(sessionID); }
-      if (event.type === "session.idle" && sessionID && masterParent(sessionID) === sessionID && [...observedMandatoryTesterContinuations].some((key) => key.startsWith(`${sessionID}:`))) {
+      if (mandatoryTesterDispatchTrigger(event.type) && sessionID && masterParent(sessionID) === sessionID) {
         await driveMandatoryTesterForRoot(sessionID, { failRequested: true });
       }
     }
@@ -2090,9 +2109,10 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           const text = (event.properties?.parts || event.properties?.message?.parts || []).filter((part) => part?.type === "text").map((part) => part.text).join(" ");
           const sessionID = event.properties?.sessionID || info.sessionID;
           const testTaskID = String(text).match(/MANDATORY_TESTER_GATE[\s\S]*?test_task_id=([^\s]+)/)?.[1];
-          if (sessionID && testTaskID && String(text).includes("OMO_INTERNAL_INITIATOR")) {
-            observeMandatoryTesterContinuation(masterParent(sessionID), testTaskID);
-          }
+           if (sessionID && testTaskID && /^\s*<!-- OMO_INTERNAL_INITIATOR -->[\s\S]*\bMANDATORY_TESTER_GATE\b[\s\S]*\btest_task_id=[^\s]+/.test(text)) {
+             const rootID = masterParent(sessionID);
+             await observeMandatoryTesterContinuation(rootID, testTaskID, { readWorkPacketByID, updateWorkPacketByIDIfCurrent });
+           }
            if (sessionID && !isInternalContinuation(text)) {
              const state = await guardrailFor(sessionID);
              const mappedRoot = masterParentBySession.get(sessionID);
