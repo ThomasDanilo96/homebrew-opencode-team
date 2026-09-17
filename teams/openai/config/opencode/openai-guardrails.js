@@ -33,7 +33,7 @@ export const isStopText = (text) => !isInternalContinuation(text) && STOP.test(S
 export const isExplicitResumeText = (text) => !isInternalContinuation(text) && RESUME.test(String(text || ""));
 export const backgroundDelegationAllowed = (env = process.env) => env.OPENAI_DAILY_PROFILE === "1";
 export const updateStopLatch = (state = { stopped: false }, text, genuine = true) => !genuine || isInternalContinuation(text) ? { ...state } : isStopText(text) ? { ...state, stopped: true } : state.stopped && isExplicitResumeText(text) ? { ...state, stopped: false } : { ...state };
-export const beginRequestCycle = (state = createGuardrailState(), text, now = Date.now(), env = process.env, { preserveVerificationTerminal = false } = {}) => {
+export const beginRequestCycle = (state = createGuardrailState(), text, now = Date.now(), env = process.env, { preserveVerificationTerminal = false, preserveCodexFailureTerminal = false } = {}) => {
   if (isInternalContinuation(text)) return state;
   if (state.verificationTerminal && preserveVerificationTerminal) return state;
   const analysis = env.OPENAI_DAILY_PROFILE === "1" ? analyzeObjective(text) : null;
@@ -41,7 +41,7 @@ export const beginRequestCycle = (state = createGuardrailState(), text, now = Da
   const configuredLimits = readGuardrailLimits({ ...env, ...(override.minutes ? { OPENAI_GUARDRAIL_MINUTES: override.minutes } : {}), ...(override.toolCalls ? { OPENAI_GUARDRAIL_TOOL_CALLS: override.toolCalls } : {}) }, base, analysis ? DAILY_BOUNDS : BOUNDS);
   const limits = analysis ? { ...configuredLimits, delegations: Math.min(configuredLimits.delegations, analysis.fanout_limit) } : configuredLimits;
   const resumed = isExplicitResumeText(text);
-  return { ...state, objective: String(text || "").trim(), authoritativeObjective: preserveVerificationTerminal ? state.authoritativeObjective || state.objective || null : String(text || "").trim(), limits, startedAt: now, toolCalls: 0, weightedUnits: 0, delegations: 0, activeDelegations: 0, activeDelegation: false, verificationTerminal: false, budgetTerminal: false, classification, complexity: analysis?.complexity ?? null, fanoutLimit: analysis?.fanout_limit ?? null, checkpointed: classification === "long", stopped: resumed ? false : Boolean(state.stopped) || isStopText(text) };
+  return { ...state, objective: String(text || "").trim(), authoritativeObjective: preserveVerificationTerminal ? state.authoritativeObjective || state.objective || null : String(text || "").trim(), limits, startedAt: now, toolCalls: 0, weightedUnits: 0, delegations: 0, activeDelegations: 0, activeDelegation: false, verificationTerminal: false, budgetTerminal: false, codexFailureTerminal: preserveCodexFailureTerminal ? Boolean(state.codexFailureTerminal) : false, classification, complexity: analysis?.complexity ?? null, fanoutLimit: analysis?.fanout_limit ?? null, checkpointed: classification === "long", stopped: resumed ? false : Boolean(state.stopped) || isStopText(text) };
 };
 export const recoverRootRequestState = (state = createGuardrailState(), objective, now = Date.now(), env = process.env) => {
   const existing = state || createGuardrailState(env, now);
@@ -60,6 +60,7 @@ export const recoverRootRequestState = (state = createGuardrailState(), objectiv
     stopped: Boolean(existing.stopped || derived.stopped),
     verificationTerminal: Boolean(existing.verificationTerminal || derived.verificationTerminal),
     budgetTerminal: Boolean(existing.budgetTerminal || derived.budgetTerminal),
+    codexFailureTerminal: Boolean(existing.codexFailureTerminal),
   };
 };
 export const confirmationCategory = (operation) => Object.entries(CATEGORIES).find(([, pattern]) => pattern.test(String(operation || "")))?.[0] || null;
@@ -151,7 +152,7 @@ export const canonicalDelegatedObjective = (parentObjective, childScope, { targe
   return `Parent objective (verbatim):\n${parent}\nDelegated scope:\n${normalizedScope}`;
 };
 export const delegationScope = (objective) => normalizedScopeText(canonicalParts(objective)?.[2] || objective);
-export const createGuardrailState = (env = process.env, now = Date.now()) => ({ limits: readGuardrailLimits(env), startedAt: now, toolCalls: 0, weightedUnits: 0, delegations: 0, activeDelegations: 0, activeDelegation: false, delegationScopes: [], stopped: false, verificationTerminal: false, budgetTerminal: false, classification: "normal", checkpointed: false, objective: null, authoritativeObjective: null });
+export const createGuardrailState = (env = process.env, now = Date.now()) => ({ limits: readGuardrailLimits(env), startedAt: now, toolCalls: 0, weightedUnits: 0, delegations: 0, activeDelegations: 0, activeDelegation: false, delegationScopes: [], stopped: false, verificationTerminal: false, budgetTerminal: false, codexFailureTerminal: false, classification: "normal", checkpointed: false, objective: null, authoritativeObjective: null });
 export const preserveChildGuardState = (state, rootState = null, authoritativeObjective = null) => {
   const child = state || createGuardrailState();
   const rootLimits = rootState?.limits || {};
@@ -176,6 +177,7 @@ export const preserveChildGuardState = (state, rootState = null, authoritativeOb
     activeDelegations,
     activeDelegation: activeDelegations > 0,
     authoritativeObjective: authoritativeObjective || rootState?.authoritativeObjective || child.authoritativeObjective || null,
+    codexFailureTerminal: Boolean(child.codexFailureTerminal || rootState?.codexFailureTerminal),
   };
 };
 const toolWeight = (tool) => /^(read|search|glob|grep|lsp_|serena_(find|search|get)|diagnostic)/i.test(String(tool || "")) ? 0.5 : String(tool || "").trim() ? 1 : 0;

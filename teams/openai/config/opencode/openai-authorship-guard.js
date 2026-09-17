@@ -4,7 +4,8 @@ import { CODEX_REQUIRED, CODEX_SUCCESS, TERRA_FALLBACK, ensurePolicy, readPolicy
 import { allowsDailyOrchestratorShell } from "./openai-guardrails.js";
 import { isAllowlistedVerificationCommand, verificationCommandCategory } from "./execution-policy.js";
 import { createHash } from "node:crypto";
-import { listWorkPackets } from "./work-packet.js";
+import { extractTaskPacketMarker, objectiveBeforeMarker } from "./correlation-marker.js";
+import { listWorkPackets, readWorkPacketByID } from "./work-packet.js";
 import { readTask, transitionTask } from "./task-state.js";
 import { updateWorkPacketByID } from "./work-packet.js";
 
@@ -118,7 +119,10 @@ export const bootstrapCodexPolicy = async (pluginInput, sessionID, agent) => {
     const messages = (await pluginInput.client?.session?.messages({ path: { id: sessionID } }))?.data;
     const prompt = childPrompt(messages);
     if (!prompt) return blocked(CODEX_BOOTSTRAP_REASONS.PROMPT);
-    const objective_sha256 = createHash("sha256").update(prompt).digest("hex");
+    const marker = extractTaskPacketMarker(prompt);
+    if (marker.present && !marker.valid) return blocked(CODEX_BOOTSTRAP_REASONS.CANDIDATE_COUNT);
+    const objective = marker.present ? objectiveBeforeMarker(prompt) : prompt;
+    const objective_sha256 = createHash("sha256").update(objective).digest("hex");
     const listPackets = pluginInput.listWorkPackets || listWorkPackets;
     const parentIDs = new Set([parentID]);
     let cursor = parentID;
@@ -136,14 +140,20 @@ export const bootstrapCodexPolicy = async (pluginInput, sessionID, agent) => {
         ["admitted", "codex_running", "foreground_bound", "running"].includes(String(packet.phase || "").toLowerCase()) &&
         ["pending", "running"].includes(String(packet.outcome || "").toLowerCase()) &&
         (packet.child_session_id == null || packet.child_session_id === sessionID));
-    let candidates = eligibleCandidates(await listPackets());
-    const deadline = Date.now() + candidateWaitMs();
-    while (candidates.length === 0 && Date.now() < deadline) {
-      await delay(Math.min(candidatePollMs(), deadline - Date.now()));
-      candidates = eligibleCandidates(await listPackets());
+    let packet;
+    if (marker.present) {
+      packet = await (pluginInput.readWorkPacketByID || readWorkPacketByID)(marker.packetID);
+      if (!packet || packet.objective_sha256 !== objective_sha256 || packet.parent_session_id !== rootID || packet.agent !== "codex_executor" || !["admitted", "codex_running", "foreground_bound", "running"].includes(String(packet.phase || "").toLowerCase()) || !["pending", "running"].includes(String(packet.outcome || "").toLowerCase()) || (packet.child_session_id && packet.child_session_id !== sessionID)) return blocked(CODEX_BOOTSTRAP_REASONS.CANDIDATE_COUNT);
+    } else {
+      let candidates = eligibleCandidates(await listPackets());
+      const deadline = Date.now() + candidateWaitMs();
+      while (candidates.length === 0 && Date.now() < deadline) {
+        await delay(Math.min(candidatePollMs(), deadline - Date.now()));
+        candidates = eligibleCandidates(await listPackets());
+      }
+      if (candidates.length !== 1) return blocked(CODEX_BOOTSTRAP_REASONS.CANDIDATE_COUNT);
+      packet = candidates[0];
     }
-    if (candidates.length !== 1) return blocked(CODEX_BOOTSTRAP_REASONS.CANDIDATE_COUNT);
-    const packet = candidates[0];
     const task = await (pluginInput.readTask || readTask)(packet.task_fingerprint);
     const lease = packet.task_lease_id || packet.lease_id;
     if (!task) return blocked(CODEX_BOOTSTRAP_REASONS.TASK_MISSING);
@@ -151,7 +161,7 @@ export const bootstrapCodexPolicy = async (pluginInput, sessionID, agent) => {
       task.packet_id !== packet.packet_id || task.attempt !== packet.attempt || task.lease_id !== lease) {
       return blocked(CODEX_BOOTSTRAP_REASONS.TASK_IDENTITY);
     }
-    if (!["CLAIMED", "ADMITTED", "BOUND", "RUNNING", "PENDING_REVIEW", "PENDING_VERIFICATION"].includes(task.state)) {
+    if (task.task_fingerprint !== packet.task_fingerprint || !["CLAIMED", "ADMITTED", "BOUND", "RUNNING", "PENDING_REVIEW", "PENDING_VERIFICATION"].includes(task.state)) {
       return blocked(CODEX_BOOTSTRAP_REASONS.TASK_STATE);
     }
     if (task.child_session_id && task.child_session_id !== sessionID) return blocked(CODEX_BOOTSTRAP_REASONS.CHILD_CONFLICT);
@@ -188,11 +198,16 @@ const validateExistingCodexPolicy = async (pluginInput, sessionID, policy) => {
     const messages = (await pluginInput.client?.session?.messages({ path: { id: sessionID } }))?.data;
     const prompt = childPrompt(messages);
     if (!parentID || !prompt) return false;
-    const hash = createHash("sha256").update(prompt).digest("hex");
-    const packets = await (pluginInput.listWorkPackets || listWorkPackets)();
-    const packet = (Array.isArray(packets) ? packets : []).find((entry) => entry.packet_id === policy.packet_id && entry.child_session_id === sessionID && entry.agent === "codex_executor" && entry.objective_sha256 === hash && ["pending", "running"].includes(String(entry.outcome || "").toLowerCase()) && (entry.parent_session_id === parentID || entry.parent_session_id === policy.master_parent_session_id));
+    const marker = extractTaskPacketMarker(prompt);
+    if (marker.present && !marker.valid) return false;
+    const objective = marker.present ? objectiveBeforeMarker(prompt) : prompt;
+    const hash = createHash("sha256").update(objective).digest("hex");
+    const packet = marker.present
+      ? await (pluginInput.readWorkPacketByID || readWorkPacketByID)(marker.packetID)
+      : (await (pluginInput.listWorkPackets || listWorkPackets)()).find((entry) => entry.packet_id === policy.packet_id && entry.child_session_id === sessionID && entry.agent === "codex_executor" && entry.objective_sha256 === hash && ["pending", "running"].includes(String(entry.outcome || "").toLowerCase()) && (entry.parent_session_id === parentID || entry.parent_session_id === policy.master_parent_session_id));
+    if (marker.present && (!packet || packet.packet_id !== policy.packet_id || packet.parent_session_id !== (policy.master_parent_session_id || parentID))) return false;
     const task = packet ? await readTask(packet.task_fingerprint) : null;
-    return Boolean(packet && task && packet.task_lease_id === task.lease_id && packet.attempt === task.attempt && packet.task_call_id === policy.task_call_id && task.agent === "codex_executor" && task.parent_session_id === packet.parent_session_id && task.packet_id === packet.packet_id && task.attempt === policy.attempt && task.lease_id === policy.task_lease_id && task.child_session_id === sessionID && !["COMPLETED", "FAILED"].includes(task.state) && policy.task_fingerprint === task.task_fingerprint && policy.objective_sha256 === hash);
+    return Boolean(packet && task && ["admitted", "codex_running", "foreground_bound", "running"].includes(String(packet.phase || "").toLowerCase()) && packet.task_lease_id === task.lease_id && packet.attempt === task.attempt && packet.task_call_id === policy.task_call_id && task.agent === "codex_executor" && task.parent_session_id === packet.parent_session_id && task.packet_id === packet.packet_id && task.attempt === policy.attempt && task.lease_id === policy.task_lease_id && task.child_session_id === sessionID && ["CLAIMED", "ADMITTED", "BOUND", "RUNNING", "PENDING_REVIEW", "PENDING_VERIFICATION"].includes(task.state) && policy.task_fingerprint === task.task_fingerprint && policy.objective_sha256 === hash);
   } catch { return false; }
 };
 

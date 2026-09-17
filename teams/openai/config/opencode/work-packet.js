@@ -166,6 +166,16 @@ export const updateWorkPacketByID = async (packetID, fields = {}) => {
     return next;
   }, true);
 };
+export const readWorkPacketByID = async (packetID) => {
+  const id = String(packetID || "").toLowerCase();
+  if (!/^[a-f0-9]{64}$/.test(id)) return null;
+  return withLock(id, async () => {
+    try {
+      const packet = JSON.parse(await readFile(packetPathFor(id), "utf8"));
+      return String(packet.packet_id || "").toLowerCase() === id ? clean(packet) : null;
+    } catch { return null; }
+  }, true);
+};
 // Compare and update while holding the packet's canonical lock.  Expected
 // values may be arrays when a caller deliberately accepts a small set of
 // non-terminal states.  A mismatch is observable and never writes the packet.

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bootstrapCodexPolicy, CODEX_BOOTSTRAP_REASONS } from "../teams/openai/config/opencode/openai-authorship-guard.js";
 import { claimTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
+import { appendTaskPacketMarker } from "../teams/openai/config/opencode/correlation-marker.js";
 
 const child = "child-session";
 const parent = "parent-session";
@@ -38,6 +39,38 @@ test("Codex bootstrap reports a valid success without changing policy admission"
   } finally {
     if (previous === undefined) delete process.env.OPENAI_TEAM_STATE_ROOT;
     else process.env.OPENAI_TEAM_STATE_ROOT = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("marker bootstrap selects B directly among same-parent packets without scanning and accepts decorated child text", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openai-marker-direct-"));
+  const previous = process.env.OPENAI_TEAM_STATE_ROOT;
+  process.env.OPENAI_TEAM_STATE_ROOT = root;
+  try {
+    const objectiveA = "Implement task A";
+    const objectiveB = "Implement task B";
+    const make = async (objective, label) => {
+      const claimed = await claimTask({ task_fingerprint: `${label}-fingerprint`, objective_sha256: createHash("sha256").update(objective).digest("hex"), parent_session_id: parent, agent: "codex_executor" });
+      const task = await transitionTask(claimed.record.task_fingerprint, { expectedVersion: claimed.record.version, expectedStates: ["CLAIMED"], leaseId: claimed.record.lease_id, expectedAttempt: claimed.record.attempt, patch: { state: "ADMITTED" } });
+      return { agent: "codex_executor", parent_session_id: parent, objective_sha256: createHash("sha256").update(objective).digest("hex"), phase: "admitted", outcome: "pending", child_session_id: null, task_fingerprint: task.task_fingerprint, task_lease_id: task.lease_id, attempt: task.attempt, packet_id: task.packet_id, task_call_id: `${label}-call` };
+    };
+    const packetA = await make(objectiveA, "a");
+    const packetB = await make(objectiveB, "b");
+    const promptB = `${appendTaskPacketMarker(objectiveB, packetB.packet_id)}\nOMO decoration`;
+    let scans = 0;
+    const result = await bootstrapCodexPolicy({
+      client: { session: { get: async ({ path: { id } }) => id === child ? sessions.session : sessions.parent, messages: async () => ({ data: [{ info: { role: "user" }, parts: [{ type: "text", text: promptB }] }] }) } },
+      listWorkPackets: async () => { scans += 1; throw new Error("marker path scanned"); },
+      readWorkPacketByID: async (packetID) => packetID === packetB.packet_id ? packetB : packetID === packetA.packet_id ? packetA : null,
+      readTask: async (fingerprint) => fingerprint === packetB.task_fingerprint ? (await import("../teams/openai/config/opencode/task-state.js")).readTask(fingerprint) : null,
+      updateWorkPacketByID: async () => ({ ...packetB, child_session_id: child }),
+    }, child, "codex_executor");
+    assert.equal(scans, 0);
+    assert.equal(result.reason, null);
+    assert.notEqual(createHash("sha256").update(promptB).digest("hex"), packetB.objective_sha256);
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_TEAM_STATE_ROOT; else process.env.OPENAI_TEAM_STATE_ROOT = previous;
     await rm(root, { recursive: true, force: true });
   }
 });
