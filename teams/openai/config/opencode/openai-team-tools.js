@@ -464,15 +464,15 @@ export const handleMandatoryTesterContinuation = async (event, { client, rootFor
   return { handled: Boolean(result === true || result?.matched || result?.packet?.tester_dispatch_state === "observed"), text, packetID };
 };
 
-export const exactObservedTesterObjective = (parentObjective, testerObjective, gate) => {
-  if (!gate || gate.tester_dispatch_state !== "observed" || !hasExpectedVerificationHash(gate)) return "";
+export const exactMandatoryTesterObjective = (parentObjective, testerObjective, gate) => {
+  if (!gate || !hasExpectedVerificationHash(gate)) return "";
   const parent = String(parentObjective || "");
   const scope = delegationScope(testerObjective);
   return parent.trim() && scope ? `Parent objective (verbatim):\n${parent}\nDelegated scope:\n${scope}` : "";
 };
 
-export const decideDelegatedTaskAgent = (requestedAgent, routeClassification, exactObservedTesterGate) =>
-  exactObservedTesterGate ? "tester" : routeClassification === "MUTATING" && requestedAgent === "tester" ? "codex_executor" : null;
+export const decideDelegatedTaskAgent = (requestedAgent, routeClassification, exactMandatoryTesterGate) =>
+  exactMandatoryTesterGate ? "tester" : routeClassification === "MUTATING" && requestedAgent === "tester" ? "codex_executor" : null;
 
 export const createMandatoryTesterRootDriver = ({ pluginInput = {}, updateWorkPacketByID: updatePacket = updateWorkPacketByID, reconcileGateTarget }) => async (rootID, options = {}) => {
   const result = await driveMandatoryTesterContinuation(rootID, {
@@ -1837,15 +1837,17 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const fallbackParentObjective = guard?.authoritativeObjective ? "" : (await resolveInitialObjective(masterParent(input.sessionID)))?.objective || "";
       const authoritativeParentObjective = selectAuthoritativeObjective(guard?.authoritativeObjective, fallbackParentObjective);
       const injectedTesterTaskID = requestedAgent === "tester" ? currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i)?.[1]?.toLowerCase() : null;
-      const exactObservedTesterGate = process.env.OPENAI_DAILY_PROFILE === "1" && rootParentForGate === masterParent(rootParentForGate) && requestedAgent === "tester" &&
-        durableGate?.packet_id === injectedTesterTaskID && durableGate?.test_task_id === injectedTesterTaskID && durableGate?.tester_dispatch_state === "observed" &&
-        durableGate?.tester_required === true && durableGate?.codex_outcome === "success" && hasExpectedVerificationHash(durableGate);
+      const exactMandatoryTesterGate = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator" && rootParentForGate === masterParent(rootParentForGate) && requestedAgent === "tester" &&
+        durableGate?.packet_id === injectedTesterTaskID && durableGate?.test_task_id === durableGate?.packet_id &&
+        durableGate?.tester_required === true && ["pending", "required"].includes(durableGate?.tester_status) &&
+        durableGate?.codex_outcome === "success" && durableGate?.outcome === "pending" &&
+        String(durableGate?.phase || "").toLowerCase() === "pending_verification" && hasExpectedVerificationHash(durableGate);
       const analysis = analyzeObjective(currentTaskObjective);
       if (!authoritativeParentObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
-     const route = exactObservedTesterGate ? null : routeDelegatedAgent(authoritativeParentObjective, currentTaskObjective, requestedAgent);
+     const route = exactMandatoryTesterGate ? null : routeDelegatedAgent(authoritativeParentObjective, currentTaskObjective, requestedAgent);
     const remoteReadOnly = route?.classification === "REMOTE_READ_ONLY" ||
       (/\bopenai_remote_read\b/i.test(currentTaskObjective) && route?.classification !== "REMOTE_MUTATION");
-    const delegatedAgent = decideDelegatedTaskAgent(requestedAgent, route?.classification, exactObservedTesterGate);
+    const delegatedAgent = decideDelegatedTaskAgent(requestedAgent, route?.classification, exactMandatoryTesterGate);
      if (delegatedAgent === "tester") {
        output.args.subagent_type = delegatedAgent;
      } else if (route.classification === "MUTATING") {
@@ -1887,8 +1889,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         gateTarget = await gateTargetSnapshot(reviewTarget);
         if (!gateTarget) throw new Error("REVIEW_TARGET_DENIED");
       }
-       const delegatedObjective = exactObservedTesterGate
-         ? exactObservedTesterObjective(authoritativeParentObjective, objectiveBeforeMarker(currentTaskObjective), durableGate)
+       const delegatedObjective = exactMandatoryTesterGate
+          ? exactMandatoryTesterObjective(authoritativeParentObjective, objectiveBeforeMarker(currentTaskObjective), durableGate)
          : canonicalDelegatedObjective(authoritativeParentObjective, currentTaskObjective, { targetBound: Boolean(reviewTarget) });
       if (!delegatedObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
       output.args.prompt = delegatedObjective;

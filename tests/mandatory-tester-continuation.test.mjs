@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactObservedTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { gateTerminalPacketPatch } from "../teams/openai/config/opencode/gate-state.js";
 import { claimTask, completeTask, readTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
 import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
@@ -37,7 +37,7 @@ const productionDriverFor = (packets, prompts, failures = []) => createMandatory
 const continuationEvent = (id = packetID, sessionID = root) => ({ type: "message.updated", properties: { sessionID, info: { id: "message-1", sessionID, role: "user" } } });
 const continuationText = (id = packetID) => `<!-- OMO_INTERNAL_INITIATOR --> MANDATORY_TESTER_GATE test_task_id=${id}\nCall the native task exactly once.`;
 
-test("exact observed tester gate wins over a mutating delegated route", () => {
+test("exact mandatory tester gate wins over a mutating delegated route", () => {
   assert.equal(decideDelegatedTaskAgent("tester", "MUTATING", true), "tester");
   assert.equal(decideDelegatedTaskAgent("tester", "MUTATING", false), "codex_executor");
 });
@@ -113,14 +113,14 @@ test("spoofed and wrong-packet continuations fail closed", async () => {
   assert.equal(observed, 0);
 });
 
-test("observed tester objective preserves authority without fuzzy scope matching", () => {
+test("mandatory tester objective preserves authority without fuzzy scope matching", () => {
   const parent = "Fix calculator fixture";
   const validHash = "a".repeat(64);
-  const objective = exactObservedTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "observed", expected_verification_hashes: [validHash] });
+  const objective = exactMandatoryTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "observed", expected_verification_hashes: [validHash] });
   assert.equal(objective, "Parent objective (verbatim):\nFix calculator fixture\nDelegated scope:\nverify calculator fixture");
-  assert.equal(exactObservedTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "requested", expected_verification_hashes: [validHash] }), "");
-  assert.equal(exactObservedTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "observed", expected_verification_hashes: [] }), "");
-  assert.equal(exactObservedTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "observed", expected_verification_hashes: ["not-a-hash"] }), "");
+  assert.match(exactMandatoryTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "requested", expected_verification_hashes: [validHash] }), /^Parent objective/);
+  assert.equal(exactMandatoryTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "observed", expected_verification_hashes: [] }), "");
+  assert.equal(exactMandatoryTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "observed", expected_verification_hashes: ["not-a-hash"] }), "");
 });
 
 test("deterministic mandatory tester lifecycle reaches completed PASS", async () => {
@@ -134,7 +134,7 @@ test("deterministic mandatory tester lifecycle reaches completed PASS", async ()
     observe: async () => { packet.tester_dispatch_state = "observed"; return { matched: true }; },
   });
   assert.equal(observed.handled, true);
-  const testerObjective = exactObservedTesterObjective(original.authoritativeObjective, "Verify calculator fixture", packet);
+  const testerObjective = exactMandatoryTesterObjective(original.authoritativeObjective, "Verify calculator fixture", packet);
   assert.match(testerObjective, /^Parent objective \(verbatim\):\nImplement unrelated repository change\nDelegated scope:\nverify calculator fixture$/);
   const evidence = testerEvidenceFromMessages([{ info: { role: "assistant", agent: "tester", sessionID: "tester-child", time: { created: 1 } }, parts: [{ type: "tool", tool: "bash", state: { status: "completed", input: { command }, metadata: { exit_code: 0 } } }] }], packet);
   assert.equal(evidence.summary.status, "passed");
