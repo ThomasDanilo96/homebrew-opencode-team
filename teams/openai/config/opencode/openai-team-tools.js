@@ -336,6 +336,43 @@ export const findPendingMandatoryTesterGate = async (rootSessionID, deps = {}) =
   return packet;
 };
 
+const mandatoryTesterDispatchFailures = new Set();
+export const driveMandatoryTesterContinuation = async (rootSessionID, deps = {}) => {
+  const gate = await findPendingMandatoryTesterGate(rootSessionID, deps);
+  if (!gate) return { status: "noop" };
+  const packets = await (deps.listWorkPackets || listWorkPackets)();
+  const terminal = new Set(["completed", "success", "failed", "error", "cancelled"]);
+  const testerExists = (Array.isArray(packets) ? packets : []).some((packet) =>
+    packet?.parent_session_id === rootSessionID && packet.agent === "tester" && packet.test_task_id === gate.packet_id &&
+    !terminal.has(String(packet.outcome || "").toLowerCase())
+  );
+  if (testerExists) return { status: "existing", packet_id: gate.packet_id };
+  const fail = async () => {
+    const key = `${rootSessionID}:${gate.packet_id}`;
+    if (mandatoryTesterDispatchFailures.has(key)) return;
+    mandatoryTesterDispatchFailures.add(key);
+    if (typeof deps.fail === "function") await deps.fail(gate);
+  };
+  if (gate.tester_dispatch_state === "requested") {
+    await fail();
+    return { status: "failed", packet_id: gate.packet_id };
+  }
+  const cas = await (deps.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent)(gate.packet_id, {
+    tester_status: ["pending", "required"], phase: "pending_verification", outcome: "pending", codex_outcome: "success",
+    tester_dispatch_state: [undefined, "pending"],
+  }, { tester_dispatch_state: "requested" });
+  if (!cas?.matched) return { status: "noop", packet_id: gate.packet_id };
+  const text = `<!-- OMO_INTERNAL_INITIATOR --> MANDATORY_TESTER_GATE test_task_id=${gate.packet_id}\nCall the native task exactly once with subagent_type tester. Do not use Bash. Do not report final success.`;
+  try {
+    if (typeof deps.enqueue !== "function") throw new Error("MANDATORY_TESTER_ENQUEUE_UNAVAILABLE");
+    await deps.enqueue(rootSessionID, text);
+    return { status: "requested", packet_id: gate.packet_id };
+  } catch {
+    await fail();
+    return { status: "failed", packet_id: gate.packet_id };
+  }
+};
+
 export const enforcePendingMandatoryTesterGate = (packet, { tool, agent, prompt = "", active = false } = {}) => {
   if (!packet) return { allowed: true, prompt };
   if (tool !== "task" || agent !== "tester") return { allowed: false, reason: "MANDATORY_TESTER_GATE" };
@@ -1999,7 +2036,25 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       }
         // Policy survives non-terminal lifecycle events: it is the durable
         // authority binding for recovery, quality gates, and duplicate calls.
-        if (!pending) { packetCallBySession.delete(sessionID); bufferedOpenCodeTokens.delete(sessionID); }
+      if (!pending) { packetCallBySession.delete(sessionID); bufferedOpenCodeTokens.delete(sessionID); }
+      if (event.type === "session.idle" && sessionID && masterParent(sessionID) === sessionID) {
+        await driveMandatoryTesterContinuation(sessionID, {
+          listWorkPackets: pluginInput.listWorkPackets || listWorkPackets,
+          readTask: pluginInput.readTask || readTask,
+          updateWorkPacketByIDIfCurrent: pluginInput.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent,
+          enqueue: async (rootID, text) => {
+            const session = pluginInput.client?.session;
+            const body = { parts: [{ type: "text", text }], agent: "openai_orchestrator" };
+            const prompt = session?.prompt_async || session?.promptAsync;
+            if (typeof prompt !== "function") throw new Error("MANDATORY_TESTER_ENQUEUE_UNAVAILABLE");
+            return prompt.call(session, { path: { id: rootID }, body });
+          },
+          fail: async (gate) => {
+            await updateWorkPacketByID(gate.packet_id, { phase: "foreground_completion", outcome: "failed", tester_status: "failed", verification_status: "failed", error_code: "MANDATORY_TESTER_NOT_DISPATCHED" });
+            await reconcileGateTarget({ ...gate, phase: "foreground_completion", outcome: "failed", tester_status: "failed", verification_status: "failed", error_code: "MANDATORY_TESTER_NOT_DISPATCHED" });
+          },
+        });
+      }
     }
       if (event.type === "message.updated") {
         const info = event.properties?.info;
