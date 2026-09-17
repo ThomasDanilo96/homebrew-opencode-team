@@ -621,6 +621,29 @@ export const isMandatoryTesterPacketForSession = (packet, sessionID) => {
     /^[a-f0-9]{64}$/i.test(String(packet?.test_task_id || "")) &&
     ["pending", "required"].includes(packet?.tester_status) && authorization.commands.length > 0;
 };
+const sameAuthorization = (left, right) => left.commands.length === right.commands.length &&
+  left.hashes.length === right.hashes.length &&
+  left.commands.every((command, index) => command === right.commands[index] && left.hashes[index] === right.hashes[index]);
+export const resolveMandatoryTesterPacketForSession = (sessionID, packets = [], reservation = null, canonicalRootID = sessionID) => {
+  if (typeof sessionID !== "string" || !sessionID || !Array.isArray(packets)) return null;
+  const authoritativeReservation = reservation?.role === "tester" && reservation.child_session_id === sessionID &&
+    /^[a-f0-9]{64}$/i.test(String(reservation.test_task_id || "")) && reservation.master_parent_session_id === canonicalRootID;
+  if (authoritativeReservation) {
+    const packet = (reservation.packet_id || reservation.task_call_id) && packets.find((candidate) =>
+      (!reservation.packet_id || candidate?.packet_id === reservation.packet_id) &&
+      (!reservation.task_call_id || candidate?.task_call_id === reservation.task_call_id));
+    if (!packet || packet.agent !== "tester" || packet.parent_session_id !== canonicalRootID ||
+      packet.test_task_id !== reservation.test_task_id ||
+      (packet.child_session_id != null && packet.child_session_id !== sessionID) ||
+      !["pending", "required"].includes(packet.tester_status)) return null;
+    const packetAuthorization = validatedVerificationAuthorization(packet);
+    const reservationAuthorization = validatedVerificationAuthorization({ ...reservation, ...(reservation.gate_target || {}) });
+    if (!sameAuthorization(packetAuthorization, reservationAuthorization) || packetAuthorization.commands.length === 0) return null;
+    return packet.child_session_id ? packet : { ...packet, child_session_id: sessionID };
+  }
+  const matches = packets.filter((packet) => packet?.parent_session_id === canonicalRootID && isMandatoryTesterPacketForSession(packet, sessionID));
+  return matches.length === 1 ? matches[0] : null;
+};
 export const mandatoryTesterToolDecision = (packet, toolName, command) => {
   if (!packet) return { allowed: true };
   if (String(toolName || "").toLowerCase() !== "bash") return {
@@ -1823,11 +1846,14 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
      guard = beginRequestCycle(guard, String(output.args?.prompt || output.args?.description || ""), Date.now(), process.env, { preserveVerificationTerminal: true, preserveCodexFailureTerminal: true, preserveVerificationGate: true });
         guardrails.set(input.sessionID, guard);
      }
-       const sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
-       const rootParentForGate = masterParent(input.sessionID);
-       const mandatoryTesterPacket = sessionAgent === "tester" && typeof input.sessionID === "string"
-         ? (await (pluginInput.listWorkPackets || listWorkPackets)()).find((packet) => isMandatoryTesterPacketForSession(packet, input.sessionID))
-         : null;
+        const sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
+        const rootParentForGate = masterParent(input.sessionID);
+        const testerPackets = sessionAgent === "tester" && typeof input.sessionID === "string"
+          ? await (pluginInput.listWorkPackets || listWorkPackets)()
+          : [];
+        const mandatoryTesterPacket = sessionAgent === "tester"
+          ? resolveMandatoryTesterPacketForSession(input.sessionID, testerPackets, reservations.get(input.sessionID), rootParentForGate)
+          : null;
        const mandatoryTesterDecision = mandatoryTesterToolDecision(mandatoryTesterPacket, toolName, output.args?.command ?? output.args?.cmd);
        if (!mandatoryTesterDecision.allowed) {
          if (mandatoryTesterDecision.reason === "MANDATORY_TESTER_COMMAND_ONLY") throw mandatoryTesterCommandOnlyError();
@@ -1855,18 +1881,11 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const gateDecision = verificationGateDecision(gateStateForDecision, toolName, toolName === "task" ? String(output.args?.subagent_type || output.args?.agent || "") : sessionAgent, output.args?.prompt || output.args?.description || "", [...reservations.values()].some((entry) => entry.master_parent_session_id === rootParentForGate && entry.role === "tester" && entry.test_task_id === gateStateForDecision?.pendingVerificationPacketID && entry.token));
      if (!gateDecision.allowed) throw new GuardrailPolicyError(gateDecision.reason);
     if (guard && toolName !== "openai_run_codex") guardrails.set(input.sessionID, admitToolCall(guard, toolName));
-     if (toolName === "bash" && sessionAgent === "tester") {
-       const command = output.args?.command ?? output.args?.cmd;
-       if (mandatoryTesterPacket && isAuthorizedTesterVerificationCommand(mandatoryTesterPacket, command)) return;
-       if (!mandatoryTesterPacket) {
-         const target = typeof input.sessionID === "string"
-           ? (await listWorkPackets()).find((packet) => packet.child_session_id === input.sessionID
-             && packet.agent === "tester" && ["pending", "required"].includes(packet.tester_status))
-           : null;
-         if (target != null && isAuthorizedTesterVerificationCommand(target, command)) return;
-       }
-       throw new Error("Tester Bash is restricted to allowlisted verification commands.");
-     }
+      if (toolName === "bash" && sessionAgent === "tester") {
+        const command = output.args?.command ?? output.args?.cmd;
+        if (mandatoryTesterPacket && isAuthorizedTesterVerificationCommand(mandatoryTesterPacket, command)) return;
+        throw new Error("Tester Bash is restricted to allowlisted verification commands.");
+      }
     if (toolName !== "task" && toolName !== "openai_run_codex" && input.sessionID) {
       const callID = await taskCallForSession(input.sessionID);
      if (callID) await incrementWorkPacketByID(callID, { tool_call_count: 1 });

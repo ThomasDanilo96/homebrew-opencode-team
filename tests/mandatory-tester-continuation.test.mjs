@@ -1,10 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext, isMandatoryTesterPacketForSession, mandatoryTesterToolDecision, mandatoryTesterCommandOnlyError } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext, isMandatoryTesterPacketForSession, resolveMandatoryTesterPacketForSession, mandatoryTesterToolDecision, mandatoryTesterCommandOnlyError } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { gateTerminalPacketPatch } from "../teams/openai/config/opencode/gate-state.js";
 import { claimTask, completeTask, readTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
 import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
+import { createWorkPacket, updateWorkPacket, listWorkPackets } from "../teams/openai/config/opencode/work-packet.js";
 
 const root = "root-session";
 const packetID = "a".repeat(64);
@@ -39,6 +43,120 @@ const continuationText = (id = packetID) => `<!-- OMO_INTERNAL_INITIATOR --> MAN
 
 const calculatorCommand = "node calculator.test.js";
 const calculatorHash = createHash("sha256").update(calculatorCommand).digest("hex");
+
+const continuationCommand = "node calculator.test.js";
+const continuationCommandHash = "da3a7e1aa666b6b1eb9706d890561a2df813d5eb4fda16377090149a80d1aa77";
+const persistedTesterFields = (command = continuationCommand) => ({
+  agent: "tester",
+  parent_session_id: root,
+  test_task_id: packetID,
+  tester_status: "pending",
+  verification_commands: JSON.stringify([command]),
+  expected_verification_hashes: JSON.stringify([continuationCommandHash]),
+});
+
+test("A: serialized tester authorization has the exact known hash and admits Bash", () => {
+  assert.equal(createHash("sha256").update(continuationCommand).digest("hex"), continuationCommandHash);
+  const packet = persistedTesterFields();
+  assert.equal(packet.verification_commands, '["node calculator.test.js"]');
+  assert.equal(packet.expected_verification_hashes, '["da3a7e1aa666b6b1eb9706d890561a2df813d5eb4fda16377090149a80d1aa77"]');
+  assert.deepEqual(validatedVerificationAuthorization(packet), { commands: [continuationCommand], hashes: [continuationCommandHash] });
+  assert.equal(isAuthorizedTesterVerificationCommand(packet, continuationCommand), true);
+});
+
+test("B: production work-packet persistence roundtrips clean serialized tester arrays", async () => {
+  const previousRoot = process.env.OPENAI_TEAM_STATE_ROOT;
+  const stateRoot = await mkdtemp(join(tmpdir(), "mandatory-tester-continuation-"));
+  const callID = `tester-persistence-${Date.now()}-${Math.random()}`;
+  try {
+    process.env.OPENAI_TEAM_STATE_ROOT = stateRoot;
+    const admitted = await createWorkPacket(callID, persistedTesterFields());
+    assert.equal(admitted.verification_commands, '["node calculator.test.js"]');
+    assert.equal(admitted.expected_verification_hashes, '["da3a7e1aa666b6b1eb9706d890561a2df813d5eb4fda16377090149a80d1aa77"]');
+    await updateWorkPacket(callID, { child_session_id: "tester-child" });
+    const packets = await listWorkPackets();
+    const packet = packets.find((candidate) => candidate.packet_id === admitted.packet_id);
+    assert.ok(packet);
+    assert.equal(packet.child_session_id, "tester-child");
+    assert.equal(packet.verification_commands, '["node calculator.test.js"]');
+    assert.equal(packet.expected_verification_hashes, '["da3a7e1aa666b6b1eb9706d890561a2df813d5eb4fda16377090149a80d1aa77"]');
+    assert.equal(isAuthorizedTesterVerificationCommand(packet, continuationCommand), true);
+  } finally {
+    if (previousRoot === undefined) delete process.env.OPENAI_TEAM_STATE_ROOT;
+    else process.env.OPENAI_TEAM_STATE_ROOT = previousRoot;
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("C: persisted tester packet is found for the child and exact Bash decision allows it", () => {
+  const packet = { ...persistedTesterFields(), child_session_id: "tester-child" };
+  const packets = [packet];
+  assert.equal(packets.find((candidate) => isMandatoryTesterPacketForSession(candidate, "tester-child")), packet);
+  assert.deepEqual(mandatoryTesterToolDecision(packet, "bash", continuationCommand), { allowed: true });
+});
+
+test("D: the same returned packet ledger denies first Bash and allows the authorized command without reset", async () => {
+  const previousRoot = process.env.OPENAI_TEAM_STATE_ROOT;
+  const stateRoot = await mkdtemp(join(tmpdir(), "mandatory-tester-continuation-"));
+  const callID = `tester-ledger-${Date.now()}-${Math.random()}`;
+  try {
+    process.env.OPENAI_TEAM_STATE_ROOT = stateRoot;
+    const admitted = await createWorkPacket(callID, persistedTesterFields());
+    await updateWorkPacket(callID, { child_session_id: "tester-child" });
+    const ledger = await listWorkPackets();
+    const packet = ledger.find((candidate) => candidate.packet_id === admitted.packet_id);
+    assert.ok(packet);
+    const before = JSON.stringify(packet);
+    assert.deepEqual(mandatoryTesterToolDecision(ledger.find((candidate) => isMandatoryTesterPacketForSession(candidate, "tester-child")), "bash", "apply_patch ..."), { allowed: false, reason: "Tester Bash is restricted to allowlisted verification commands." });
+    assert.deepEqual(mandatoryTesterToolDecision(ledger.find((candidate) => isMandatoryTesterPacketForSession(candidate, "tester-child")), "bash", continuationCommand), { allowed: true });
+    assert.equal(JSON.stringify(packet), before);
+    assert.equal(packet.tester_status, "pending");
+  } finally {
+    if (previousRoot === undefined) delete process.env.OPENAI_TEAM_STATE_ROOT;
+    else process.env.OPENAI_TEAM_STATE_ROOT = previousRoot;
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
+test("E: raw serialized command normalizes to the exact authorized hash", () => {
+  const raw = "  node   calculator.test.js  ";
+  const packet = { verification_commands: JSON.stringify([raw]), expected_verification_hashes: JSON.stringify([continuationCommandHash]) };
+  const normalized = raw.trim().replace(/\s+/g, " ");
+  assert.equal(JSON.stringify(packet.verification_commands), JSON.stringify('["  node   calculator.test.js  "]'));
+  assert.equal(normalized, continuationCommand);
+  assert.equal(createHash("sha256").update(normalized).digest("hex"), continuationCommandHash);
+  assert.equal(isAuthorizedTesterVerificationCommand(packet, raw), true);
+});
+
+test("mandatory resolver binds an unbound durable packet to the authoritative tester reservation", () => {
+  const packet = { packet_id: packetID, task_call_id: packetID, parent_session_id: root, agent: "tester", test_task_id: packetID, tester_status: "pending", verification_commands: '["node calculator.test.js"]', expected_verification_hashes: '["da3a7e1aa666b6b1eb9706d890561a2df813d5eb4fda16377090149a80d1aa77"]' };
+  const reservation = { role: "tester", child_session_id: "tester-child", packet_id: packetID, task_call_id: packetID, test_task_id: packetID, master_parent_session_id: root, gate_target: { verification_commands: [calculatorCommand], expected_verification_hashes: [calculatorHash] } };
+  const resolved = resolveMandatoryTesterPacketForSession("tester-child", [packet], reservation, root);
+  assert.equal(resolved.packet_id, packetID);
+  assert.equal(resolved.child_session_id, "tester-child");
+  assert.equal(packet.child_session_id, undefined);
+  assert.deepEqual(mandatoryTesterToolDecision(resolved, "bash", calculatorCommand), { allowed: true });
+});
+
+test("mandatory resolver fails closed for contradictory identity, authorization, root, and ambiguity", () => {
+  const base = { packet_id: packetID, task_call_id: packetID, parent_session_id: root, agent: "tester", test_task_id: packetID, tester_status: "pending", child_session_id: "tester-child", verification_commands: JSON.stringify([calculatorCommand]), expected_verification_hashes: JSON.stringify([calculatorHash]) };
+  const reservation = { role: "tester", child_session_id: "tester-child", packet_id: packetID, task_call_id: packetID, test_task_id: packetID, master_parent_session_id: root, gate_target: { verification_commands: [calculatorCommand], expected_verification_hashes: [calculatorHash] } };
+  for (const packet of [
+    { ...base, child_session_id: "other-child" },
+    { ...base, parent_session_id: "wrong-root" },
+    { ...base, test_task_id: "b".repeat(64) },
+    { ...base, expected_verification_hashes: JSON.stringify(["0".repeat(64)]) },
+  ]) assert.equal(resolveMandatoryTesterPacketForSession("tester-child", [packet], reservation, root), null);
+  assert.equal(resolveMandatoryTesterPacketForSession("tester-child", [base, { ...base }], null, root), null);
+  assert.equal(resolveMandatoryTesterPacketForSession("tester-child", [base], { ...reservation, master_parent_session_id: "wrong-root" }, root), base);
+});
+
+test("mandatory resolver uses the uniquely bound durable packet after child binding", () => {
+  const packet = { packet_id: packetID, parent_session_id: root, agent: "tester", test_task_id: packetID, tester_status: "required", child_session_id: "tester-child", verification_commands: JSON.stringify([calculatorCommand]), expected_verification_hashes: JSON.stringify([calculatorHash]) };
+  const resolved = resolveMandatoryTesterPacketForSession("tester-child", [packet], null, root);
+  assert.equal(resolved, packet);
+  assert.deepEqual(mandatoryTesterToolDecision(resolved, "bash", calculatorCommand), { allowed: true });
+});
 
 test("tester authorization validates and carries the original command/hash pair", () => {
   const gatePacket = { verification_commands: [calculatorCommand], expected_verification_hashes: [calculatorHash] };
