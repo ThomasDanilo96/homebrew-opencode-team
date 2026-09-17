@@ -67,6 +67,65 @@ const arrayValue = (value) => {
   try { const parsed = JSON.parse(value); return Array.isArray(parsed) ? parsed : []; } catch { return []; }
 };
 
+const validTaskID = (value) => typeof value === "string" && /^[a-f0-9]{64}$/i.test(value);
+const normalizeVerificationCommand = (value) => {
+  if (typeof value !== "string" || /\r|\n/.test(value)) return null;
+  const normalized = value.trim().replace(/\s+/g, " ");
+  return normalized && isAllowlistedVerificationCommand(normalized) ? normalized : null;
+};
+const verificationPairs = (packet) => {
+  const commands = arrayValue(packet?.verification_commands);
+  const hashes = arrayValue(packet?.expected_verification_hashes);
+  if (!commands.length || commands.length !== hashes.length) return [];
+  return commands.map((command, index) => {
+    const normalized = normalizeVerificationCommand(command);
+    const expectedHash = typeof hashes[index] === "string" && /^[a-f0-9]{64}$/i.test(hashes[index]) ? hashes[index].toLowerCase() : null;
+    if (!normalized || !expectedHash || createHash("sha256").update(normalized).digest("hex") !== expectedHash) return null;
+    return { command: normalized, hash: expectedHash };
+  }).filter(Boolean);
+};
+
+const pendingTesterPacket = (packet, rootID, sessionID) => Boolean(packet?.agent === "tester"
+  && packet.parent_session_id === rootID
+  && ["pending", "required"].includes(String(packet.tester_status || "").toLowerCase())
+  && validTaskID(packet.test_task_id)
+  && (packet.child_session_id == null || packet.child_session_id === sessionID));
+
+export const resolveExactTesterAuthorization = ({ packets = [], sessionID, rootID, command } = {}) => {
+  if (!sessionID || !rootID) return null;
+  const candidates = packets.filter((packet) => pendingTesterPacket(packet, rootID, sessionID));
+  const durable = candidates.filter((packet) => packet.child_session_id === sessionID);
+  const selected = durable.length ? durable : candidates;
+  if (selected.length !== 1) return null;
+  const tester = selected[0];
+  const target = packets.find((packet) => String(packet.packet_id || "").toLowerCase() === String(tester.test_task_id).toLowerCase());
+  if (!target || target.parent_session_id !== rootID || String(target.phase || "").toLowerCase() !== "pending_verification"
+    || String(target.outcome || "").toLowerCase() !== "pending" || String(target.codex_outcome || "").toUpperCase() !== CODEX_SUCCESS
+    || target.tester_required !== true || String(target.tester_status || "").toLowerCase() !== "pending") return null;
+  const testerPairs = verificationPairs(tester);
+  const targetPairs = verificationPairs(target);
+  if (!testerPairs.length || testerPairs.length !== targetPairs.length
+    || testerPairs.some((pair, index) => pair.command !== targetPairs[index].command || pair.hash !== targetPairs[index].hash)) return null;
+  const normalized = normalizeVerificationCommand(command);
+  if (!normalized) return null;
+  const hash = createHash("sha256").update(normalized).digest("hex");
+  return testerPairs.some((pair) => pair.command === normalized && pair.hash === hash)
+    ? { tester, target, rootID, command: normalized, commandHash: hash } : null;
+};
+
+const sessionRoot = async (pluginInput, sessionID) => {
+  let id = sessionID;
+  const seen = new Set();
+  for (let depth = 0; id && depth < 32 && !seen.has(id); depth += 1) {
+    seen.add(id);
+    const session = (await pluginInput.client?.session?.get({ path: { id } }))?.data;
+    const parent = childParent(session);
+    if (!parent || parent === id) return id;
+    id = parent;
+  }
+  return null;
+};
+
 const isSerenaMutation = (toolName) => SERENA_MUTATION_PREFIXES.some((prefix) => toolName.startsWith(prefix));
 const isCustomMutation = (toolName) => /(?:mutat|write|edit|patch|delete|remove|rename|create|move|exec|bash|shell|command)/.test(toolName);
 const isDangerous = (toolName) => UNBOUNDED_EXECUTION.has(toolName) || NATIVE_MUTATIONS.has(toolName) || isSerenaMutation(toolName) || isCustomMutation(toolName);
@@ -246,22 +305,9 @@ export const OpenAIAuthorshipGuard = async (pluginInput = {}) => ({
     const agent = await resolveAgent(pluginInput, input);
     if (agent === "tester" && toolName === "bash") {
       const command = output.args?.command ?? output.args?.cmd ?? input.args?.command ?? input.args?.cmd ?? "";
-      const reservation = typeof input.sessionID === "string"
-        ? (await listWorkPackets()).find((packet) => packet.child_session_id === input.sessionID
-          && packet.agent === "tester" && ["pending", "required"].includes(packet.tester_status))
-        : null;
-      const targetID = typeof reservation?.test_task_id === "string" && /^[a-f0-9]{64}$/i.test(reservation.test_task_id) ? reservation.test_task_id.toLowerCase() : null;
-      const target = targetID ? (await listWorkPackets()).find((packet) => packet.packet_id === targetID) : null;
-      const expected = new Set([
-        ...arrayValue(target?.verification_commands),
-        ...arrayValue(target?.verification_evidence).map((entry) => entry?.command_hash),
-        ...arrayValue(target?.expected_verification_hashes),
-      ].filter((value) => typeof value === "string" && isAllowlistedVerificationCommand(value)
-        ? true : typeof value === "string" && /^[a-f0-9]{64}$/i.test(value))
-        .map((value) => /^[a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : createHash("sha256").update(value).digest("hex")));
-      const commandHash = typeof command === "string" ? createHash("sha256").update(command).digest("hex") : "";
-      if (reservation != null && targetID != null && target != null && typeof command === "string" && isAllowlistedVerificationCommand(command)
-        && expected.has(commandHash)) {
+      const packets = await (pluginInput.listWorkPackets || listWorkPackets)();
+      const rootID = typeof input.sessionID === "string" ? await sessionRoot(pluginInput, input.sessionID) : null;
+      if (resolveExactTesterAuthorization({ packets, sessionID: input.sessionID, rootID, command })) {
         await record("tester_verification_bash_allowed", input, agent, "NONE", `ALLOW:${verificationCommandCategory(command)}`);
         return;
       }
