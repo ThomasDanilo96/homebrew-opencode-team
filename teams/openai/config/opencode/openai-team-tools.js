@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tool } from "./plugin-api.js";
-import { bindExactChildReservation, childSessionIdFromAfter, foregroundChildSessionID, resolveTesterChildSessionID, reservationEligibleForSessionCreated, sessionCreatedCorrelationDecision } from "./reservation-correlation.js";
+import { bindExactChildReservation, childSessionIdFromAfter, foregroundChildSessionID, resolveTesterChildSessionID, reservationEligibleForSessionCreated, resolveCorrelatedTesterReservation, sessionCreatedCorrelationDecision } from "./reservation-correlation.js";
 import { handoffMatchesInvocation, handoffPathFromStdout, removeConsumedArtifacts, safeHandoffID, safeInvocationID } from "./openai-handoff.js";
 import { readRecovery, removeRecovery, removeRecoveryAndHome, removeRecoveryHome, recoveryHomeRoot, registerCodexHome, clearCodexHomePointer, RecoveryConflictError } from "./codex-recovery.js";
 import { openCodexCircuit, readCodexCircuitGeneration } from "./codex-circuit.js";
@@ -1883,8 +1883,13 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         const testerPackets = sessionAgent === "tester" && typeof input.sessionID === "string"
           ? await (pluginInput.listWorkPackets || listWorkPackets)()
           : [];
+        const correlatedPacketID = typeof input.sessionID === "string" ? packetCallBySession.get(input.sessionID) : null;
+        const correlatedReservation = sessionAgent === "tester"
+          ? resolveCorrelatedTesterReservation(input.sessionID, correlatedPacketID, [...reservations.values()], rootParentForGate)
+          : null;
+        const reservationForTester = correlatedPacketID ? correlatedReservation : reservations.get(input.sessionID);
         const mandatoryTesterPacket = sessionAgent === "tester"
-          ? resolveMandatoryTesterPacketForSession(input.sessionID, testerPackets, reservations.get(input.sessionID), rootParentForGate)
+          ? resolveMandatoryTesterPacketForSession(input.sessionID, testerPackets, reservationForTester, rootParentForGate)
           : null;
        const mandatoryTesterDecision = mandatoryTesterToolDecision(mandatoryTesterPacket, toolName, output.args?.command ?? output.args?.cmd);
        if (!mandatoryTesterDecision.allowed) {

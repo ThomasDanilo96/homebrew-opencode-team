@@ -29,6 +29,21 @@ export const sessionCreatedCorrelationDecision = ({ background, explicitCallID, 
 
 export const reservationEligibleForSessionCreated = (pending) => Boolean(pending && !pending.child_session_id && !pending.provisional_child_session_id);
 
+export const resolveCorrelatedTesterReservation = (childSessionID, packetCallID, reservationValues = [], canonicalRootID = childSessionID) => {
+  if (typeof childSessionID !== "string" || !childSessionID || typeof packetCallID !== "string" || !packetCallID || !Array.isArray(reservationValues)) return null;
+  const exact = (reservation, provisional) => reservation?.role === "tester" &&
+    (!provisional || !reservation.child_session_id) &&
+    (provisional ? reservation.provisional_child_session_id === childSessionID : reservation.child_session_id === childSessionID) &&
+    reservation.master_parent_session_id === canonicalRootID &&
+    /^[a-f0-9]{64}$/i.test(String(reservation.test_task_id || "")) &&
+    (reservation.packet_id === packetCallID || reservation.task_call_id === packetCallID);
+  const durable = reservationValues.filter((reservation) => exact(reservation, false));
+  if (durable.length === 1) return durable[0];
+  if (durable.length > 1) return null;
+  const provisional = reservationValues.filter((reservation) => exact(reservation, true));
+  return provisional.length === 1 ? { ...provisional[0], child_session_id: childSessionID, provisional_correlation_proof: { child_session_id: childSessionID, packet_call_id: packetCallID, canonical_root_id: canonicalRootID } } : null;
+};
+
 export const bindExactChildReservation = async (pending, childID, { readTask, advanceTask, updateWorkPacket, updateWorkPacketByID, packetPatch = {} } = {}) => {
   if (!pending || typeof childID !== "string" || !childID) throw new Error("BINDING_MISSING_CHILD");
   if (pending.child_session_id && pending.child_session_id !== childID) throw new Error("CHILD_SESSION_ID_CONFLICT");

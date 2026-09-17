@@ -9,6 +9,7 @@ import { gateTerminalPacketPatch } from "../teams/openai/config/opencode/gate-st
 import { claimTask, completeTask, readTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
 import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { createWorkPacket, updateWorkPacket, listWorkPackets } from "../teams/openai/config/opencode/work-packet.js";
+import { resolveCorrelatedTesterReservation } from "../teams/openai/config/opencode/reservation-correlation.js";
 
 const root = "root-session";
 const packetID = "a".repeat(64);
@@ -164,6 +165,25 @@ test("mandatory resolver uses the uniquely bound durable packet after child bind
   const resolved = resolveMandatoryTesterPacketForSession("tester-child", [packet], null, root);
   assert.equal(resolved, packet);
   assert.deepEqual(mandatoryTesterToolDecision(resolved, "bash", calculatorCommand), { allowed: true });
+});
+
+test("provisional foreground tester correlation authorizes the exact packet before after-hook binding", () => {
+  const child = "tester-child";
+  const pending = { role: "tester", provisional_child_session_id: child, packet_id: packetID, task_call_id: "task-call", test_task_id: packetID, master_parent_session_id: root, gate_target: { verification_commands: [calculatorCommand], expected_verification_hashes: [calculatorHash] } };
+  const reservation = resolveCorrelatedTesterReservation(child, packetID, [pending], root);
+  const packet = { packet_id: packetID, task_call_id: "task-call", parent_session_id: root, agent: "tester", test_task_id: packetID, tester_status: "pending", verification_commands: JSON.stringify([calculatorCommand]), expected_verification_hashes: JSON.stringify([calculatorHash]) };
+  const resolved = resolveMandatoryTesterPacketForSession(child, [packet], reservation, root);
+  assert.equal(resolved.child_session_id, child);
+  assert.deepEqual(mandatoryTesterToolDecision(resolved, "bash", calculatorCommand), { allowed: true });
+  assert.deepEqual(mandatoryTesterToolDecision(resolved, "bash", "apply_patch x"), { allowed: false, reason: "Tester Bash is restricted to allowlisted verification commands." });
+});
+
+test("provisional tester correlation rejects wrong identity, root, packet, and ambiguity", () => {
+  const pending = { role: "tester", provisional_child_session_id: "tester-child", packet_id: packetID, task_call_id: "task-call", test_task_id: packetID, master_parent_session_id: root };
+  assert.equal(resolveCorrelatedTesterReservation("tester-child", "wrong", [pending], root), null);
+  assert.equal(resolveCorrelatedTesterReservation("other-child", packetID, [pending], root), null);
+  assert.equal(resolveCorrelatedTesterReservation("tester-child", packetID, [{ ...pending, master_parent_session_id: "wrong-root" }], root), null);
+  assert.equal(resolveCorrelatedTesterReservation("tester-child", packetID, [pending, { ...pending }], root), null);
 });
 
 test("tester authorization validates and carries the original command/hash pair", () => {
