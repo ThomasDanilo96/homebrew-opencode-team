@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { driveMandatoryTesterContinuation } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
 
 const root = "root-session";
@@ -19,33 +19,64 @@ const depsFor = (packets, extra = {}) => ({
   ...extra,
 });
 
-test("mandatory continuation enqueues once in the canonical root", async () => {
+const productionDriverFor = (packets, prompts, failures = []) => createMandatoryTesterRootDriver({
+  pluginInput: {
+    listWorkPackets: async () => packets,
+    readTask: async () => task,
+    updateWorkPacketByIDIfCurrent: depsFor(packets).updateWorkPacketByIDIfCurrent,
+    client: { session: { promptAsync: async (request) => { prompts.push(request); } } },
+  },
+  updateWorkPacketByID: async (_id, fields) => Object.assign(packets[0], fields),
+  reconcileGateTarget: async () => undefined,
+  ...(failures ? { updateWorkPacketByID: async (_id, fields) => { failures.push(fields.error_code); Object.assign(packets[0], fields); } } : {}),
+});
+
+test("codex after-hook path immediately prompts the canonical root once with the exact task ID", async () => {
   const packets = [gate()];
-  const prompts = [];
-  const result = await driveMandatoryTesterContinuation(root, depsFor(packets, { enqueue: async (_id, text) => prompts.push(text) }));
+  const prompts = [], driver = productionDriverFor(packets, prompts);
+  const result = await driver(root, { failRequested: false });
   assert.equal(result.status, "requested");
   assert.equal(prompts.length, 1);
-  assert.match(prompts[0], /<!-- OMO_INTERNAL_INITIATOR -->/);
-  assert.match(prompts[0], new RegExp(`MANDATORY_TESTER_GATE.*test_task_id=${packetID}`));
-  assert.equal(isInternalContinuation(prompts[0]), true);
+  assert.deepEqual(prompts[0].path, { id: root });
+  assert.equal(prompts[0].body.agent, "openai_orchestrator");
+  const text = prompts[0].body.parts[0].text;
+  assert.match(text, new RegExp(`MANDATORY_TESTER_GATE.*test_task_id=${packetID}`));
+  assert.equal(isInternalContinuation(text), true);
+});
+
+test("duplicate after-hook calls are suppressed by the packet CAS", async () => {
+  const packets = [gate()], prompts = [], driver = productionDriverFor(packets, prompts);
+  await driver(root, { failRequested: false });
+  await driver(root, { failRequested: false });
+  assert.equal(prompts.length, 1);
 });
 
 test("existing tester admission suppresses continuation", async () => {
   const packets = [gate(), { parent_session_id: root, agent: "tester", test_task_id: packetID, outcome: "running" }];
-  let prompts = 0;
-  const result = await driveMandatoryTesterContinuation(root, depsFor(packets, { enqueue: async () => prompts++ }));
+  const prompts = [], driver = productionDriverFor(packets, prompts);
+  const result = await driver(root, { failRequested: false });
   assert.equal(result.status, "existing");
-  assert.equal(prompts, 0);
+  assert.equal(prompts.length, 0);
 });
 
-test("requested dispatch fails once without looping", async () => {
+test("same-turn idle waits, then observed idle fails requested dispatch once without prompting again", async () => {
   const packet = { ...gate(), tester_dispatch_state: "requested" };
   const packets = [packet];
-  let failures = 0;
-  const deps = depsFor(packets, { fail: async () => { failures++; } });
-  await driveMandatoryTesterContinuation(root, deps);
-  await driveMandatoryTesterContinuation(root, deps);
-  assert.equal(failures, 1);
+  const prompts = [], failures = [];
+  const driver = createMandatoryTesterRootDriver({
+    pluginInput: { ...depsFor(packets), client: { session: { promptAsync: async (request) => prompts.push(request) } } },
+    updateWorkPacketByID: async (_id, fields) => { failures.push(fields.error_code); Object.assign(packet, fields); },
+    reconcileGateTarget: async () => undefined,
+  });
+  const sameTurnIdle = await driver(root, { failRequested: false });
+  assert.equal(sameTurnIdle.status, "waiting");
+  assert.equal(prompts.length, 0);
+  assert.equal(failures.length, 0);
+  observeMandatoryTesterContinuation(root, packetID);
+  const observedIdle = await driver(root, { failRequested: true });
+  assert.equal(observedIdle.status, "failed");
+  assert.equal(failures.length, 1);
+  assert.equal(prompts.length, 0);
 });
 
 test("tester admission and PASS keep later idle a no-op", async () => {
@@ -60,4 +91,15 @@ test("tester admission and PASS keep later idle a no-op", async () => {
   assert.equal(result.status, "noop");
   assert.equal(prompts, 1);
   assert.equal(packets[1].tester_status, "passed");
+});
+
+test("existing terminal tester PASS settles the gate without another prompt", async () => {
+  const packet = gate();
+  const packets = [packet, { parent_session_id: root, agent: "tester", test_task_id: packetID, outcome: "completed", tester_status: "passed", verification_status: "completed" }];
+  const prompts = [], driver = productionDriverFor(packets, prompts);
+  Object.assign(packet, { outcome: "completed", phase: "foreground_completion", tester_status: "passed", verification_status: "completed" });
+  const result = await driver(root, { failRequested: true });
+  assert.equal(result.status, "noop");
+  assert.equal(prompts.length, 0);
+  assert.equal(packet.tester_status, "passed");
 });

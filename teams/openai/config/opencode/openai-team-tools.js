@@ -337,6 +337,8 @@ export const findPendingMandatoryTesterGate = async (rootSessionID, deps = {}) =
 };
 
 const mandatoryTesterDispatchFailures = new Set();
+const observedMandatoryTesterContinuations = new Set();
+export const observeMandatoryTesterContinuation = (rootID, packetID) => observedMandatoryTesterContinuations.add(`${rootID}:${packetID}`);
 export const driveMandatoryTesterContinuation = async (rootSessionID, deps = {}) => {
   const gate = await findPendingMandatoryTesterGate(rootSessionID, deps);
   if (!gate) return { status: "noop" };
@@ -354,8 +356,11 @@ export const driveMandatoryTesterContinuation = async (rootSessionID, deps = {})
     if (typeof deps.fail === "function") await deps.fail(gate);
   };
   if (gate.tester_dispatch_state === "requested") {
-    await fail();
-    return { status: "failed", packet_id: gate.packet_id };
+    if (deps.failRequested !== false) {
+      await fail();
+      return { status: "failed", packet_id: gate.packet_id };
+    }
+    return { status: "waiting", packet_id: gate.packet_id };
   }
   const cas = await (deps.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent)(gate.packet_id, {
     tester_status: ["pending", "required"], phase: "pending_verification", outcome: "pending", codex_outcome: "success",
@@ -380,6 +385,29 @@ export const enforcePendingMandatoryTesterGate = (packet, { tool, agent, prompt 
   if (requestedID && requestedID !== packet.packet_id) return { allowed: false, reason: "MANDATORY_TESTER_GATE" };
   if (active) return { allowed: false, reason: "TESTER_ALREADY_ACTIVE" };
   return { allowed: true, prompt: requestedID ? String(prompt) : `${prompt}\n\nMandatory verification tester: test_task_id=${packet.packet_id}` };
+};
+
+export const createMandatoryTesterRootDriver = ({ pluginInput = {}, updateWorkPacketByID: updatePacket = updateWorkPacketByID, reconcileGateTarget }) => async (rootID, options = {}) => {
+  const result = await driveMandatoryTesterContinuation(rootID, {
+    listWorkPackets: pluginInput.listWorkPackets || listWorkPackets,
+    readTask: pluginInput.readTask || readTask,
+    updateWorkPacketByIDIfCurrent: pluginInput.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent,
+    failRequested: options.failRequested,
+    enqueue: async (destinationRoot, text) => {
+      const session = pluginInput.client?.session;
+      const prompt = session?.promptAsync;
+      if (typeof prompt !== "function") throw new Error("MANDATORY_TESTER_ENQUEUE_UNAVAILABLE");
+      return prompt.call(session, { path: { id: destinationRoot }, body: { parts: [{ type: "text", text }], agent: "openai_orchestrator" } });
+    },
+    fail: async (gate) => {
+      await updatePacket(gate.packet_id, { phase: "foreground_completion", outcome: "failed", tester_status: "failed", verification_status: "failed", error_code: "MANDATORY_TESTER_NOT_DISPATCHED" });
+      await reconcileGateTarget({ ...gate, phase: "foreground_completion", outcome: "failed", tester_status: "failed", verification_status: "failed", error_code: "MANDATORY_TESTER_NOT_DISPATCHED" });
+    },
+  });
+  if (result.status === "noop") {
+    for (const key of observedMandatoryTesterContinuations) if (key.startsWith(`${rootID}:`)) observedMandatoryTesterContinuations.delete(key);
+  }
+  return result;
 };
 
 const objectiveHash = (objective) => createHash("sha256").update(objective).digest("hex");
@@ -1001,7 +1029,9 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     } catch { return null; }
   };
 
-  const plugin = ({
+ const driveMandatoryTesterForRoot = createMandatoryTesterRootDriver({ pluginInput, updateWorkPacketByID, reconcileGateTarget });
+
+ const plugin = ({
   "experimental.session.compacting": async ({ sessionID }, output) => {
     let packets = [], todos = [];
     try {
@@ -1859,10 +1889,17 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           guardrails.set(rootID, { ...(rootState || guardrails.get(input.sessionID) || createGuardrailState()), codexFailureTerminal: true });
           throw Object.assign(new Error(JSON.stringify({ code: "CODEX_CHILD_NOT_SUCCESSFUL", retryable: false, phase: "codex_child_policy", task_id: pending.task_fingerprint, session_id: foregroundChildID, status: childPolicy?.status || null })), { code: "CODEX_CHILD_NOT_SUCCESSFUL" });
         }
-       if (["PENDING_REVIEW", "PENDING_VERIFICATION"].includes(childTask?.state)) {
-         await finalizeReservation(pending, { outcome: "pending", result_summary: "pending_gates", sessionID: foregroundChildID, terminal: false, packet: false, taskAction: null });
-         return undefined;
-       }
+        if (childTask?.state === "PENDING_VERIFICATION") {
+          if (childPacket?.tester_required === true && ["pending", "required"].includes(childPacket?.tester_status)) {
+            await driveMandatoryTesterForRoot(masterParent(input.sessionID), { failRequested: false });
+          }
+          await finalizeReservation(pending, { outcome: "pending", result_summary: "pending_gates", sessionID: foregroundChildID, terminal: false, packet: false, taskAction: null });
+          return undefined;
+        }
+        if (childTask?.state === "PENDING_REVIEW") {
+          await finalizeReservation(pending, { outcome: "pending", result_summary: "pending_gates", sessionID: foregroundChildID, terminal: false, packet: false, taskAction: null });
+          return undefined;
+        }
      }
      let gateEvent = null;
     let gateError = null;
@@ -2037,23 +2074,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         // Policy survives non-terminal lifecycle events: it is the durable
         // authority binding for recovery, quality gates, and duplicate calls.
       if (!pending) { packetCallBySession.delete(sessionID); bufferedOpenCodeTokens.delete(sessionID); }
-      if (event.type === "session.idle" && sessionID && masterParent(sessionID) === sessionID) {
-        await driveMandatoryTesterContinuation(sessionID, {
-          listWorkPackets: pluginInput.listWorkPackets || listWorkPackets,
-          readTask: pluginInput.readTask || readTask,
-          updateWorkPacketByIDIfCurrent: pluginInput.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent,
-          enqueue: async (rootID, text) => {
-            const session = pluginInput.client?.session;
-            const body = { parts: [{ type: "text", text }], agent: "openai_orchestrator" };
-            const prompt = session?.prompt_async || session?.promptAsync;
-            if (typeof prompt !== "function") throw new Error("MANDATORY_TESTER_ENQUEUE_UNAVAILABLE");
-            return prompt.call(session, { path: { id: rootID }, body });
-          },
-          fail: async (gate) => {
-            await updateWorkPacketByID(gate.packet_id, { phase: "foreground_completion", outcome: "failed", tester_status: "failed", verification_status: "failed", error_code: "MANDATORY_TESTER_NOT_DISPATCHED" });
-            await reconcileGateTarget({ ...gate, phase: "foreground_completion", outcome: "failed", tester_status: "failed", verification_status: "failed", error_code: "MANDATORY_TESTER_NOT_DISPATCHED" });
-          },
-        });
+      if (event.type === "session.idle" && sessionID && masterParent(sessionID) === sessionID && [...observedMandatoryTesterContinuations].some((key) => key.startsWith(`${sessionID}:`))) {
+        await driveMandatoryTesterForRoot(sessionID, { failRequested: true });
       }
     }
       if (event.type === "message.updated") {
@@ -2061,6 +2083,10 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         if (String(info?.role || "").toLowerCase() === "user") {
           const text = (event.properties?.parts || event.properties?.message?.parts || []).filter((part) => part?.type === "text").map((part) => part.text).join(" ");
           const sessionID = event.properties?.sessionID || info.sessionID;
+          const testTaskID = String(text).match(/MANDATORY_TESTER_GATE[\s\S]*?test_task_id=([^\s]+)/)?.[1];
+          if (sessionID && testTaskID && String(text).includes("OMO_INTERNAL_INITIATOR")) {
+            observeMandatoryTesterContinuation(masterParent(sessionID), testTaskID);
+          }
            if (sessionID && !isInternalContinuation(text)) {
              const state = await guardrailFor(sessionID);
              const mappedRoot = masterParentBySession.get(sessionID);
