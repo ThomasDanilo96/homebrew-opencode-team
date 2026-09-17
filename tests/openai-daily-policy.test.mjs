@@ -10,9 +10,11 @@ import { latestUserObjective, resolveInitialObjectiveFromClient } from "../teams
 
 test("Daily shell policy is bounded by the genuine objective", () => {
   const env = { OPENAI_DAILY_PROFILE: "1" };
-  for (const command of ["printf ok", "test -f file", "build", "git status", "docker inspect app", "command -v ssh", "ssh -V"]) {
+  for (const command of ["printf ok", "test -f file", "node calculator.test.js", "ls", "build", "git status", "docker inspect app", "command -v ssh", "ssh -V"]) {
     assert.equal(allowsDailyOrchestratorShell("bash", command, "Inspect the repository", env), true, command);
   }
+  assert.equal(allowsDailyOrchestratorShell("bash", "printf 'fixture' | patch -p0", "Inspect the repository", env), false);
+  assert.equal(allowsDailyOrchestratorShell("bash", "apply_patch <<'PATCH'\n*** Update File: fixture\nPATCH", "Inspect the repository", env), false);
   assert.equal(allowsDailyOrchestratorShell("bash", "ssh host", "Inspect the repository", env), false);
   assert.equal(allowsDailyOrchestratorShell("bash", "git push", "Push the branch", env), false);
   assert.equal(allowsDailyOrchestratorShell("bash", "git push", "I explicitly confirm push", env), true);
