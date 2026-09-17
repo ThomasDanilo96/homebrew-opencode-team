@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createWorkPacket, updateWorkPacketByID } from "../teams/openai/config/opencode/work-packet.js";
 import { gateTerminalPacketPatch, lifecycleCleanupOptions } from "../teams/openai/config/opencode/gate-state.js";
-import { createGuardrailState, settleVerificationGateState } from "../teams/openai/config/opencode/openai-guardrails.js";
+import { beginRequestCycle, createGuardrailState, recoverRootRequestState, settleVerificationGateState, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
 
 test("idle cleanup is packet/task neutral", () => {
   assert.deepEqual(lifecycleCleanupOptions("session.idle", { packet: true, taskAction: "complete", terminal: false }), {
@@ -58,4 +58,35 @@ test("tester settlement clears the mandatory gate only after PASS or FAIL is ter
   assert.equal(fail.outcome, "failed");
   assert.equal(fail.codex_outcome, "failed");
   assert.equal(settleVerificationGateState(pending, packetID, "FAILED").pendingTesterActive, false);
+});
+
+test("recovered root preserves and enforces the Codex tester gate", () => {
+  const rootSessionID = "R";
+  const childSessionID = "C";
+  const packetID = "p".repeat(64);
+  const codexTerminal = {
+    ...createGuardrailState(),
+    objective: `Codex objective for ${rootSessionID}`,
+    authoritativeObjective: `Codex objective for ${rootSessionID}`,
+    pendingVerificationPacketID: packetID,
+    pendingTesterActive: false,
+    codex_outcome: "CODEX_SUCCESS",
+    tester_required: true,
+    child_session_id: childSessionID,
+  };
+  const recovered = recoverRootRequestState(codexTerminal, codexTerminal.objective, 2);
+
+  assert.equal(recovered.pendingVerificationPacketID, packetID);
+  assert.equal(recovered.pendingTesterActive, false);
+  assert.equal(verificationGateDecision(recovered, "bash", "openai_orchestrator", "printf ok").reason, "MANDATORY_TESTER_GATE");
+  assert.equal(verificationGateDecision(recovered, "task", "tester", `verify test_task_id=${packetID}`).allowed, true);
+  assert.equal(verificationGateDecision({ ...recovered, pendingTesterActive: true }, "task", "tester", `verify test_task_id=${packetID}`).reason, "TESTER_ALREADY_ACTIVE");
+
+  const settled = settleVerificationGateState(recovered, packetID, "COMPLETED");
+  const completed = gateTerminalPacketPatch({ review_status: "approved", tester_status: "pending" }, true);
+  assert.equal(settled.pendingVerificationPacketID, null);
+  assert.equal(completed.outcome, "completed");
+  assert.equal(completed.tester_status, "passed");
+  assert.equal(verificationGateDecision(settled, "bash", "openai_orchestrator", "printf ok").allowed, true);
+  assert.equal(beginRequestCycle(settled, "new genuine request", 3).pendingVerificationPacketID, null);
 });

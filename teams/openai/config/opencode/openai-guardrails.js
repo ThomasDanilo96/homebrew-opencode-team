@@ -61,6 +61,8 @@ export const recoverRootRequestState = (state = createGuardrailState(), objectiv
     verificationTerminal: Boolean(existing.verificationTerminal || derived.verificationTerminal),
     budgetTerminal: Boolean(existing.budgetTerminal || derived.budgetTerminal),
     codexFailureTerminal: Boolean(existing.codexFailureTerminal),
+    pendingVerificationPacketID: existing.pendingVerificationPacketID || null,
+    pendingTesterActive: Boolean(existing.pendingTesterActive),
   };
 };
 export const confirmationCategory = (operation) => Object.entries(CATEGORIES).find(([, pattern]) => pattern.test(String(operation || "")))?.[0] || null;
