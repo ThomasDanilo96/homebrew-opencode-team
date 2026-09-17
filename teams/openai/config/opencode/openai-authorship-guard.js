@@ -100,8 +100,8 @@ export const resolveExactTesterAuthorization = ({ packets = [], sessionID, rootI
   const tester = selected[0];
   const target = packets.find((packet) => String(packet.packet_id || "").toLowerCase() === String(tester.test_task_id).toLowerCase());
   if (!target || target.parent_session_id !== rootID || String(target.phase || "").toLowerCase() !== "pending_verification"
-    || String(target.outcome || "").toLowerCase() !== "pending" || String(target.codex_outcome || "").toUpperCase() !== CODEX_SUCCESS
-    || target.tester_required !== true || String(target.tester_status || "").toLowerCase() !== "pending") return null;
+    || String(target.outcome || "").toLowerCase() !== "pending" || target.codex_outcome !== "success"
+    || target.tester_required !== true || !["pending", "required"].includes(String(target.tester_status || "").toLowerCase())) return null;
   const testerPairs = verificationPairs(tester);
   const targetPairs = verificationPairs(target);
   if (!testerPairs.length || testerPairs.length !== targetPairs.length

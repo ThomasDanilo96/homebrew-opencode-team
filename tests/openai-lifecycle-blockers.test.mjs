@@ -71,3 +71,46 @@ test("provisional policy with conflicting durable identity is denied", () => wit
   await assert.rejects(() => guard["tool.execute.before"]({ tool: "openai_run_codex", sessionID: fixture.child }, { args: {} }), /OPENAI AUTHORSHIP POLICY/);
   assert.equal((await readPolicy(fixture.child)).packet_id, "wrong-packet");
 }));
+
+test("tester verification uses persisted packet shapes and exact target outcome", async () => {
+  const root = "a".repeat(64);
+  const child = "b".repeat(64);
+  const targetID = "c".repeat(64);
+  const command = "node --test tests/openai-lifecycle-blockers.test.mjs";
+  const commandHash = hash(command);
+  const target = (tester_status = "pending", codex_outcome = "success") => ({
+    packet_id: targetID,
+    parent_session_id: root,
+    phase: "pending_verification",
+    outcome: "pending",
+    codex_outcome,
+    tester_required: true,
+    tester_status,
+    verification_commands: JSON.stringify([command]),
+    expected_verification_hashes: JSON.stringify([commandHash]),
+  });
+  const tester = {
+    packet_id: "d".repeat(64),
+    parent_session_id: root,
+    agent: "tester",
+    tester_status: "required",
+    child_session_id: null,
+    test_task_id: targetID,
+    verification_commands: JSON.stringify([command]),
+    expected_verification_hashes: JSON.stringify([commandHash]),
+  };
+  const client = {
+    session: {
+      get: async ({ path: { id } }) => ({ data: id === child ? { id: child, parentID: root } : { id: root } }),
+      messages: async () => ({ data: [{ info: { role: "assistant", agent: "tester" }, parts: [] }] }),
+    },
+  };
+  for (const testerStatus of ["pending", "required"]) {
+    const guard = await OpenAIAuthorshipGuard({ client, listWorkPackets: async () => [tester, target(testerStatus)] });
+    await assert.doesNotReject(() => guard["tool.execute.before"]({ tool: "bash", sessionID: child }, { args: { command } }));
+    await assert.rejects(() => guard["tool.execute.before"]({ tool: "bash", sessionID: child }, { args: { command: "node --test tests/not-authorized.mjs" } }), /OPENAI AUTHORSHIP POLICY/);
+    await assert.rejects(() => guard["tool.execute.before"]({ tool: "apply_patch", sessionID: child }, { args: {} }), /OPENAI AUTHORSHIP POLICY/);
+  }
+  const guard = await OpenAIAuthorshipGuard({ client, listWorkPackets: async () => [tester, target("pending", "CODEX_SUCCESS")] });
+  await assert.rejects(() => guard["tool.execute.before"]({ tool: "bash", sessionID: child }, { args: { command } }), /OPENAI AUTHORSHIP POLICY/);
+});
