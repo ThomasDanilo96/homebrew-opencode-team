@@ -318,6 +318,33 @@ const masterParent = (sessionID) => {
   return sessionID;
 };
 
+export const findPendingMandatoryTesterGate = async (rootSessionID, deps = {}) => {
+  const packets = await (deps.listWorkPackets || listWorkPackets)();
+  const candidates = (Array.isArray(packets) ? packets : []).filter((packet) =>
+    packet?.parent_session_id === rootSessionID && packet.tester_required === true &&
+    ["pending", "required"].includes(packet.tester_status) && packet.codex_outcome === "success" &&
+    packet.outcome === "pending" && String(packet.phase || "").toLowerCase() === "pending_verification");
+  if (candidates.length === 0) return null;
+  if (candidates.length > 1) throw new GuardrailPolicyError("AMBIGUOUS_MANDATORY_TESTER_GATE");
+  const packet = candidates[0];
+  const task = await (deps.readTask || readTask)(packet.task_fingerprint);
+  if (!task || task.task_fingerprint !== packet.task_fingerprint || task.state !== "PENDING_VERIFICATION" ||
+      task.attempt !== packet.attempt || (packet.task_lease_id != null && task.lease_id !== packet.task_lease_id) ||
+      task.parent_session_id !== packet.parent_session_id) {
+    throw new GuardrailPolicyError("MANDATORY_TESTER_GATE_STATE_INVALID");
+  }
+  return packet;
+};
+
+export const enforcePendingMandatoryTesterGate = (packet, { tool, agent, prompt = "", active = false } = {}) => {
+  if (!packet) return { allowed: true, prompt };
+  if (tool !== "task" || agent !== "tester") return { allowed: false, reason: "MANDATORY_TESTER_GATE" };
+  const requestedID = String(prompt).match(/\btest_task_id=([^\s]+)/i)?.[1]?.toLowerCase();
+  if (requestedID && requestedID !== packet.packet_id) return { allowed: false, reason: "MANDATORY_TESTER_GATE" };
+  if (active) return { allowed: false, reason: "TESTER_ALREADY_ACTIVE" };
+  return { allowed: true, prompt: requestedID ? String(prompt) : `${prompt}\n\nMandatory verification tester: test_task_id=${packet.packet_id}` };
+};
+
 const objectiveHash = (objective) => createHash("sha256").update(objective).digest("hex");
 const canonicalObjective = (objective) => String(objective || "").trim().replace(/\s+/g, " ");
 const resultSummary = (output) => {
@@ -1490,10 +1517,28 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
      guard = beginRequestCycle(guard, String(output.args?.prompt || output.args?.description || ""), Date.now(), process.env, { preserveVerificationTerminal: true, preserveCodexFailureTerminal: true, preserveVerificationGate: true });
         guardrails.set(input.sessionID, guard);
      }
-     const sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
-     const rootParentForGate = masterParent(input.sessionID);
-     const rootGuardForGate = guardrails.get(rootParentForGate) || (rootParentForGate === input.sessionID ? guard : null);
-     const gateDecision = verificationGateDecision(rootGuardForGate, toolName, toolName === "task" ? String(output.args?.subagent_type || output.args?.agent || "") : sessionAgent, output.args?.prompt || output.args?.description || "", [...reservations.values()].some((entry) => entry.master_parent_session_id === rootParentForGate && entry.role === "tester" && entry.test_task_id === rootGuardForGate?.pendingVerificationPacketID && entry.token));
+      const sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
+      const rootParentForGate = masterParent(input.sessionID);
+      const rootGuardForGate = guardrails.get(rootParentForGate) || (rootParentForGate === input.sessionID ? guard : null);
+      const durableGate = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator"
+        ? await findPendingMandatoryTesterGate(rootParentForGate, { listWorkPackets: pluginInput.listWorkPackets, readTask: pluginInput.readTask })
+        : null;
+      const gateStateForDecision = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator" && !durableGate
+        ? (rootGuardForGate ? { ...rootGuardForGate, pendingVerificationPacketID: null, pendingTesterActive: false } : rootGuardForGate)
+        : rootGuardForGate;
+      if (durableGate) {
+        const requestedAgent = toolName === "task" ? String(output.args?.subagent_type || output.args?.agent || "") : sessionAgent;
+        const testerActive = [...reservations.values()].some((entry) => entry.master_parent_session_id === rootParentForGate && entry.role === "tester" && entry.test_task_id === durableGate.packet_id && entry.token)
+          || (rootGuardForGate?.pendingTesterActive === true && rootGuardForGate?.pendingVerificationPacketID === durableGate.packet_id);
+        const enforced = enforcePendingMandatoryTesterGate(durableGate, {
+          tool: toolName, agent: requestedAgent,
+          prompt: output.args?.prompt || output.args?.description || "", active: testerActive,
+        });
+        if (!enforced.allowed) throw new GuardrailPolicyError(enforced.reason);
+        output.args = output.args || {};
+        output.args.prompt = enforced.prompt;
+      }
+      const gateDecision = verificationGateDecision(gateStateForDecision, toolName, toolName === "task" ? String(output.args?.subagent_type || output.args?.agent || "") : sessionAgent, output.args?.prompt || output.args?.description || "", [...reservations.values()].some((entry) => entry.master_parent_session_id === rootParentForGate && entry.role === "tester" && entry.test_task_id === gateStateForDecision?.pendingVerificationPacketID && entry.token));
      if (!gateDecision.allowed) throw new GuardrailPolicyError(gateDecision.reason);
     if (guard && toolName !== "openai_run_codex") guardrails.set(input.sessionID, admitToolCall(guard, toolName));
     if (toolName === "bash" && sessionAgent === "tester") {
@@ -1543,8 +1588,9 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       }
       return;
     }
-    if (toolName !== "task") return;
-    const args = output.args || {};
+     if (toolName !== "task") return;
+     const args = output.args || {};
+      let testTaskID;
      if (args.run_in_background === true && !backgroundDelegationAllowed()) throw new GuardrailPolicyError("BACKGROUND_DENIED");
       const currentTaskObjective = String(args.prompt || args.description || "").trim();
       const suppliedMarker = extractTaskPacketMarker(currentTaskObjective);
@@ -1642,7 +1688,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     const weights = { openai_explore: 1, openai_librarian: 1, openai_ops: 1, tester: 2, reviewer: 3, reviewer_critical: 3, specialist: 3, codex_executor: 2 };
     const weight = weights[agent] || 1;
      const discoveryGroupID = analysis.discovery_agents.length ? objectiveHash(`${rootParent}\n${objectiveHash(currentTaskObjective)}`) : null;
-     let testTaskID = agent === "tester" ? (currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i) || [])[1]?.toLowerCase() : null;
+      testTaskID = agent === "tester" ? (currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i) || [])[1]?.toLowerCase() : null;
      if (agent === "tester") {
       const packets = await listWorkPackets();
       const pendingGates = packets.filter((packet) => packet.parent_session_id === rootParent && ["pending", "required"].includes(packet.tester_status));
