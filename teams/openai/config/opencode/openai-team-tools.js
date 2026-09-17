@@ -414,6 +414,63 @@ export const enforcePendingMandatoryTesterGate = (packet, { tool, agent, prompt 
   return { allowed: true, prompt: requestedID ? String(prompt) : `${prompt}\n\nMandatory verification tester: test_task_id=${packet.packet_id}` };
 };
 
+const messageTextFromParts = (parts) => Array.isArray(parts)
+  ? parts.filter((part) => part?.type === "text" && typeof part.text === "string" && part.text.trim()).map((part) => part.text).join(" ").trim()
+  : "";
+const unwrapMessage = (response) => response?.data ?? response;
+const hasExpectedVerificationHash = (gate) => parseSerializedArray(gate?.expected_verification_hashes).some((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/i.test(hash));
+
+export const resolveUpdatedUserMessageText = async (event, client) => {
+  const properties = event?.properties || {};
+  const info = properties.info || {};
+  const inline = messageTextFromParts(properties.parts || properties.message?.parts);
+  if (inline) return inline;
+  const sessionID = properties.sessionID || info.sessionID;
+  const messageID = info.id;
+  if (!sessionID || !messageID || !client?.session) return null;
+  try {
+    if (typeof client.session.message === "function") {
+      const message = unwrapMessage(await client.session.message({ path: { id: sessionID, messageID } }));
+      if (message?.info?.id === messageID) {
+        const text = messageTextFromParts(message.parts);
+        if (text) return text;
+      }
+    }
+  } catch {}
+  try {
+    if (typeof client.session.messages !== "function") return null;
+    const response = unwrapMessage(await client.session.messages({ path: { id: sessionID } }));
+    const messages = Array.isArray(response) ? response : response?.messages;
+    const exact = messages?.find((message) => message?.info?.id === messageID);
+    const text = messageTextFromParts(exact?.parts);
+    return text || null;
+  } catch { return null; }
+};
+
+export const handleMandatoryTesterContinuation = async (event, { client, rootForSession = (id) => id, findGate = findPendingMandatoryTesterGate, observe = observeMandatoryTesterContinuation, deps = {} } = {}) => {
+  const info = event?.properties?.info || {};
+  if (String(info.role || "").toLowerCase() !== "user") return { handled: false };
+  const text = await resolveUpdatedUserMessageText(event, client);
+  if (!text) return { handled: false, text: null };
+  const marker = text.match(/^\s*<!-- OMO_INTERNAL_INITIATOR -->\s*MANDATORY_TESTER_GATE\b[\s\S]*?\btest_task_id=([a-f0-9]{64})\b/i);
+  if (!marker) return { handled: false, text };
+  const sessionID = event.properties?.sessionID || info.sessionID;
+  const rootID = rootForSession(sessionID);
+  const packetID = marker[1].toLowerCase();
+  const gate = await findGate(rootID, deps);
+  if (!gate || gate.packet_id !== packetID || !["dispatching", "requested", "observed"].includes(gate.tester_dispatch_state)) return { handled: false, text };
+  if (gate.tester_dispatch_state === "observed") return { handled: true, text, packetID };
+  const result = await observe(rootID, packetID, deps);
+  return { handled: Boolean(result === true || result?.matched || result?.packet?.tester_dispatch_state === "observed"), text, packetID };
+};
+
+export const exactObservedTesterObjective = (parentObjective, testerObjective, gate) => {
+  if (!gate || gate.tester_dispatch_state !== "observed" || !hasExpectedVerificationHash(gate)) return "";
+  const parent = String(parentObjective || "");
+  const scope = delegationScope(testerObjective);
+  return parent.trim() && scope ? `Parent objective (verbatim):\n${parent}\nDelegated scope:\n${scope}` : "";
+};
+
 export const createMandatoryTesterRootDriver = ({ pluginInput = {}, updateWorkPacketByID: updatePacket = updateWorkPacketByID, reconcileGateTarget }) => async (rootID, options = {}) => {
   const result = await driveMandatoryTesterContinuation(rootID, {
     listWorkPackets: pluginInput.listWorkPackets || listWorkPackets,
@@ -1698,12 +1755,12 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
       const rootParentForGate = masterParent(input.sessionID);
       const rootGuardForGate = guardrails.get(rootParentForGate) || (rootParentForGate === input.sessionID ? guard : null);
-      const durableGate = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator"
-        ? await findPendingMandatoryTesterGate(rootParentForGate, { listWorkPackets: pluginInput.listWorkPackets, readTask: pluginInput.readTask })
-        : null;
-      const gateStateForDecision = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator" && !durableGate
-        ? (rootGuardForGate ? { ...rootGuardForGate, pendingVerificationPacketID: null, pendingTesterActive: false } : rootGuardForGate)
-        : rootGuardForGate;
+       const durableGate = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator"
+         ? await findPendingMandatoryTesterGate(rootParentForGate, { listWorkPackets: pluginInput.listWorkPackets, readTask: pluginInput.readTask })
+         : null;
+       const gateStateForDecision = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator" && !durableGate
+         ? (rootGuardForGate ? { ...rootGuardForGate, pendingVerificationPacketID: null, pendingTesterActive: false } : rootGuardForGate)
+         : rootGuardForGate;
       if (durableGate) {
         const requestedAgent = toolName === "task" ? String(output.args?.subagent_type || output.args?.agent || "") : sessionAgent;
         const testerActive = [...reservations.values()].some((entry) => entry.master_parent_session_id === rootParentForGate && entry.role === "tester" && entry.test_task_id === durableGate.packet_id && entry.token)
@@ -1773,11 +1830,15 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const currentTaskObjective = String(args.prompt || args.description || "").trim();
       const suppliedMarker = extractTaskPacketMarker(currentTaskObjective);
       if (suppliedMarker.present) throw new Error("TASK_PACKET_MARKER_INJECTED");
-     const requestedAgent = String(output.args?.subagent_type || output.args?.agent || "");
-     const fallbackParentObjective = guard?.authoritativeObjective ? "" : (await resolveInitialObjective(masterParent(input.sessionID)))?.objective || "";
-     const authoritativeParentObjective = selectAuthoritativeObjective(guard?.authoritativeObjective, fallbackParentObjective);
-     const analysis = analyzeObjective(currentTaskObjective);
-     if (!authoritativeParentObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
+      const requestedAgent = String(output.args?.subagent_type || output.args?.agent || "");
+      const fallbackParentObjective = guard?.authoritativeObjective ? "" : (await resolveInitialObjective(masterParent(input.sessionID)))?.objective || "";
+      const authoritativeParentObjective = selectAuthoritativeObjective(guard?.authoritativeObjective, fallbackParentObjective);
+      const injectedTesterTaskID = requestedAgent === "tester" ? currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i)?.[1]?.toLowerCase() : null;
+      const exactObservedTesterGate = process.env.OPENAI_DAILY_PROFILE === "1" && rootParentForGate === masterParent(rootParentForGate) && requestedAgent === "tester" &&
+        durableGate?.packet_id === injectedTesterTaskID && durableGate?.test_task_id === injectedTesterTaskID && durableGate?.tester_dispatch_state === "observed" &&
+        hasExpectedVerificationHash(durableGate);
+      const analysis = analyzeObjective(currentTaskObjective);
+      if (!authoritativeParentObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
      const route = routeDelegatedAgent(authoritativeParentObjective, currentTaskObjective, requestedAgent);
     const remoteReadOnly = route.classification === "REMOTE_READ_ONLY" ||
       (/\bopenai_remote_read\b/i.test(currentTaskObjective) && route.classification !== "REMOTE_MUTATION");
@@ -1820,7 +1881,9 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         gateTarget = await gateTargetSnapshot(reviewTarget);
         if (!gateTarget) throw new Error("REVIEW_TARGET_DENIED");
       }
-      const delegatedObjective = canonicalDelegatedObjective(authoritativeParentObjective, currentTaskObjective, { targetBound: Boolean(reviewTarget) });
+       const delegatedObjective = exactObservedTesterGate
+         ? exactObservedTesterObjective(authoritativeParentObjective, objectiveBeforeMarker(currentTaskObjective), durableGate)
+         : canonicalDelegatedObjective(authoritativeParentObjective, currentTaskObjective, { targetBound: Boolean(reviewTarget) });
       if (!delegatedObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
       output.args.prompt = delegatedObjective;
       if (guard) {
@@ -2188,13 +2251,15 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       if (event.type === "message.updated") {
         const info = event.properties?.info;
         if (String(info?.role || "").toLowerCase() === "user") {
-          const text = (event.properties?.parts || event.properties?.message?.parts || []).filter((part) => part?.type === "text").map((part) => part.text).join(" ");
           const sessionID = event.properties?.sessionID || info.sessionID;
-          const testTaskID = String(text).match(/MANDATORY_TESTER_GATE[\s\S]*?test_task_id=([^\s]+)/)?.[1];
-           if (sessionID && testTaskID && /^\s*<!-- OMO_INTERNAL_INITIATOR -->[\s\S]*\bMANDATORY_TESTER_GATE\b[\s\S]*\btest_task_id=[^\s]+/.test(text)) {
-             const rootID = masterParent(sessionID);
-             await observeMandatoryTesterContinuation(rootID, testTaskID, { readWorkPacketByID, updateWorkPacketByIDIfCurrent });
-           }
+          const continuation = await handleMandatoryTesterContinuation(event, {
+            client: pluginInput.client,
+            rootForSession: masterParent,
+            deps: { readWorkPacketByID, updateWorkPacketByIDIfCurrent },
+          });
+          if (!continuation.text) return;
+          const text = continuation.text;
+          if (continuation.handled) return;
            if (sessionID && !isInternalContinuation(text)) {
              const state = await guardrailFor(sessionID);
              const mappedRoot = masterParentBySession.get(sessionID);

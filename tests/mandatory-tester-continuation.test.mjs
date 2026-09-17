@@ -1,7 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactObservedTesterObjective, testerEvidenceFromMessages } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { gateTerminalPacketPatch } from "../teams/openai/config/opencode/gate-state.js";
+import { claimTask, completeTask, readTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
 import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
 
 const root = "root-session";
@@ -30,6 +32,102 @@ const productionDriverFor = (packets, prompts, failures = []) => createMandatory
   updateWorkPacketByID: async (_id, fields) => Object.assign(packets[0], fields),
   reconcileGateTarget: async () => undefined,
   ...(failures ? { updateWorkPacketByID: async (_id, fields) => { failures.push(fields.error_code); Object.assign(packets[0], fields); } } : {}),
+});
+
+const continuationEvent = (id = packetID, sessionID = root) => ({ type: "message.updated", properties: { sessionID, info: { id: "message-1", sessionID, role: "user" } } });
+const continuationText = (id = packetID) => `<!-- OMO_INTERNAL_INITIATOR --> MANDATORY_TESTER_GATE test_task_id=${id}\nCall the native task exactly once.`;
+
+test("updated user text uses the exact SDK message lookup", async () => {
+  const calls = [];
+  const event = continuationEvent();
+  const text = await resolveUpdatedUserMessageText(event, { session: { message: async (args) => { calls.push(args); return { data: { info: { id: "message-1" }, parts: [{ type: "text", text: continuationText() }] } }; } } });
+  assert.equal(text, continuationText());
+  assert.deepEqual(calls, [{ path: { id: root, messageID: "message-1" } }]);
+});
+
+test("updated user fallback selects the exact message in the event session", async () => {
+  const calls = [];
+  const event = continuationEvent();
+  const text = await resolveUpdatedUserMessageText(event, { session: {
+    message: async () => { throw new Error("not available"); },
+    messages: async (args) => { calls.push(args); return { data: [
+      { info: { id: "unrelated", sessionID: root }, parts: [{ type: "text", text: "latest unrelated" }] },
+      { info: { id: "message-1", sessionID: root }, parts: [{ type: "text", text: continuationText() }] },
+    ] }; },
+  } });
+  assert.equal(text, continuationText());
+  assert.deepEqual(calls, [{ path: { id: root } }]);
+});
+
+test("updated user text returns null when the exact message cannot be resolved", async () => {
+  const event = continuationEvent();
+  const guardLike = { authoritativeObjective: "Original authoritative objective" };
+  assert.equal(await resolveUpdatedUserMessageText(event, { session: { message: async () => { throw new Error("missing"); }, messages: async () => ({ data: [] }) } }), null);
+  assert.equal(guardLike.authoritativeObjective, "Original authoritative objective");
+  assert.deepEqual(guardLike, { authoritativeObjective: "Original authoritative objective" });
+});
+
+test("mandatory continuation observes only the exact requested gate", async () => {
+  const packets = [gate()];
+  packets[0].tester_dispatch_state = "requested";
+  const observed = [];
+  const result = await handleMandatoryTesterContinuation(continuationEvent(), {
+    client: { session: { message: async () => ({ data: { info: { id: "message-1" }, parts: [{ type: "text", text: continuationText() }] } }) } },
+    findGate: async () => packets[0],
+    observe: async (rootID, id) => { observed.push([rootID, id]); packets[0].tester_dispatch_state = "observed"; return { matched: true }; },
+  });
+  assert.equal(result.handled, true);
+  assert.deepEqual(observed, [[root, packetID]]);
+  assert.equal(packets[0].tester_dispatch_state, "observed");
+});
+
+test("spoofed and wrong-packet continuations fail closed", async () => {
+  let observed = 0;
+  const findGate = async () => ({ ...gate(), tester_dispatch_state: "requested" });
+  const options = (text) => ({ client: { session: { message: async () => ({ data: { info: { id: "message-1" }, parts: [{ type: "text", text }] } }) } }, findGate, observe: async () => { observed += 1; return { matched: true }; } });
+  const spoof = await handleMandatoryTesterContinuation(continuationEvent(), options(continuationText("c".repeat(64))));
+  const wrong = await handleMandatoryTesterContinuation(continuationEvent(), options(continuationText("d".repeat(64))));
+  assert.equal(spoof.handled, false);
+  assert.equal(wrong.handled, false);
+  assert.equal(observed, 0);
+});
+
+test("observed tester objective preserves authority without fuzzy scope matching", () => {
+  const parent = "Fix calculator fixture";
+  const validHash = "a".repeat(64);
+  const objective = exactObservedTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "observed", expected_verification_hashes: [validHash] });
+  assert.equal(objective, "Parent objective (verbatim):\nFix calculator fixture\nDelegated scope:\nverify calculator fixture");
+  assert.equal(exactObservedTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "requested", expected_verification_hashes: [validHash] }), "");
+  assert.equal(exactObservedTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "observed", expected_verification_hashes: [] }), "");
+  assert.equal(exactObservedTesterObjective(parent, "Verify calculator fixture", { tester_dispatch_state: "observed", expected_verification_hashes: ["not-a-hash"] }), "");
+});
+
+test("deterministic mandatory tester lifecycle reaches completed PASS", async () => {
+  const command = "node calculator.test.js";
+  const promoted = promoteVerificationCommands({ verification_commands: JSON.stringify([command]) }, { authoritative_objective: "Run node calculator.test.js" });
+  const packet = { ...gate(), tester_dispatch_state: "requested", expected_verification_hashes: promoted.hashes, verification_commands: [command], child_session_id: "tester-child", started_at: new Date(0).toISOString() };
+  const original = { authoritativeObjective: "Implement unrelated repository change" };
+  const observed = await handleMandatoryTesterContinuation(continuationEvent(), {
+    client: { session: { message: async () => ({ data: { info: { id: "message-1" }, parts: [{ type: "text", text: continuationText(packet.packet_id) }] } }) } },
+    findGate: async () => packet,
+    observe: async () => { packet.tester_dispatch_state = "observed"; return { matched: true }; },
+  });
+  assert.equal(observed.handled, true);
+  const testerObjective = exactObservedTesterObjective(original.authoritativeObjective, "Verify calculator fixture", packet);
+  assert.match(testerObjective, /^Parent objective \(verbatim\):\nImplement unrelated repository change\nDelegated scope:\nverify calculator fixture$/);
+  const evidence = testerEvidenceFromMessages([{ info: { role: "assistant", agent: "tester", sessionID: "tester-child", time: { created: 1 } }, parts: [{ type: "tool", tool: "bash", state: { status: "completed", input: { command }, metadata: { exit_code: 0 } } }] }], packet);
+  assert.equal(evidence.summary.status, "passed");
+  Object.assign(packet, gateTerminalPacketPatch(packet, true));
+  const taskFingerprint = `lifecycle-${Date.now()}-${Math.random()}`;
+  const claimed = await claimTask({ task_fingerprint: taskFingerprint, objective_sha256: "objective", parent_session_id: root, agent: "tester" });
+  const pending = await transitionTask(taskFingerprint, { expectedVersion: claimed.record.version, expectedStates: ["CLAIMED"], leaseId: claimed.record.lease_id, expectedAttempt: claimed.record.attempt, expectedLease: claimed.record.lease_id, patch: { state: "PENDING_VERIFICATION", result_summary: "pending" } });
+  const completedTask = await completeTask(taskFingerprint, { expectedVersion: pending.version, leaseId: pending.lease_id, expectedAttempt: pending.attempt, expectedLease: pending.lease_id, result_summary: "tester_passed" });
+  assert.equal(completedTask.state, "COMPLETED");
+  assert.equal((await readTask(taskFingerprint)).state, "COMPLETED");
+  assert.equal(packet.codex_outcome, "success");
+  assert.equal(packet.tester_status, "passed");
+  assert.equal(packet.verification_status, "passed");
+  assert.equal(packet.outcome, "completed");
 });
 
 test("verification promotion extracts inline prose and preserves serialized durable arrays", () => {
