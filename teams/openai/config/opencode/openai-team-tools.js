@@ -471,6 +471,9 @@ export const exactObservedTesterObjective = (parentObjective, testerObjective, g
   return parent.trim() && scope ? `Parent objective (verbatim):\n${parent}\nDelegated scope:\n${scope}` : "";
 };
 
+export const decideDelegatedTaskAgent = (requestedAgent, routeClassification, exactObservedTesterGate) =>
+  exactObservedTesterGate ? "tester" : routeClassification === "MUTATING" && requestedAgent === "tester" ? "codex_executor" : null;
+
 export const createMandatoryTesterRootDriver = ({ pluginInput = {}, updateWorkPacketByID: updatePacket = updateWorkPacketByID, reconcileGateTarget }) => async (rootID, options = {}) => {
   const result = await driveMandatoryTesterContinuation(rootID, {
     listWorkPackets: pluginInput.listWorkPackets || listWorkPackets,
@@ -1836,13 +1839,16 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const injectedTesterTaskID = requestedAgent === "tester" ? currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i)?.[1]?.toLowerCase() : null;
       const exactObservedTesterGate = process.env.OPENAI_DAILY_PROFILE === "1" && rootParentForGate === masterParent(rootParentForGate) && requestedAgent === "tester" &&
         durableGate?.packet_id === injectedTesterTaskID && durableGate?.test_task_id === injectedTesterTaskID && durableGate?.tester_dispatch_state === "observed" &&
-        hasExpectedVerificationHash(durableGate);
+        durableGate?.tester_required === true && durableGate?.codex_outcome === "success" && hasExpectedVerificationHash(durableGate);
       const analysis = analyzeObjective(currentTaskObjective);
       if (!authoritativeParentObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
-     const route = routeDelegatedAgent(authoritativeParentObjective, currentTaskObjective, requestedAgent);
-    const remoteReadOnly = route.classification === "REMOTE_READ_ONLY" ||
-      (/\bopenai_remote_read\b/i.test(currentTaskObjective) && route.classification !== "REMOTE_MUTATION");
-    if (route.classification === "MUTATING") {
+     const route = exactObservedTesterGate ? null : routeDelegatedAgent(authoritativeParentObjective, currentTaskObjective, requestedAgent);
+    const remoteReadOnly = route?.classification === "REMOTE_READ_ONLY" ||
+      (/\bopenai_remote_read\b/i.test(currentTaskObjective) && route?.classification !== "REMOTE_MUTATION");
+    const delegatedAgent = decideDelegatedTaskAgent(requestedAgent, route?.classification, exactObservedTesterGate);
+     if (delegatedAgent === "tester") {
+       output.args.subagent_type = delegatedAgent;
+     } else if (route.classification === "MUTATING") {
       delete output.args.category;
       delete output.args.load_skills;
       output.args.subagent_type = "codex_executor";

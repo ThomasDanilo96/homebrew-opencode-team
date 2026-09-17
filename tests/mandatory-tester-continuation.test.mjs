@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactObservedTesterObjective, testerEvidenceFromMessages } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactObservedTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { gateTerminalPacketPatch } from "../teams/openai/config/opencode/gate-state.js";
 import { claimTask, completeTask, readTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
 import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
@@ -36,6 +36,27 @@ const productionDriverFor = (packets, prompts, failures = []) => createMandatory
 
 const continuationEvent = (id = packetID, sessionID = root) => ({ type: "message.updated", properties: { sessionID, info: { id: "message-1", sessionID, role: "user" } } });
 const continuationText = (id = packetID) => `<!-- OMO_INTERNAL_INITIATOR --> MANDATORY_TESTER_GATE test_task_id=${id}\nCall the native task exactly once.`;
+
+test("exact observed tester gate wins over a mutating delegated route", () => {
+  assert.equal(decideDelegatedTaskAgent("tester", "MUTATING", true), "tester");
+  assert.equal(decideDelegatedTaskAgent("tester", "MUTATING", false), "codex_executor");
+});
+
+test("invalid exact tester state cannot bypass the mutating route", () => {
+  for (const state of ["wrong-packet", "not-observed", "invalid-hash"]) {
+    assert.equal(decideDelegatedTaskAgent("tester", "MUTATING", false), "codex_executor", state);
+  }
+});
+
+test("mandatory admission model has one Codex original and one tester", () => {
+  const packets = [
+    { packet_id: "c".repeat(64), agent: decideDelegatedTaskAgent("codex_executor", "MUTATING", false) || "codex_executor" },
+    { packet_id: "t".repeat(64), agent: decideDelegatedTaskAgent("tester", "MUTATING", true) },
+  ];
+  assert.deepEqual(packets.map(({ agent }) => agent), ["codex_executor", "tester"]);
+  assert.equal(packets.filter(({ agent }) => agent === "codex_executor").length, 1);
+  assert.equal(packets.length, 2);
+});
 
 test("updated user text uses the exact SDK message lookup", async () => {
   const calls = [];
