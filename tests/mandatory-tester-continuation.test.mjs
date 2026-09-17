@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { gateTerminalPacketPatch } from "../teams/openai/config/opencode/gate-state.js";
 import { claimTask, completeTask, readTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
 import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
@@ -9,7 +9,7 @@ import { isInternalContinuation } from "../teams/openai/config/opencode/openai-g
 const root = "root-session";
 const packetID = "a".repeat(64);
 const task = { task_fingerprint: "task", state: "PENDING_VERIFICATION", attempt: 1, lease_id: "lease", parent_session_id: root };
-const gate = (id = packetID, parent = root) => ({ packet_id: id, test_task_id: id, parent_session_id: parent, task_fingerprint: "task", attempt: 1, task_lease_id: "lease", tester_required: true, tester_status: "pending", codex_outcome: "success", outcome: "pending", phase: "pending_verification" });
+const gate = (id = packetID, parent = root) => ({ packet_id: id, parent_session_id: parent, task_fingerprint: "task", attempt: 1, task_lease_id: "lease", tester_required: true, tester_status: "pending", codex_outcome: "success", outcome: "pending", phase: "pending_verification" });
 const depsFor = (packets, extra = {}) => ({
   listWorkPackets: async () => packets,
   readTask: async () => task,
@@ -46,6 +46,31 @@ test("tester authorization validates and carries the original command/hash pair"
   assert.deepEqual(authorization, { commands: [calculatorCommand], hashes: [calculatorHash] });
   assert.deepEqual(testerVerificationMetadata({ verification_commands: authorization.commands, expected_verification_hashes: authorization.hashes }), { verification_commands: [calculatorCommand], expected_verification_hashes: [calculatorHash] });
   assert.equal(isAuthorizedTesterVerificationCommand(gatePacket, calculatorCommand), true);
+});
+
+test("exact mandatory tester helper accepts the original Codex gate without test_task_id", () => {
+  const original = { ...gate(), verification_commands: [calculatorCommand], expected_verification_hashes: [calculatorHash] };
+  const input = { daily: true, sessionAgent: "openai_orchestrator", rootSessionID: root, canonicalRootSessionID: root, requestedAgent: "tester", injectedTesterTaskID: packetID, durableGate: original };
+  assert.equal(Object.hasOwn(original, "test_task_id"), false);
+  assert.equal(isExactMandatoryTesterGate(input), true);
+  assert.equal(isExactMandatoryTesterGate({ ...input, injectedTesterTaskID: "b".repeat(64) }), false);
+  assert.equal(isExactMandatoryTesterGate({ ...input, durableGate: { ...original, outcome: "completed" } }), false);
+  assert.equal(isExactMandatoryTesterGate({ ...input, durableGate: { ...original, expected_verification_hashes: ["0".repeat(64)] } }), false);
+  assert.equal(isExactMandatoryTesterGate({ ...input, durableGate: { ...original, verification_commands: ["node other.test.js"] } }), false);
+});
+
+test("exact route resolution bypasses the router only for the exact gate", () => {
+  let calls = 0;
+  const router = (...args) => { calls += 1; return { classification: args[0] }; };
+  assert.equal(resolveDelegatedTaskRoute(true, router, "parent", "child", "tester"), null);
+  assert.equal(calls, 0);
+  assert.deepEqual(resolveDelegatedTaskRoute(false, router, "parent", "child", "tester"), { classification: "parent" });
+  assert.equal(calls, 1);
+});
+
+test("exact route admission context keeps null routes uncached and nullable", () => {
+  assert.deepEqual(taskRouteAdmissionContext(null, true, false), { classification: null, localReadOnly: false });
+  assert.deepEqual(taskRouteAdmissionContext(null, false, false), { classification: null, localReadOnly: false });
 });
 
 test("tester Bash authorization requires the exact normalized command and paired hash", () => {
@@ -148,7 +173,7 @@ test("mandatory tester objective preserves authority without fuzzy scope matchin
 test("deterministic mandatory tester lifecycle reaches completed PASS", async () => {
   const command = "node calculator.test.js";
   const promoted = promoteVerificationCommands({ verification_commands: JSON.stringify([command]) }, { authoritative_objective: "Run node calculator.test.js" });
-  const packet = { ...gate(), tester_dispatch_state: "requested", expected_verification_hashes: promoted.hashes, verification_commands: [command], child_session_id: "tester-child", started_at: new Date(0).toISOString() };
+  const packet = { ...gate(), agent: "tester", test_task_id: packetID, tester_dispatch_state: "requested", expected_verification_hashes: promoted.hashes, verification_commands: [command], child_session_id: "tester-child", started_at: new Date(0).toISOString() };
   const original = { authoritativeObjective: "Implement unrelated repository change" };
   const observed = await handleMandatoryTesterContinuation(continuationEvent(), {
     client: { session: { message: async () => ({ data: { info: { id: "message-1" }, parts: [{ type: "text", text: continuationText(packet.packet_id) }] } }) } },
@@ -168,6 +193,9 @@ test("deterministic mandatory tester lifecycle reaches completed PASS", async ()
   assert.equal(completedTask.state, "COMPLETED");
   assert.equal((await readTask(taskFingerprint)).state, "COMPLETED");
   assert.equal(packet.codex_outcome, "success");
+  assert.equal(packet.agent, "tester");
+  assert.equal(packet.test_task_id, packetID);
+  assert.deepEqual(testerVerificationMetadata(packet), { verification_commands: [command], expected_verification_hashes: promoted.hashes });
   assert.equal(packet.tester_status, "passed");
   assert.equal(packet.verification_status, "passed");
   assert.equal(packet.outcome, "completed");
@@ -369,7 +397,7 @@ test("successful enqueue durably records dispatching then requested exactly once
 
 for (const initial of ["dispatching", "requested"]) {
   test(`observation helper durably accepts ${initial} and preserves objective`, async () => {
-    const testRoot = `observe-${initial}`, testPacketID = `${initial === "dispatching" ? "e" : "f"}`.repeat(64), packet = { ...gate(testPacketID, testRoot), tester_dispatch_state: initial, objective: "authoritative objective" }, packets = [packet], transitions = [];
+  const testRoot = `observe-${initial}`, testPacketID = `${initial === "dispatching" ? "e" : "f"}`.repeat(64), packet = { ...gate(testPacketID, testRoot), test_task_id: testPacketID, tester_dispatch_state: initial, objective: "authoritative objective" }, packets = [packet], transitions = [];
     const result = await observeMandatoryTesterContinuation(testRoot, testPacketID, durableDeps(packets, transitions));
     assert.equal(result.matched, true);
     assert.equal(packet.tester_dispatch_state, "observed");
@@ -399,7 +427,7 @@ test("tester PASS terminal settlement is completed", () => {
 });
 
 test("idle dispatch is single-flight and requested does not watchdog-fail", async () => {
-  const testRoot = "idle-root", testPacketID = "2".repeat(64), packet = gate(testPacketID, testRoot), packets = [packet], prompts = [], failures = [], transitions = [];
+  const testRoot = "idle-root", testPacketID = "2".repeat(64), packet = { ...gate(testPacketID, testRoot), test_task_id: testPacketID }, packets = [packet], prompts = [], failures = [], transitions = [];
   let release;
   const pending = new Promise((resolve) => { release = resolve; });
   const deps = durableDeps(packets, transitions, {

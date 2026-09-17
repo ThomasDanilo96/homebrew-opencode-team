@@ -473,6 +473,12 @@ export const exactMandatoryTesterObjective = (parentObjective, testerObjective, 
 
 export const decideDelegatedTaskAgent = (requestedAgent, routeClassification, exactMandatoryTesterGate) =>
   exactMandatoryTesterGate ? "tester" : routeClassification === "MUTATING" && requestedAgent === "tester" ? "codex_executor" : null;
+export const resolveDelegatedTaskRoute = (exactMandatoryTesterGate, router, ...args) =>
+  exactMandatoryTesterGate ? null : router(...args);
+export const taskRouteAdmissionContext = (route, exactMandatoryTesterGate, remoteReadOnly) => ({
+  classification: route?.classification ?? null,
+  localReadOnly: !exactMandatoryTesterGate && route?.classification === "READ_ONLY" && !remoteReadOnly,
+});
 
 export const createMandatoryTesterRootDriver = ({ pluginInput = {}, updateWorkPacketByID: updatePacket = updateWorkPacketByID, reconcileGateTarget }) => async (rootID, options = {}) => {
   const result = await driveMandatoryTesterContinuation(rootID, {
@@ -590,6 +596,14 @@ export const validatedVerificationAuthorization = (packet = {}) => {
     hashes.push(hash);
   }
   return { commands, hashes };
+};
+export const isExactMandatoryTesterGate = ({ daily, sessionAgent, rootSessionID, canonicalRootSessionID, requestedAgent, injectedTesterTaskID, durableGate } = {}) => {
+  const authorization = validatedVerificationAuthorization(durableGate);
+  return daily === true && sessionAgent === "openai_orchestrator" && rootSessionID === canonicalRootSessionID && requestedAgent === "tester" &&
+    Boolean(injectedTesterTaskID) && injectedTesterTaskID === durableGate?.packet_id && durableGate?.parent_session_id === canonicalRootSessionID &&
+    durableGate?.tester_required === true && ["pending", "required"].includes(durableGate?.tester_status) &&
+    durableGate?.codex_outcome === "success" && durableGate?.outcome === "pending" &&
+    String(durableGate?.phase || "").toLowerCase() === "pending_verification" && authorization.commands.length > 0 && authorization.hashes.length > 0;
 };
 export const isAuthorizedTesterVerificationCommand = (packet, command) => {
   if (typeof command !== "string" || /[\r\n]/.test(command)) return false;
@@ -1862,34 +1876,30 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const fallbackParentObjective = guard?.authoritativeObjective ? "" : (await resolveInitialObjective(masterParent(input.sessionID)))?.objective || "";
       const authoritativeParentObjective = selectAuthoritativeObjective(guard?.authoritativeObjective, fallbackParentObjective);
       const injectedTesterTaskID = requestedAgent === "tester" ? currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i)?.[1]?.toLowerCase() : null;
-      const exactMandatoryTesterGate = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator" && rootParentForGate === masterParent(rootParentForGate) && requestedAgent === "tester" &&
-        durableGate?.packet_id === injectedTesterTaskID && durableGate?.test_task_id === durableGate?.packet_id &&
-        durableGate?.tester_required === true && ["pending", "required"].includes(durableGate?.tester_status) &&
-        durableGate?.codex_outcome === "success" && durableGate?.outcome === "pending" &&
-        String(durableGate?.phase || "").toLowerCase() === "pending_verification" && hasExpectedVerificationHash(durableGate);
+       const exactMandatoryTesterGate = isExactMandatoryTesterGate({ daily: process.env.OPENAI_DAILY_PROFILE === "1", sessionAgent, rootSessionID: rootParentForGate, canonicalRootSessionID: masterParent(rootParentForGate), requestedAgent, injectedTesterTaskID, durableGate });
       const analysis = analyzeObjective(currentTaskObjective);
       if (!authoritativeParentObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
-     const route = exactMandatoryTesterGate ? null : routeDelegatedAgent(authoritativeParentObjective, currentTaskObjective, requestedAgent);
+     const route = resolveDelegatedTaskRoute(exactMandatoryTesterGate, routeDelegatedAgent, authoritativeParentObjective, currentTaskObjective, requestedAgent);
     const remoteReadOnly = route?.classification === "REMOTE_READ_ONLY" ||
       (/\bopenai_remote_read\b/i.test(currentTaskObjective) && route?.classification !== "REMOTE_MUTATION");
     const delegatedAgent = decideDelegatedTaskAgent(requestedAgent, route?.classification, exactMandatoryTesterGate);
      if (delegatedAgent === "tester") {
        output.args.subagent_type = delegatedAgent;
-     } else if (route.classification === "MUTATING") {
+     } else if (route?.classification === "MUTATING") {
       delete output.args.category;
       delete output.args.load_skills;
       output.args.subagent_type = "codex_executor";
-     } else if (route.classification === "REMOTE_MUTATION") {
+     } else if (route?.classification === "REMOTE_MUTATION") {
        const genuineObjective = (await resolveInitialObjective(masterParent(input.sessionID)))?.objective || "";
        if (!explicitlyConfirms(genuineObjective, "vps_ssh")) throw new GuardrailPolicyError("REMOTE_CONFIRMATION", { category: "vps_ssh" });
        throw new Error("OPENAI ROUTING POLICY: remote mutation requires an approved remote mutation tool.");
-    } else if (remoteReadOnly || route.classification === "READ_ONLY") {
+    } else if (remoteReadOnly || route?.classification === "READ_ONLY") {
       if (requestedAgent === "codex_executor") {
         throw new Error("OPENAI ROUTING POLICY: read-only objectives cannot use codex_executor; delegate to an approved read-only OpenAI agent.");
       }
       delete output.args.category;
       delete output.args.load_skills;
-      output.args.subagent_type = remoteReadOnly ? "openai_ops" : requestedAgent === "tester" ? "tester" : ["reviewer", "reviewer_critical"].includes(requestedAgent) ? (/\breview_task_id=[a-f0-9]{64}\b/i.test(currentTaskObjective) ? requestedAgent : "specialist") : route.agent;
+      output.args.subagent_type = remoteReadOnly ? "openai_ops" : requestedAgent === "tester" ? "tester" : ["reviewer", "reviewer_critical"].includes(requestedAgent) ? (/\breview_task_id=[a-f0-9]{64}\b/i.test(currentTaskObjective) ? requestedAgent : "specialist") : route?.agent;
     } else if (requestedAgent === "codex_executor") {
       output.args.subagent_type = "specialist";
     } else if (args.category) {
@@ -1983,7 +1993,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       }
     }
     const selectedModel = configuredModel || DEFAULT_AGENT_MODELS[agent] || "openai/default";
-    const localReadOnly = route.classification === "READ_ONLY" && !remoteReadOnly;
+    const routeContext = taskRouteAdmissionContext(route, exactMandatoryTesterGate, remoteReadOnly);
+    const localReadOnly = routeContext.localReadOnly;
     const workspace = localReadOnly
       ? await workspaceFingerprint({ repository: input.directory || input.worktree || process.cwd(), agent, model: selectedModel, policyVersion: "read-cache-v1" }, { runProcess: pluginInput.runProcess })
       : { cacheable: false, fingerprint: null, reason: remoteReadOnly ? "remote_read_only" : "not_local_read_only" };
@@ -2008,7 +2019,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        const verificationCommands = testerMetadata?.verification_commands || criteriaFrom(currentTaskObjective);
        const expectedVerificationHashes = testerMetadata?.expected_verification_hashes || verificationCommands.filter(isAllowlistedVerificationCommand).map((command) => createHash("sha256").update(command).digest("hex"));
        const packetMetadata = { task_id: fingerprint, task_fingerprint: fingerprint, task_lease_id: claim.record.lease_id, packet_id: claim.record.packet_id, workspace_fingerprint: workspace.fingerprint, cache_status: cacheableRead ? "miss" : "bypass", complexity: analysis.complexity, codex_profile: analysis.codex_profile, reasoning_effort: analysis.reasoning_effort, risk: analysis.risk, review_required: analysis.review_required, discovery_group_id: discoveryGroupID, discovery_required_lanes: analysis.discovery_agents, attempt: claim.record.attempt, retry_count: claim.record.attempt - 1, tool_call_count: 0, wrapper_round_trips: 0, acceptance_criteria: verificationCommands, verification_commands: verificationCommands, expected_verification_hashes: expectedVerificationHashes, tester_status: agent === "tester" ? "pending" : undefined, test_task_id: agent === "tester" ? (testTaskID || claim.record.packet_id) : testTaskID || undefined };
-     await recordLatency({ stage: "task_admission", outcome: admission.status === 0 ? "admitted" : "deferred", duration_ms: elapsed(admissionStartedAt), admission_wait_ms: elapsed(admissionStartedAt), agent, call_id: input.callID, ...eventMetadata({ ...packetMetadata, classification: route.classification, task_call_id: input.callID }) });
+      await recordLatency({ stage: "task_admission", outcome: admission.status === 0 ? "admitted" : "deferred", duration_ms: elapsed(admissionStartedAt), admission_wait_ms: elapsed(admissionStartedAt), agent, call_id: input.callID, ...eventMetadata({ ...packetMetadata, classification: route?.classification, task_call_id: input.callID }) });
      if (admission.status !== 0) {
        if (agent === "tester" && rootGuardForGate?.pendingVerificationPacketID === testTaskID) guardrails.set(rootParent, { ...rootGuardForGate, pendingTesterActive: false });
       await transitionTask(fingerprint, { expectedVersion: claim.record.version, expectedStates: ["CLAIMED"], leaseId: claim.record.lease_id, patch: { state: "FAILED", retryable: true, error_code: "ADMISSION_DEFERRED" } });
@@ -2032,7 +2043,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     try {
       const activePath = join(process.env.OPENAI_TEAM_STATE_ROOT || "/tmp", "active", `${admissionToken}.json`);
       const active = JSON.parse(await readFile(activePath, "utf8"));
-      await writeFile(activePath, `${JSON.stringify({ ...active, codex_profile: analysis.codex_profile, classification: route.classification, complexity: analysis.complexity, risk: analysis.risk })}\n`, { mode: 0o600 });
+      await writeFile(activePath, `${JSON.stringify({ ...active, codex_profile: analysis.codex_profile, classification: route?.classification, complexity: analysis.complexity, risk: analysis.risk })}\n`, { mode: 0o600 });
     } catch (error) {
       await release(admissionToken);
       await transitionTask(fingerprint, { expectedVersion: claim.record.version, expectedStates: ["CLAIMED"], leaseId: claim.record.lease_id, patch: { state: "FAILED", retryable: true, error_code: "ADMISSION_METADATA_FAILED" } });
@@ -2050,13 +2061,13 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       authoritative_objective: agent === "codex_executor" ? delegatedObjective : "",
        review_task_id: reviewTaskID, test_task_id: testTaskID, gate_target: gateTarget,
        objective_sha256: objectiveHash(delegatedObjective),
-        classification: route.classification, cacheable_read: cacheableRead, ...packetMetadata, test_task_id: testTaskID,
+        classification: route?.classification, cacheable_read: cacheableRead, ...packetMetadata, test_task_id: testTaskID,
          task_id: fingerprint, task_state_version: claim.record.version, task_lease_id: claim.record.lease_id, task_fingerprint: fingerprint, packet_id: claim.record.packet_id, delegation_scope: delegationScope(delegatedObjective),
     });
     try {
       await createWorkPacket(input.callID, {
         objective_sha256: objectiveHash(delegatedObjective), parent_session_id: rootParent,
-        agent, task_fingerprint: fingerprint, attempt: claim.record.attempt, task_lease_id: claim.record.lease_id, classification: route.classification, phase: "admitted", outcome: "pending",
+        agent, task_fingerprint: fingerprint, attempt: claim.record.attempt, task_lease_id: claim.record.lease_id, classification: route?.classification, phase: "admitted", outcome: "pending",
          admission_wait_ms: elapsed(admissionStartedAt),
          ...packetMetadata, review_task_id: reviewTaskID, test_task_id: testTaskID, gate_target: gateTarget ? (reviewTaskID || testTaskID) : null,
       });
