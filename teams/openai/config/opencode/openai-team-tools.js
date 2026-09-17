@@ -405,13 +405,39 @@ export const driveMandatoryTesterContinuation = async (rootSessionID, deps = {})
   }
 };
 
-export const enforcePendingMandatoryTesterGate = (packet, { tool, agent, prompt = "", active = false } = {}) => {
+export const resolveMandatoryTesterTarget = (packet, { prompt = "", rootSessionID, canonicalRootSessionID, task, requireAuthorization = false } = {}) => {
+  if (!packet || typeof packet !== "object") return { allowed: true, prompt: String(prompt) };
+  const packetID = String(packet.packet_id || "").toLowerCase();
+  const validPacketID = /^[a-f0-9]{64}$/.test(packetID);
+  const expectedRoot = canonicalRootSessionID ?? rootSessionID;
+  const validGate = validPacketID && (expectedRoot == null || packet.parent_session_id === expectedRoot) &&
+    packet.tester_required === true && ["pending", "required"].includes(packet.tester_status) &&
+    packet.codex_outcome === "success" && packet.outcome === "pending" &&
+    String(packet.phase || "").toLowerCase() === "pending_verification" &&
+    (!task || (task.task_fingerprint === packet.task_fingerprint && task.state === "PENDING_VERIFICATION" &&
+      task.attempt === packet.attempt && task.parent_session_id === packet.parent_session_id &&
+      (packet.task_lease_id == null || task.lease_id === packet.task_lease_id))) &&
+    (!requireAuthorization || validatedVerificationAuthorization(packet).commands.length > 0);
+  if (!validGate) return { allowed: false, reason: "MANDATORY_TESTER_GATE" };
+
+  const text = String(prompt);
+  const tokenPattern = /\btest_task_id=([^\s]+)/gi;
+  const ids = [];
+  let match;
+  while ((match = tokenPattern.exec(text))) {
+    const value = match[1].toLowerCase();
+    if (/^[a-f0-9]{64}$/.test(value)) ids.push(value);
+  }
+  if (ids.some((id) => id !== packetID)) return { allowed: false, reason: "MANDATORY_TESTER_GATE" };
+  const withoutTokens = text.replace(tokenPattern, "").replace(/[ \t]+\n/g, "\n").trimEnd();
+  return { allowed: true, targetID: packetID, prompt: withoutTokens ? `${withoutTokens}\n\ntest_task_id=${packetID}` : `test_task_id=${packetID}` };
+};
+
+export const enforcePendingMandatoryTesterGate = (packet, { tool, agent, prompt = "", active = false, ...context } = {}) => {
   if (!packet) return { allowed: true, prompt };
   if (tool !== "task" || agent !== "tester") return { allowed: false, reason: "MANDATORY_TESTER_GATE" };
-  const requestedID = String(prompt).match(/\btest_task_id=([^\s]+)/i)?.[1]?.toLowerCase();
-  if (requestedID && requestedID !== packet.packet_id) return { allowed: false, reason: "MANDATORY_TESTER_GATE" };
   if (active) return { allowed: false, reason: "TESTER_ALREADY_ACTIVE" };
-  return { allowed: true, prompt: requestedID ? String(prompt) : `${prompt}\n\nMandatory verification tester: test_task_id=${packet.packet_id}` };
+  return resolveMandatoryTesterTarget(packet, { prompt, ...context });
 };
 
 const messageTextFromParts = (parts) => Array.isArray(parts)
@@ -1866,7 +1892,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        const gateStateForDecision = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator" && !durableGate
          ? (rootGuardForGate ? { ...rootGuardForGate, pendingVerificationPacketID: null, pendingTesterActive: false } : rootGuardForGate)
          : rootGuardForGate;
-      if (durableGate) {
+       let mandatoryTesterTargetID = null;
+       if (durableGate) {
         const requestedAgent = toolName === "task" ? String(output.args?.subagent_type || output.args?.agent || "") : sessionAgent;
         const testerActive = [...reservations.values()].some((entry) => entry.master_parent_session_id === rootParentForGate && entry.role === "tester" && entry.test_task_id === durableGate.packet_id && entry.token)
           || (rootGuardForGate?.pendingTesterActive === true && rootGuardForGate?.pendingVerificationPacketID === durableGate.packet_id);
@@ -1874,8 +1901,9 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           tool: toolName, agent: requestedAgent,
           prompt: output.args?.prompt || output.args?.description || "", active: testerActive,
         });
-        if (!enforced.allowed) throw new GuardrailPolicyError(enforced.reason);
-        output.args = output.args || {};
+         if (!enforced.allowed) throw new GuardrailPolicyError(enforced.reason);
+         mandatoryTesterTargetID = enforced.targetID;
+         output.args = output.args || {};
         output.args.prompt = enforced.prompt;
       }
       const gateDecision = verificationGateDecision(gateStateForDecision, toolName, toolName === "task" ? String(output.args?.subagent_type || output.args?.agent || "") : sessionAgent, output.args?.prompt || output.args?.description || "", [...reservations.values()].some((entry) => entry.master_parent_session_id === rootParentForGate && entry.role === "tester" && entry.test_task_id === gateStateForDecision?.pendingVerificationPacketID && entry.token));
@@ -1927,7 +1955,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const requestedAgent = String(output.args?.subagent_type || output.args?.agent || "");
       const fallbackParentObjective = guard?.authoritativeObjective ? "" : (await resolveInitialObjective(masterParent(input.sessionID)))?.objective || "";
       const authoritativeParentObjective = selectAuthoritativeObjective(guard?.authoritativeObjective, fallbackParentObjective);
-      const injectedTesterTaskID = requestedAgent === "tester" ? currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i)?.[1]?.toLowerCase() : null;
+       const injectedTesterTaskID = requestedAgent === "tester" ? (mandatoryTesterTargetID || currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i)?.[1]?.toLowerCase()) : null;
        const exactMandatoryTesterGate = isExactMandatoryTesterGate({ daily: process.env.OPENAI_DAILY_PROFILE === "1", sessionAgent, rootSessionID: rootParentForGate, canonicalRootSessionID: masterParent(rootParentForGate), requestedAgent, injectedTesterTaskID, durableGate });
       const analysis = analyzeObjective(currentTaskObjective);
       if (!authoritativeParentObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
@@ -2024,7 +2052,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     const weights = { openai_explore: 1, openai_librarian: 1, openai_ops: 1, tester: 2, reviewer: 3, reviewer_critical: 3, specialist: 3, codex_executor: 2 };
     const weight = weights[agent] || 1;
      const discoveryGroupID = analysis.discovery_agents.length ? objectiveHash(`${rootParent}\n${objectiveHash(currentTaskObjective)}`) : null;
-      testTaskID = agent === "tester" ? (currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i) || [])[1]?.toLowerCase() : null;
+       testTaskID = agent === "tester" ? (mandatoryTesterTargetID || (currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i) || [])[1]?.toLowerCase()) : null;
      if (agent === "tester") {
       const packets = await listWorkPackets();
       const pendingGates = packets.filter((packet) => packet.parent_session_id === rootParent && ["pending", "required"].includes(packet.tester_status));
