@@ -511,6 +511,69 @@ const criteriaFrom = (objective) => String(objective || "").split(/\r?\n/).flatM
   const match = line.match(/^\s*(?:[-*]\s*)?(?:acceptance|criteria|expect|verify|test|check|run)\s*[:\-]?\s*(.+)$/i);
   return match ? [match[1].trim()] : [];
 });
+const normalizeVerificationCommand = (command) => String(command || "").trim().replace(/\s+/g, " ");
+const commandsFromAuthorizedText = (text) => {
+  const value = String(text || "");
+  const candidates = [...value.matchAll(/`([^`]+)`/g)].map((match) => match[1]);
+  const starters = new Set(["node", "npm", "pnpm", "yarn", "pytest", "python", "go", "cargo", "bash", "bun", "dotnet", "mvn", "mvnw", "gradle", "gradlew", "phpunit", "rspec", "tsc", "eslint"]);
+  const proseBoundaries = [["and", "report"], ["then", "report"], ["to", "verify"], ["to", "check"], ["and", "return"]];
+  const cleanToken = (token) => {
+    const cleaned = token.replace(/^[([{:,]+|[)\]},!?;]+$/g, "");
+    return cleaned.endsWith("./...") ? cleaned : cleaned.replace(/\.$/, "");
+  };
+  for (const line of value.replace(/`[^`]*`/g, " ").split(/\r?\n/)) {
+    const tokens = line.split(/\s+/).filter(Boolean).map(cleanToken);
+    for (let index = 0; index < tokens.length; index += 1) {
+      if (!starters.has(tokens[index])) continue;
+      const boundaryAt = tokens.slice(index + 1).findIndex((_, offset) => proseBoundaries.some((boundary) => boundary.every((word, position) => tokens[index + 1 + offset + position]?.toLowerCase() === word)));
+      const available = boundaryAt < 0 ? tokens.length - index : boundaryAt + 1;
+      const valid = [];
+      for (let length = Math.min(8, available); length > 0; length -= 1) {
+        const candidate = tokens.slice(index, index + length).join(" ");
+        if (isAllowlistedVerificationCommand(candidate)) valid.push(candidate);
+      }
+      if (valid.length === 0) continue;
+      if (boundaryAt >= 0) { candidates.push(valid[0]); continue; }
+      if (valid.length === 1) { candidates.push(valid[0]); continue; }
+    }
+  }
+  return candidates;
+};
+const commandsFromValidatedJSONL = (jsonl) => String(jsonl || "").split(/\r?\n/).flatMap((line) => {
+  try {
+    const event = JSON.parse(line), item = event?.item || event;
+    if (String(item?.type || "").toLowerCase() !== "command_execution") return [];
+    const command = item.command ?? item.cmd ?? item.command_line;
+    return typeof command === "string" ? [command] : [];
+  } catch { return []; }
+});
+export const promoteVerificationCommands = (packet = {}, sources = {}) => {
+  const existing = parseSerializedArray(packet?.verification_commands);
+  const objectiveTexts = typeof sources === "string" ? [sources] : Array.isArray(sources) ? sources : [
+    sources?.authoritative_objective, sources?.delegated_objective, sources?.objective, sources?.objective_text,
+    sources?.reservation?.authoritative_objective, sources?.reservation?.delegated_objective,
+    sources?.delegated?.objective, packet?.authoritative_objective,
+  ];
+  const criteriaTexts = parseSerializedArray(packet?.acceptance_criteria);
+  const objective = [...objectiveTexts, ...criteriaTexts].filter((value) => typeof value === "string").join("\n");
+  const jsonl = typeof sources === "object" && sources !== null && !Array.isArray(sources)
+    ? sources.stdout ?? sources.jsonl ?? sources.result?.stdout ?? sources.result : "";
+  const candidates = [...existing, ...commandsFromAuthorizedText(objective), ...commandsFromValidatedJSONL(jsonl)];
+  const commands = [];
+  const seen = new Set();
+  for (const candidate of candidates) {
+    if (typeof candidate !== "string" || /[\r\n]/.test(candidate)) continue;
+    const command = normalizeVerificationCommand(candidate);
+    if (!command || seen.has(command) || !isAllowlistedVerificationCommand(command)) continue;
+    seen.add(command); commands.push(command);
+  }
+  const criteria = [...new Set([
+    ...(Array.isArray(packet?.acceptance_criteria) ? packet.acceptance_criteria : []),
+    ...objectiveTexts.flatMap((value) => criteriaFrom(value)),
+    ...criteriaTexts,
+  ].map((value) => String(value || "").trim()).filter(Boolean))];
+  return { commands, hashes: commands.map((command) => createHash("sha256").update(command).digest("hex")), criteria };
+};
 const eventMetadata = (packet, extra = {}) => ({ task_id: packet?.packet_id || (packet?.task_call_id ? objectiveHash(packet.task_call_id) : null), attempt: packet?.attempt ?? null, classification: packet?.classification || null, complexity: packet?.complexity || null, codex_profile: packet?.codex_profile || null, ...extra });
 const objectiveLogPath = () => join(process.env.OPENAI_TEAM_STATE_ROOT || "/tmp", "logs", "authorship-guard.log");
 const recordObjectiveEvent = async (event, sessionID, parentSessionID, callID, authorityState, action) => {
@@ -1222,7 +1285,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
            if (packetCallID && !preservePending) await updateWorkPacketByID(packetCallID, { phase: result.gates_pending ? "pending_verification" : "codex_terminal", outcome: result.gates_pending ? "pending" : outcome, codex_outcome: outcome, duration_ms: durationMs, profile: modelPlan?.profile || null, requested_model: modelPlan?.requested_model || null, executed_model: executedModel || null, fallback_model: modelPlan?.fallback_model || null, fallback_reason: fallbackReason, fallback_count: fallbackCount });
           if (reservation?.task_fingerprint && !preservePending) {
             if (outcome === "success" && !result.gates_pending) await completeTask(reservation.task_fingerprint, { expectedVersion: reservation.task_state_version, leaseId: reservation.task_lease_id, result_summary: outcome });
-            else if (outcome !== "success") await advanceTask(reservation, "FAILED", { retryable: result.retryable === true, error_code: outcome, result_summary: outcome });
+             else if (outcome !== "success") await advanceTask(reservation, "FAILED", { retryable: result.retryable === true, error_code: result.error_code || outcome, result_summary: result.error_code || outcome });
           }
            if (reservation?.token) {
             // Terminal Codex work has already advanced its task/packet state
@@ -1510,9 +1573,14 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
             verification_evidence: verificationEvidence,
             codex_outcome: "success",
           });
-          const reviewPending = executionPolicy.next_agents.some((agent) => agent === "reviewer" || agent === "reviewer_critical");
-          const testerRequired = executionPolicy.next_agents.includes("tester");
-          const gatesPending = reviewPending || testerRequired;
+           const reviewPending = executionPolicy.next_agents.some((agent) => agent === "reviewer" || agent === "reviewer_critical");
+           const testerRequired = executionPolicy.next_agents.includes("tester");
+           const gatesPending = reviewPending || testerRequired;
+           const promotedVerification = promoteVerificationCommands(packet || {}, {
+             authoritative_objective: reservation?.authoritative_objective,
+             objective: packet?.acceptance_criteria,
+             stdout: result.stdout,
+           });
           // The record observed before execution is only a resume hint.  A
           // successful handoff may have created or advanced recovery state, so
           // compare against the current durable identity before declaring it
@@ -1548,8 +1616,23 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
             await recordCodexTerminal("recovery_identity_conflict", { preserve_pending: true });
             return JSON.stringify(terminal);
           }
-           if (packetCallID) await updateWorkPacketByID(packetCallID, {
-            verification_evidence: verificationEvidence, next_agents: executionPolicy.next_agents, policy_reasons: executionPolicy.reasons,
+           if (testerRequired && promotedVerification.commands.length === 0) {
+             await transitionCurrentPolicy(context.sessionID, CODEX_TASK_FAILED, { error: "TEST_COMMAND_UNAVAILABLE" });
+             if (packetCallID) await updateWorkPacketByID(packetCallID, {
+               verification_commands: [], expected_verification_hashes: [], acceptance_criteria: promotedVerification.criteria,
+               verification_evidence: verificationEvidence, next_agents: [], policy_reasons: ["TEST_COMMAND_UNAVAILABLE"],
+               review_status: reviewPending ? "pending" : "not_required", tester_required: true, tester_status: "failed", verification_status: "missing",
+               verification_recognized_count: verificationEvidence.summary?.recognized_count || 0, verification_passed_count: verificationEvidence.summary?.passed_count || 0, verification_failed_count: verificationEvidence.summary?.failed_count || 0, verification_truncated_count: verificationEvidence.summary?.truncated_count || 0,
+               phase: "foreground_completion", outcome: "failed", codex_outcome: "failed", error_code: "TEST_COMMAND_UNAVAILABLE",
+             });
+             const unavailable = codexResult({ status: "failed", kind: "failed", code: "TEST_COMMAND_UNAVAILABLE", retryable: false, task_id: reservation?.task_fingerprint || null, packet_id: packet?.packet_id || null, attempt: reservation?.attempt || 1, tester_required: true, tester_status: "failed", verification_status: "missing", next_agents: [], reasons: ["TEST_COMMAND_UNAVAILABLE"] });
+             await report(unavailable);
+             await recordCodexTerminal("failed", { ...result, packet: false, gates_pending: false, validated_handoff: true, retryable: false, error_code: "TEST_COMMAND_UNAVAILABLE" });
+             return JSON.stringify(unavailable);
+           }
+            if (packetCallID) await updateWorkPacketByID(packetCallID, {
+             verification_commands: promotedVerification.commands, expected_verification_hashes: promotedVerification.hashes, acceptance_criteria: promotedVerification.criteria,
+             verification_evidence: verificationEvidence, next_agents: executionPolicy.next_agents, policy_reasons: executionPolicy.reasons,
             review_status: reviewPending ? "pending" : "not_required", tester_required: testerRequired, tester_status: testerRequired ? "pending" : "not_required", verification_status: executionPolicy.verification_status,
             verification_recognized_count: verificationEvidence.summary?.recognized_count || 0, verification_passed_count: verificationEvidence.summary?.passed_count || 0, verification_failed_count: verificationEvidence.summary?.failed_count || 0, verification_truncated_count: verificationEvidence.summary?.truncated_count || 0,
              phase: gatesPending ? (testerRequired ? "pending_verification" : "pending_review") : "codex_terminal", outcome: gatesPending ? "pending" : "success", codex_outcome: "success",

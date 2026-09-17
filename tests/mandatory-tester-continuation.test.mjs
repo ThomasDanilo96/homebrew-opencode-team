@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { createHash } from "node:crypto";
+import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
 
 const root = "root-session";
@@ -29,6 +30,66 @@ const productionDriverFor = (packets, prompts, failures = []) => createMandatory
   updateWorkPacketByID: async (_id, fields) => Object.assign(packets[0], fields),
   reconcileGateTarget: async () => undefined,
   ...(failures ? { updateWorkPacketByID: async (_id, fields) => { failures.push(fields.error_code); Object.assign(packets[0], fields); } } : {}),
+});
+
+test("verification promotion extracts inline prose and preserves serialized durable arrays", () => {
+  const command = "node calculator.test.js";
+  const promoted = promoteVerificationCommands({
+    verification_commands: JSON.stringify([command]),
+    acceptance_criteria: JSON.stringify(["Keep the unrelated acceptance criterion"]),
+  }, { authoritative_objective: "inline run node calculator.test.js and report" });
+  assert.deepEqual(promoted.commands, [command]);
+  assert.deepEqual(promoted.hashes, [createHash("sha256").update(command).digest("hex")]);
+  assert.deepEqual(promoted.criteria, ["Keep the unrelated acceptance criterion"]);
+});
+
+test("verification promotion accepts validated command_execution JSONL and rejects unsafe commands", () => {
+  const command = "node calculator.test.js";
+  const stdout = [
+    JSON.stringify({ type: "command_execution", item: { type: "command_execution", command } }),
+    JSON.stringify({ type: "command_execution", item: { type: "command_execution", command: "node -e 'process.exit(1)'" } }),
+  ].join("\n");
+  const promoted = promoteVerificationCommands({}, { stdout, authoritative_objective: "Run node calculator.test.js" });
+  assert.deepEqual(promoted.commands, [command]);
+  assert.equal(promoted.hashes.length, 1);
+});
+
+test("verification promotion selects only the longest allowlisted prose window and rejects newlines", () => {
+  const command = "node --test tests/a.test.js";
+  assert.deepEqual(promoteVerificationCommands({}, { authoritative_objective: "Run node --test tests/a.test.js and report" }).commands, [command]);
+  assert.deepEqual(promoteVerificationCommands({}, { authoritative_objective: "Run node --test tests/a.test.js to verify behavior" }).commands, [command]);
+  assert.deepEqual(promoteVerificationCommands({}, { authoritative_objective: "Run node --test tests/a.test.js after making the change" }).commands, []);
+  assert.deepEqual(promoteVerificationCommands({}, { authoritative_objective: "please use node --test tests/a.test.js for validation work" }).commands, []);
+  assert.deepEqual(promoteVerificationCommands({}, { authoritative_objective: "Run node calculator.test.js" }).commands, ["node calculator.test.js"]);
+  assert.deepEqual(promoteVerificationCommands({}, { authoritative_objective: "Run node calculator.test.js and report." }).commands, ["node calculator.test.js"]);
+  assert.deepEqual(promoteVerificationCommands({}, { authoritative_objective: "Run go test ./... and report" }).commands, ["go test ./..."]);
+  assert.deepEqual(promoteVerificationCommands({}, { authoritative_objective: "Run npm\ntest" }).commands, []);
+  assert.deepEqual(promoteVerificationCommands({}, { stdout: JSON.stringify({ item: { type: "command_execution", command: "npm\ntest" } }) }).commands, []);
+});
+
+test("duplicate verification sources produce one normalized command and hash", () => {
+  const promoted = promoteVerificationCommands({ verification_commands: [" node   calculator.test.js "] }, {
+    authoritative_objective: "Run node calculator.test.js",
+    stdout: JSON.stringify({ item: { type: "command_execution", command: "node calculator.test.js" } }),
+  });
+  assert.deepEqual(promoted.commands, ["node calculator.test.js"]);
+  assert.equal(promoted.hashes.length, 1);
+});
+
+test("promoted hash admits observed tester with only the exact task target", () => {
+  const packet = { ...gate(), tester_dispatch_state: "observed", verification_commands: ["node calculator.test.js"], expected_verification_hashes: [createHash("sha256").update("node calculator.test.js").digest("hex")] };
+  const result = enforcePendingMandatoryTesterGate(packet, { tool: "task", agent: "tester", active: false, prompt: `test_task_id=${packetID}` });
+  assert.equal(result.allowed, true);
+  assert.doesNotThrow(() => enforcePendingMandatoryTesterGate(packet, { tool: "task", agent: "tester", active: false, prompt: `test_task_id=${packetID}` }));
+  assert.equal(enforcePendingMandatoryTesterGate(packet, { tool: "task", agent: "tester", active: true, prompt: `test_task_id=${packetID}` }).allowed, false);
+});
+
+test("failed packet with no command is a continuation no-op", async () => {
+  const packets = [{ ...gate(), outcome: "failed", codex_outcome: "failed", tester_status: "failed", error_code: "TEST_COMMAND_UNAVAILABLE" }];
+  let enqueues = 0;
+  const result = await driveMandatoryTesterContinuation(root, depsFor(packets, { enqueue: async () => { enqueues += 1; } }));
+  assert.deepEqual(result, { status: "noop" });
+  assert.equal(enqueues, 0);
 });
 
 test("pending Codex retains only the exact parent call alias after terminal cleanup", async () => {
