@@ -4,6 +4,24 @@ umask 077
 
 root=${OPENAI_TEAM_STATE_ROOT:?OPENAI_TEAM_STATE_ROOT is required}
 repo=${OPENAI_REPOSITORY_PATH:-$PWD}
+node_path=$(command -v node 2>/dev/null || true)
+[ -n "$node_path" ] || { printf '%s\n' 'Codex lane requires node on inherited PATH' >&2; exit 2; }
+node_version=$("$node_path" --version 2>/dev/null || true); node_version=${node_version#v}
+case "$node_version" in 22.*) ;; *) printf '%s\n' "Codex lane requires Node 22.22.2+ (found ${node_version:-unknown})" >&2; exit 2 ;; esac
+node_minor=${node_version#*.}; node_minor=${node_minor%%.*}; node_patch=${node_version##*.}
+if [ "$node_minor" -lt 22 ] || { [ "$node_minor" -eq 22 ] && [ "$node_patch" -lt 2 ]; }; then printf '%s\n' "Codex lane requires Node 22.22.2+ (found $node_version)" >&2; exit 2; fi
+node_bin_dir=$(dirname "$node_path")
+codex_home=${CODEX_HOME:?CODEX_HOME is required}
+mkdir -p "$codex_home"; chmod 0700 "$codex_home"
+cleanup_node_zdotdir() { [ -n "${node_zdotdir:-}" ] && rm -rf "$node_zdotdir"; }
+node_zdotdir=$(mktemp -d "$codex_home/.codex-node-zdotdir.XXXXXX"); chmod 0700 "$node_zdotdir"
+trap cleanup_node_zdotdir EXIT
+printf '%s\n' 'unsetopt rcs' "export PATH=$(printf '%q' "$node_bin_dir"):\$PATH" > "$node_zdotdir/.zshenv"; chmod 0600 "$node_zdotdir/.zshenv"
+node_lane_path="$node_bin_dir:${PATH:-}"
+if [ "${OPENAI_CODEX_NODE_PROBE:-}" = 1 ] || [ "${1:-}" = --probe-node ]; then
+  ZDOTDIR="$node_zdotdir" PATH="$node_lane_path" /bin/zsh -lc 'command -v node; node --version'
+  cleanup_node_zdotdir; exit 0
+fi
 task=${1:?task required}
 model=${OPENAI_CODEX_MODEL:?OPENAI_CODEX_MODEL is required}
 profile=${OPENAI_CODEX_PROFILE:-standard}
@@ -112,7 +130,7 @@ reclaim_mutex_leave() { local lock=$1 token=$2 mutex="$lock.reclaim" fenced curr
 acquire_breaker_lock() { local deadline=$((SECONDS + ${OPENAI_LOCK_WAIT_SECONDS:-5})) stale pid token fenced stage age current_identity; while :; do stage="$breaker_lock.acquire.$breaker_owner.$RANDOM"; if [ ! -e "$breaker_lock.reclaim" ] && [ ! -e "$breaker_lock" ] && mkdir "$stage" 2>/dev/null; then jq -n --arg token "$breaker_owner" --arg start "$process_identity" --argjson pid "$$" --argjson acquired_at "$(millis)" --argjson lease_ms "$((breaker_lease * 1000))" '{token:$token,pid:$pid,process_start_identity:$start,acquired_at:$acquired_at,heartbeat_at:$acquired_at,lease_ms:$lease_ms}' > "$stage/owner.json"; if perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$stage" "$breaker_lock" 2>/dev/null; then return 0; fi; rm -rf "$stage"; fi; pid=$(jq -r '.pid // empty' "$breaker_lock/owner.json" 2>/dev/null || true); if [ -n "$pid" ]; then current_identity=$(process_start_identity "$pid" || true); if ! kill -0 "$pid" 2>/dev/null || { [ -n "$current_identity" ] && [ "$current_identity" != "$(jq -r '.process_start_identity // empty' "$breaker_lock/owner.json" 2>/dev/null || true)" ]; } || { [ -z "$current_identity" ] && [ "$(millis)" -ge "$(jq -r '((.heartbeat_at // .acquired_at // 0) + ((.lease_ms // 30000)) + 1000)' "$breaker_lock/owner.json" 2>/dev/null || echo 0)" ]; }; then serialized_reclaim "$breaker_lock" "$(cat "$breaker_lock/owner.json" 2>/dev/null || true)" "$breaker_owner.$RANDOM" || true; fi; else age=$(( $(millis) - $(lock_mtime_ms "$breaker_lock") )); [ "$age" -lt "$lock_orphan_grace_ms" ] || serialized_reclaim "$breaker_lock" "" "$breaker_owner.$RANDOM" || true; fi; [ "$SECONDS" -lt "$deadline" ] || { echo "OPENAI_LOCK_TIMEOUT circuit.lock" >&2; return 75; }; sleep 0.05; done; }
  release_breaker_lock() { [ "$(jq -r '.token // empty' "$breaker_lock/owner.json" 2>/dev/null || true)" = "$breaker_owner" ] || return 0; fenced="$breaker_lock.release.$breaker_owner"; mv "$breaker_lock" "$fenced" 2>/dev/null || return 0; if [ "$(jq -r '.token // empty' "$fenced/owner.json" 2>/dev/null || true)" = "$breaker_owner" ]; then rm -rf "$fenced"; else mv "$fenced" "$breaker_lock" 2>/dev/null || true; fi; }
 acquire_breaker_lock
-trap release_breaker_lock EXIT
+trap 'release_breaker_lock; cleanup_node_zdotdir' EXIT
 if [ ! -f "$state" ]; then
   jq -n --arg model "$model" '{state:"CLOSED",model:$model,failures:0,generation:0,opened_at:null,cooldown_seconds:0,last_reason:null}' > "$state"
   chmod 0600 "$state"
@@ -246,6 +264,7 @@ cleanup_child() {
   [ -z "${codex_pid:-}" ] || wait "$codex_pid" 2>/dev/null || true
   scan_command_journal true
   [ -z "$thread_id" ] || persist_recovery "$thread_id" interrupted true || true
+  cleanup_node_zdotdir
 }
 trap 'cleanup_child; exit 143' TERM
 trap 'cleanup_child; exit 130' INT
@@ -253,7 +272,7 @@ set +e
 codex_args=(exec)
 if [ -n "$resume_thread_id" ]; then codex_args+=(resume --model "${OPENAI_CODEX_MODEL:?OPENAI_CODEX_MODEL is required}" -c "model_reasoning_effort=$reasoning_effort" -c "model_auto_compact_token_limit=$compact_token_limit" -c "compact_prompt=\"$compact_prompt\"" --skip-git-repo-check --json "$resume_thread_id" "$resume_prompt")
 else codex_args+=(--model "${OPENAI_CODEX_MODEL:?OPENAI_CODEX_MODEL is required}" -c "model_reasoning_effort=$reasoning_effort" -c "model_auto_compact_token_limit=$compact_token_limit" -c "compact_prompt=\"$compact_prompt\"" --skip-git-repo-check --json --sandbox workspace-write "$execution_task"); fi
-(cd "$repo" && CODEX_HOME="${CODEX_HOME:?CODEX_HOME is required}" "${OPENAI_CODEX_BIN:-codex}" "${codex_args[@]}") > "$out" 2> "$stderr_file" &
+(cd "$repo" && CODEX_HOME="$codex_home" ZDOTDIR="$node_zdotdir" PATH="$node_lane_path" "${OPENAI_CODEX_BIN:-codex}" "${codex_args[@]}") > "$out" 2> "$stderr_file" &
 codex_pid=$!
 last_heartbeat=$(date +%s)
 printf '%s\n' '{"type":"codex_progress","status":"running"}'
@@ -271,6 +290,7 @@ wait "$codex_pid"
 status=$?
 set -e
 trap - TERM INT
+cleanup_node_zdotdir
 scan_command_journal true
 discover_thread
 cli_elapsed="$(( $(millis) - cli_started ))"

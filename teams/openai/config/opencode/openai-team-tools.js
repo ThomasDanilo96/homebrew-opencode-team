@@ -18,6 +18,7 @@ import { addWorkPacketTokensByID, createWorkPacket, incrementWorkPacketByID, lis
 import { TaskStateError, claimTask, completeTask, readTask, transitionTask } from "./task-state.js";
 import { workspaceFingerprint } from "./read-cache.js";
 import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
+import { gateTerminalPacketPatch, lifecycleCleanupOptions } from "./gate-state.js";
 import { GuardrailPolicyError, admitDelegation, admitToolCall, allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, updateStopLatch, writeStopLatch } from "./openai-guardrails.js";
 import { guardToolExecution } from "../../../../shared/tool-output-guard.js";
 import { appendTaskPacketMarker, extractTaskPacketMarker, objectiveBeforeMarker } from "./correlation-marker.js";
@@ -708,7 +709,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const matching = recovery && task && recovery.attempt === task.attempt && Array.isArray(recovery.command_journal);
       if (matching && (recovery.journal_incomplete === true || recovery.command_journal.length > 0)) {
         const packet = (await listWorkPackets()).find((entry) => entry.task_call_id === pending.task_call_id);
-        await updateWorkPacket(pending.task_call_id, manualRecoveryPacketPatch({
+        await updateWorkPacketByID(packet.packet_id, manualRecoveryPacketPatch({
           recovery,
           packet,
           metadata: { error_code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED" },
@@ -720,7 +721,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        } else {
          const packet = (await listWorkPackets()).find((entry) => entry.task_call_id === pending.task_call_id);
          if (matching) {
-           await updateWorkPacket(pending.task_call_id, manualRecoveryPacketPatch({ recovery, packet, metadata: { error_code: "RECOVERY_TERMINATION_UNSEALED" } }));
+            await updateWorkPacketByID(packet.packet_id, manualRecoveryPacketPatch({ recovery, packet, metadata: { error_code: "RECOVERY_TERMINATION_UNSEALED" } }));
            await advanceTask(pending, "PENDING_VERIFICATION", { retryable: false, error_code: "RECOVERY_TERMINATION_UNSEALED", result_summary: "pending_manual_recovery_review" });
            return finalizeReservation(pending, { outcome: "error", result_summary: "RECOVERY_TERMINATION_UNSEALED", sessionID, terminal: false, packet: false });
          }
@@ -730,7 +731,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     // Idle is cleanup only. Successful Codex completion is recorded by its
     // durable gate path, never inferred from a lifecycle callback.
     const summary = eventType === "session.error" ? "SESSION_ERROR" : eventType === "session.deleted" ? "SESSION_DELETED" : "SESSION_IDLE";
-    return finalizeReservation(pending, { outcome: eventType.replace("session.", ""), result_summary: summary, sessionID, terminal, taskAction });
+     return finalizeReservation(pending, lifecycleCleanupOptions(eventType, { outcome: eventType.replace("session.", ""), result_summary: summary, sessionID, terminal, taskAction }));
   };
   const reconcileGateTarget = async (packet) => {
     if (!packet?.task_fingerprint) return packet;
@@ -744,10 +745,13 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         expectedVersion: task.version, expectedStates: ["PENDING_REVIEW", "PENDING_VERIFICATION"], leaseId: task.lease_id,
         patch: { state: "FAILED", retryable: true, error_code: "REVIEW_REJECTED", result_summary: "review_rejected" },
       });
-      if (packet.tester_status === "failed") return transitionTask(packet.task_fingerprint, {
+       if (packet.tester_status === "failed") {
+         await updateWorkPacketByID(packet.packet_id, { phase: "foreground_completion", outcome: "failed", codex_outcome: "failed" });
+         return transitionTask(packet.task_fingerprint, {
         expectedVersion: task.version, expectedStates: ["PENDING_REVIEW", "PENDING_VERIFICATION"], leaseId: task.lease_id,
         patch: { state: "FAILED", retryable: true, error_code: packet.error_code || "TEST_FAILED", result_summary: "tester_failed" },
-      });
+         });
+       }
        let terminalPolicy = null;
        let terminalPolicySessionID = null;
        if (["approved", "not_required"].includes(packet.review_status) && ["passed", "not_required"].includes(packet.tester_status)) {
@@ -789,7 +793,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
            if (reconciled.code === "RECONCILIATION_REQUIRED" || reconciled.code === "RECONCILIATION_PERSISTENCE_FAILED") return task;
            return await readTask(packet.task_fingerprint);
         }
-         await updateWorkPacketByID(packet.packet_id, { phase: "foreground_completion", outcome: "completed" });
+          await updateWorkPacketByID(packet.packet_id, gateTerminalPacketPatch(packet, true));
           const completed = await completeTask(packet.task_fingerprint, { expectedVersion: task.version, leaseId: task.lease_id, result_summary: "gates_passed" });
           await settleGatePolicy(packet, completed);
          return completed;
@@ -1086,7 +1090,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
              const expected = current ? { ...current, task_lease_id: reservation.task_lease_id, codex_home_identity: current.codex_home } : { version: 1, attempt: reservation.attempt, task_lease_id: reservation.task_lease_id, thread_id: terminalHandoff?.thread_id || "", codex_run_id: terminalHandoff?.codex_run_id || "", codex_home: laneHome, codex_home_identity: laneHome };
              try { if (current) await removeRecoveryAndHome(reservation.task_fingerprint, expected); else await removeRecoveryHome(reservation.task_fingerprint, expected); } catch {}
            }
-          if (packetCallID && !preservePending) await updateWorkPacket(packetCallID, { phase: result.gates_pending ? "pending_review" : "codex_terminal", outcome: result.gates_pending ? "pending" : outcome, codex_outcome: outcome, duration_ms: durationMs, profile: modelPlan?.profile || null, requested_model: modelPlan?.requested_model || null, executed_model: executedModel || null, fallback_model: modelPlan?.fallback_model || null, fallback_reason: fallbackReason, fallback_count: fallbackCount });
+           if (packetCallID && !preservePending) await updateWorkPacketByID(packetCallID, { phase: result.gates_pending ? "pending_verification" : "codex_terminal", outcome: result.gates_pending ? "pending" : outcome, codex_outcome: outcome, duration_ms: durationMs, profile: modelPlan?.profile || null, requested_model: modelPlan?.requested_model || null, executed_model: executedModel || null, fallback_model: modelPlan?.fallback_model || null, fallback_reason: fallbackReason, fallback_count: fallbackCount });
           if (reservation?.task_fingerprint && !preservePending) {
             if (outcome === "success" && !result.gates_pending) await completeTask(reservation.task_fingerprint, { expectedVersion: reservation.task_state_version, leaseId: reservation.task_lease_id, result_summary: outcome });
             else if (outcome !== "success") await advanceTask(reservation, "FAILED", { retryable: result.retryable === true, error_code: outcome, result_summary: outcome });
@@ -1123,7 +1127,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         // runner when the selected continuation has a side-effect journal.
         if (recovery && (recovery.journal_incomplete === true || recovery.command_journal.length > 0)) {
           const refusal = codexResult({ ...modelTelemetry(), code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", retryable: false, provider_failure: false, phase: "recovery", task_id: recovery.fingerprint, fingerprint: recovery.fingerprint, attempt: recovery.attempt, version: recovery.version, mutation_count: recovery.command_journal.length, journal_incomplete: recovery.journal_incomplete === true, status: "pending_manual_review", kind: "recovery_side_effect_review_required", progress: progressState });
-          if (packetCallID) await updateWorkPacket(packetCallID, pendingManualRecovery(recovery, { codex_last_kind: "recovery_side_effect_review_required" }));
+           if (packetCallID) await updateWorkPacketByID(packetCallID, pendingManualRecovery(recovery, { codex_last_kind: "recovery_side_effect_review_required" }));
           await advanceTask(reservation, "PENDING_VERIFICATION", { retryable: false, error_code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", result_summary: "pending_manual_recovery_review" });
           await report(refusal);
           await recordCodexTerminal("recovery_side_effect_review_required", { preserve_pending: true });
@@ -1181,7 +1185,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           const persisted = reservation?.task_fingerprint ? await readRecovery(reservation.task_fingerprint) : null;
           if (persisted && (persisted.journal_incomplete === true || persisted.command_journal.length > 0)) {
             const terminal = codexResult({ ...modelTelemetry(), status: "pending_manual_review", kind: "recovery_side_effect_review_required", code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", retryable: false, provider_failure: false, phase: "recovery", task_id: persisted.fingerprint, mutation_count: persisted.command_journal.length, journal_incomplete: persisted.journal_incomplete === true, progress: progressState });
-            if (packetCallID) await updateWorkPacket(packetCallID, pendingManualRecovery(persisted, { codex_last_kind: "recovery_side_effect_review_required" }));
+             if (packetCallID) await updateWorkPacketByID(packetCallID, pendingManualRecovery(persisted, { codex_last_kind: "recovery_side_effect_review_required" }));
             await advanceTask(reservation, "PENDING_VERIFICATION", { retryable: false, error_code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", result_summary: "pending_manual_recovery_review" });
             await report(terminal); await recordCodexTerminal("recovery_side_effect_review_required", { ...terminal, preserve_pending: true }); return JSON.stringify(terminal);
           }
@@ -1196,7 +1200,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
             if (matchingEmptyRecovery && laneHome) { try { await removeOwnedHome(laneHome); } catch {} }
            if (result.kind === "timeout" && !matchingEmptyRecovery) {
                const terminal = codexResult({ ...modelTelemetry(), status: "pending_manual_review", kind: "recovery_side_effect_review_required", code: reservationFingerprint ? "CODEX_RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED" : "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", retryable: false, provider_failure: false, phase: "recovery", task_id: reservationFingerprint, codex_run_id: persisted?.codex_run_id || result.codex_run_id || result.run_id || null, codex_thread_id: persisted?.thread_id || null, mutation_count: persisted?.command_journal?.length || 0, journal_incomplete: persisted?.journal_incomplete === true, progress: progressState });
-             if (packetCallID) await updateWorkPacket(packetCallID, pendingManualRecovery(persisted || {}, { codex_last_kind: "recovery_side_effect_review_required" }));
+              if (packetCallID) await updateWorkPacketByID(packetCallID, pendingManualRecovery(persisted || {}, { codex_last_kind: "recovery_side_effect_review_required" }));
              await advanceTask(reservation, "PENDING_VERIFICATION", { retryable: false, error_code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", result_summary: "pending_manual_recovery_review" });
               await transitionCurrentPolicy(context.sessionID, CODEX_UNKNOWN, { error: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED" });
              await report(terminal); await recordCodexTerminal("recovery_side_effect_review_required", { ...terminal, preserve_pending: true }); return JSON.stringify(terminal);
@@ -1245,7 +1249,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         let output = [result.stdout, result.stderr].filter(Boolean).join("\n");
         const recoveryRefusal = output.split(/\r?\n/).map((line) => { try { return JSON.parse(line); } catch { return null; } }).find((value) => value?.code === "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED");
         if (recoveryRefusal) {
-          if (packetCallID) await updateWorkPacket(packetCallID, pendingManualRecovery(recoveryRefusal, { codex_last_kind: "recovery_side_effect_review_required" }));
+           if (packetCallID) await updateWorkPacketByID(packetCallID, pendingManualRecovery(recoveryRefusal, { codex_last_kind: "recovery_side_effect_review_required" }));
           await advanceTask(reservation, "PENDING_VERIFICATION", { retryable: false, error_code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", result_summary: "pending_manual_recovery_review" });
           const terminal = codexResult({ ...modelTelemetry(), ...recoveryRefusal, status: "pending_manual_review", kind: "recovery_side_effect_review_required", task_id: recoveryRefusal.task_id || reservation?.task_fingerprint || null, progress: progressState });
           await report(terminal);
@@ -1307,7 +1311,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
            if (currentRecovery && (currentRecovery.journal_incomplete === true || currentRecovery.termination_sealed !== true || currentRecovery.journal_scan_complete !== true || !Array.isArray(currentRecovery.command_journal) || currentRecovery.command_journal.length > 0)) {
            const failure = handoff || structuredCircuitOpen() || {};
             const terminal = codexResult({ code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", status: "pending_manual_review", kind: "recovery_side_effect_review_required", retryable: false, provider_failure: false, fallback_reason: failure.fallback_reason || failure.reason || "provider_failure", requested_model: modelPlan.requested_model, executed_model: executedModel, fallback_model: modelPlan.fallback_model, fallback_count: 0 });
-            if (packetCallID) await updateWorkPacket(packetCallID, pendingManualRecovery(currentRecovery, { fallback_reason: terminal.fallback_reason }));
+             if (packetCallID) await updateWorkPacketByID(packetCallID, pendingManualRecovery(currentRecovery, { fallback_reason: terminal.fallback_reason }));
             await advanceTask(reservation, "PENDING_VERIFICATION", { retryable: false, error_code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", result_summary: "pending_manual_recovery_review" });
             await report(terminal); await recordCodexTerminal("recovery_side_effect_review_required", { ...terminal, preserve_pending: true }); return JSON.stringify(terminal);
           }
@@ -1350,7 +1354,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
            if (handoff && Number(handoff.exit_status) === Number(result.status)) result.validated_handoff = true;
         }
         if (packetCallID && handoff?.codex_run_id) {
-          await updateWorkPacket(packetCallID, { codex_run_id: handoff.codex_run_id, codex_thread_id: handoff.thread_id || "", codex_resume_count: handoff.resume_count || 0, codex_last_kind: handoff.reason || "", parent_codex_run_id: handoff.parent_codex_run_id || "" });
+           await updateWorkPacketByID(packetCallID, { codex_run_id: handoff.codex_run_id, codex_thread_id: handoff.thread_id || "", codex_resume_count: handoff.resume_count || 0, codex_last_kind: handoff.reason || "", parent_codex_run_id: handoff.parent_codex_run_id || "" });
            await addWorkPacketTokensByID(packetCallID, "codex", handoff.token_usage || {}, tokenEventHash("codex", handoff.codex_run_id, handoff.codex_run_id));
         }
         // `handoff` is absent for a circuit-open result, so retain the
@@ -1404,7 +1408,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
             }
           }
           if (!recoveryCleared) {
-            if (packetCallID) await updateWorkPacket(packetCallID, pendingManualRecovery(currentRecovery, {
+             if (packetCallID) await updateWorkPacketByID(packetCallID, pendingManualRecovery(currentRecovery, {
               codex_last_kind: "recovery_identity_conflict",
             }));
             await transitionCurrentPolicy(context.sessionID, CODEX_UNKNOWN, { error: "RECOVERY_IDENTITY_CONFLICT" });
@@ -1414,11 +1418,11 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
             await recordCodexTerminal("recovery_identity_conflict", { preserve_pending: true });
             return JSON.stringify(terminal);
           }
-          if (packetCallID) await updateWorkPacket(packetCallID, {
+           if (packetCallID) await updateWorkPacketByID(packetCallID, {
             verification_evidence: verificationEvidence, next_agents: executionPolicy.next_agents, policy_reasons: executionPolicy.reasons,
             review_status: reviewPending ? "pending" : "not_required", tester_required: testerRequired, tester_status: testerRequired ? "pending" : "not_required", verification_status: executionPolicy.verification_status,
             verification_recognized_count: verificationEvidence.summary?.recognized_count || 0, verification_passed_count: verificationEvidence.summary?.passed_count || 0, verification_failed_count: verificationEvidence.summary?.failed_count || 0, verification_truncated_count: verificationEvidence.summary?.truncated_count || 0,
-            phase: gatesPending ? "PENDING_VERIFICATION" : "codex_terminal",
+             phase: gatesPending ? (testerRequired ? "pending_verification" : "pending_review") : "codex_terminal", outcome: gatesPending ? "pending" : "success", codex_outcome: "success",
           });
           await transitionCurrentPolicy(context.sessionID, CODEX_SUCCESS);
           if (gatesPending) await advanceTask(reservation, testerRequired ? "PENDING_VERIFICATION" : "PENDING_REVIEW", { result_summary: "pending_gates" });
