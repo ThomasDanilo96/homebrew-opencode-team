@@ -655,9 +655,8 @@ export const resolveMandatoryTesterPacketForSession = (sessionID, packets = [], 
   const authoritativeReservation = reservation?.role === "tester" && reservation.child_session_id === sessionID &&
     /^[a-f0-9]{64}$/i.test(String(reservation.test_task_id || "")) && reservation.master_parent_session_id === canonicalRootID;
   if (authoritativeReservation) {
-    const packet = (reservation.packet_id || reservation.task_call_id) && packets.find((candidate) =>
-      (!reservation.packet_id || candidate?.packet_id === reservation.packet_id) &&
-      (!reservation.task_call_id || candidate?.task_call_id === reservation.task_call_id));
+    const packet = /^[a-f0-9]{64}$/i.test(String(reservation.packet_id || "")) && packets.find((candidate) =>
+      candidate?.packet_id === reservation.packet_id);
     if (!packet || packet.agent !== "tester" || packet.parent_session_id !== canonicalRootID ||
       packet.test_task_id !== reservation.test_task_id ||
       (packet.child_session_id != null && packet.child_session_id !== sessionID) ||

@@ -147,6 +147,14 @@ test("mandatory resolver binds an unbound durable packet to the authoritative te
   assert.deepEqual(mandatoryTesterToolDecision(resolved, "bash", calculatorCommand), { allowed: true });
 });
 
+test("mandatory resolver uses the durable tester packet ID, not the native reservation call alias", () => {
+  const packet = { packet_id: packetID, task_call_id: packetID, parent_session_id: root, agent: "tester", test_task_id: packetID, tester_status: "pending", verification_commands: JSON.stringify([calculatorCommand]), expected_verification_hashes: JSON.stringify([calculatorHash]) };
+  const reservation = { role: "tester", child_session_id: "tester-child", packet_id: packetID, task_call_id: "call_native_123", test_task_id: packetID, master_parent_session_id: root, gate_target: { verification_commands: [calculatorCommand], expected_verification_hashes: [calculatorHash] } };
+  const resolved = resolveMandatoryTesterPacketForSession("tester-child", [packet], reservation, root);
+  assert.equal(resolved.packet_id, packetID);
+  assert.deepEqual(mandatoryTesterToolDecision(resolved, "bash", calculatorCommand), { allowed: true });
+});
+
 test("mandatory resolver fails closed for contradictory identity, authorization, root, and ambiguity", () => {
   const base = { packet_id: packetID, task_call_id: packetID, parent_session_id: root, agent: "tester", test_task_id: packetID, tester_status: "pending", child_session_id: "tester-child", verification_commands: JSON.stringify([calculatorCommand]), expected_verification_hashes: JSON.stringify([calculatorHash]) };
   const reservation = { role: "tester", child_session_id: "tester-child", packet_id: packetID, task_call_id: packetID, test_task_id: packetID, master_parent_session_id: root, gate_target: { verification_commands: [calculatorCommand], expected_verification_hashes: [calculatorHash] } };
