@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tool } from "./plugin-api.js";
-import { bindExactChildReservation, childSessionIdFromAfter, foregroundChildSessionID, resolveTesterChildSessionID, reservationEligibleForSessionCreated, resolveCorrelatedTesterReservation, sessionCreatedCorrelationDecision } from "./reservation-correlation.js";
+import { bindExactChildReservation, childSessionIdFromAfter, foregroundChildSessionID, resolveTesterChildSessionID, reservationEligibleForSessionCreated, resolveCorrelatedTesterReservation, selectForegroundTesterReservation, sessionCreatedCorrelationDecision } from "./reservation-correlation.js";
 import { handoffMatchesInvocation, handoffPathFromStdout, removeConsumedArtifacts, safeHandoffID, safeInvocationID } from "./openai-handoff.js";
 import { readRecovery, removeRecovery, removeRecoveryAndHome, removeRecoveryHome, recoveryHomeRoot, registerCodexHome, clearCodexHomePointer, RecoveryConflictError } from "./codex-recovery.js";
 import { openCodexCircuit, readCodexCircuitGeneration } from "./codex-circuit.js";
@@ -1878,16 +1878,34 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
      guard = beginRequestCycle(guard, String(output.args?.prompt || output.args?.description || ""), Date.now(), process.env, { preserveVerificationTerminal: true, preserveCodexFailureTerminal: true, preserveVerificationGate: true });
         guardrails.set(input.sessionID, guard);
      }
-        const sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
-        const rootParentForGate = masterParent(input.sessionID);
+         const sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
+         let rootParentForGate = masterParent(input.sessionID);
+         if (sessionAgent === "tester" && rootParentForGate === input.sessionID) {
+           const initialObjective = await resolveInitialObjective(input.sessionID);
+           if (initialObjective?.rootSessionID && initialObjective.rootSessionID !== input.sessionID) {
+             masterParentBySession.set(input.sessionID, initialObjective.rootSessionID);
+             rootParentForGate = initialObjective.rootSessionID;
+           }
+         }
         const testerPackets = sessionAgent === "tester" && typeof input.sessionID === "string"
           ? await (pluginInput.listWorkPackets || listWorkPackets)()
           : [];
-        const correlatedPacketID = typeof input.sessionID === "string" ? packetCallBySession.get(input.sessionID) : null;
-        const correlatedReservation = sessionAgent === "tester"
-          ? resolveCorrelatedTesterReservation(input.sessionID, correlatedPacketID, [...reservations.values()], rootParentForGate)
-          : null;
-        const reservationForTester = correlatedPacketID ? correlatedReservation : reservations.get(input.sessionID);
+         let correlatedPacketID = typeof input.sessionID === "string" ? packetCallBySession.get(input.sessionID) : null;
+         let correlatedReservation = sessionAgent === "tester"
+           ? resolveCorrelatedTesterReservation(input.sessionID, correlatedPacketID, [...reservations.values()], rootParentForGate)
+           : null;
+         let reservationForTester = correlatedPacketID ? correlatedReservation : reservations.get(input.sessionID);
+         if (sessionAgent === "tester" && !reservationForTester && !correlatedPacketID && rootParentForGate !== input.sessionID) {
+           const selected = selectForegroundTesterReservation(input.sessionID, rootParentForGate, [...reservations.entries()]);
+           if (selected) {
+             const [, pending] = selected;
+             pending.provisional_child_session_id = input.sessionID;
+             packetCallBySession.set(input.sessionID, pending.packet_id);
+             correlatedPacketID = pending.packet_id;
+             correlatedReservation = resolveCorrelatedTesterReservation(input.sessionID, correlatedPacketID, [pending], rootParentForGate);
+             reservationForTester = correlatedReservation;
+           }
+         }
         const mandatoryTesterPacket = sessionAgent === "tester"
           ? resolveMandatoryTesterPacketForSession(input.sessionID, testerPackets, reservationForTester, rootParentForGate)
           : null;

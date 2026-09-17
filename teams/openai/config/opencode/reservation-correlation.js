@@ -29,6 +29,17 @@ export const sessionCreatedCorrelationDecision = ({ background, explicitCallID, 
 
 export const reservationEligibleForSessionCreated = (pending) => Boolean(pending && !pending.child_session_id && !pending.provisional_child_session_id);
 
+export const selectForegroundTesterReservation = (childSessionID, canonicalRootID, reservationEntries = []) => {
+  if (typeof childSessionID !== "string" || !childSessionID || typeof canonicalRootID !== "string" || !canonicalRootID || !Array.isArray(reservationEntries)) return null;
+  const candidates = reservationEntries.filter(([, pending]) =>
+    pending?.role === "tester" &&
+    pending.background !== true &&
+    reservationEligibleForSessionCreated(pending) &&
+    pending.master_parent_session_id === canonicalRootID,
+  );
+  return candidates.length === 1 ? candidates[0] : null;
+};
+
 export const resolveCorrelatedTesterReservation = (childSessionID, packetCallID, reservationValues = [], canonicalRootID = childSessionID) => {
   if (typeof childSessionID !== "string" || !childSessionID || typeof packetCallID !== "string" || !packetCallID || !Array.isArray(reservationValues)) return null;
   const exact = (reservation, provisional) => reservation?.role === "tester" &&
