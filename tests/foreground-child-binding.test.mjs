@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
-import { bindExactChildReservation, childSessionIdFromAfter, reservationEligibleForSessionCreated, sessionCreatedCorrelationDecision } from "../teams/openai/config/opencode/reservation-correlation.js";
+import { bindExactChildReservation, childSessionIdFromAfter, foregroundChildSessionID, resolveTesterChildSessionID, reservationEligibleForSessionCreated, sessionCreatedCorrelationDecision } from "../teams/openai/config/opencode/reservation-correlation.js";
+import { testerEvidenceFromMessages } from "../teams/openai/config/opencode/openai-team-tools.js";
 
 const reservation = () => ({
   task_call_id: "call-1", task_fingerprint: "task-1", task_state_version: 7,
@@ -93,6 +94,17 @@ test("session.created correlation only treats authoritative identifiers as durab
   const provisional = { task_call_id: "call-1", provisional_child_session_id: "child-1" };
   assert.equal(reservationEligibleForSessionCreated(provisional), false);
   assert.equal(sessionCreatedCorrelationDecision({ background: false, candidateCallIDs: reservationEligibleForSessionCreated(provisional) ? ["call-1"] : [] }), "none");
+});
+
+test("tester finalization uses the durable child when after metadata is absent", () => {
+  const pending = { child_session_id: "child-1", started_at: 1, verification_commands: ["node --test"] };
+  assert.equal(foregroundChildSessionID({ ...pending, role: "tester" }, undefined), "child-1");
+  assert.equal(resolveTesterChildSessionID(pending, undefined), "child-1");
+  const command = "node --test";
+  const evidence = testerEvidenceFromMessages([{ info: { sessionID: "child-1", role: "assistant", agent: "tester", created: 2 }, parts: [{ type: "tool", tool: "bash", state: { status: "completed", input: { command }, metadata: { exit_code: 0 } } }] }], pending);
+  assert.equal(evidence.summary.status, "passed");
+  assert.throws(() => resolveTesterChildSessionID(pending, { sessionId: "other-child" }), /TEST_CHILD_SESSION_MISMATCH/);
+  assert.throws(() => foregroundChildSessionID({ ...pending, role: "tester" }, { sessionId: "child-1", session_id: "other-child" }), /TEST_CHILD_SESSION_MISMATCH/);
 });
 
 test("exact after binding must match a provisional child", async () => {

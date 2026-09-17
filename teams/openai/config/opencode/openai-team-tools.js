@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tool } from "./plugin-api.js";
-import { bindExactChildReservation, childSessionIdFromAfter, reservationEligibleForSessionCreated, sessionCreatedCorrelationDecision } from "./reservation-correlation.js";
+import { bindExactChildReservation, childSessionIdFromAfter, foregroundChildSessionID, resolveTesterChildSessionID, reservationEligibleForSessionCreated, sessionCreatedCorrelationDecision } from "./reservation-correlation.js";
 import { handoffMatchesInvocation, handoffPathFromStdout, removeConsumedArtifacts, safeHandoffID, safeInvocationID } from "./openai-handoff.js";
 import { readRecovery, removeRecovery, removeRecoveryAndHome, removeRecoveryHome, recoveryHomeRoot, registerCodexHome, clearCodexHomePointer, RecoveryConflictError } from "./codex-recovery.js";
 import { openCodexCircuit, readCodexCircuitGeneration } from "./codex-circuit.js";
@@ -1987,7 +1987,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     const parentGuard = guardrails.get(input.sessionID);
       if (parentGuard) guardrails.set(input.sessionID, finishDelegation(parentGuard, ["tester", "reviewer", "reviewer_critical"].includes(pending.role), pending.delegation_scope));
     try {
-     const foregroundChildID = !pending.background ? childSessionIdFromAfter(output?.metadata) : null;
+       const foregroundChildID = !pending.background ? foregroundChildSessionID(pending, output?.metadata) : null;
       if (!pending.background) await bindExactChildReservation(pending, foregroundChildID, { readTask, advanceTask, updateWorkPacket, updateWorkPacketByID });
      if (!pending.background && pending.role === "codex_executor") {
        const childPacket = (await listWorkPackets()).find((entry) => entry.packet_id === pending.packet_id && entry.child_session_id === foregroundChildID);
@@ -2036,9 +2036,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       else {
        let evidence;
        try {
-          const childID = childSessionIdFromAfter(output?.metadata);
-          if (!pending.child_session_id || childID !== pending.child_session_id) throw new Error("TEST_CHILD_SESSION_MISMATCH");
-          const response = await pluginInput.client?.session.messages({ path: { id: pending.child_session_id } });
+           const childID = resolveTesterChildSessionID(pending, output?.metadata);
+           const response = await pluginInput.client?.session.messages({ path: { id: childID } });
            evidence = testerEvidenceFromMessages(unwrapData(response), { ...pending, ...pending.gate_target });
        } catch {
          evidence = [];
