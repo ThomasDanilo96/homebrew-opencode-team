@@ -65,6 +65,20 @@ assert(path.isAbsolute(daily.mcp.serena.command[0]) && daily.mcp.serena.command[
 assert(daily.plugin.length === 3 && daily.plugin.every(path.isAbsolute), "OPENAI DAILY plugin paths invalid");
 assert(daily.plugin[1].endsWith("/teams/openai/config/opencode/openai-team-tools.js"), "OPENAI DAILY shared tools path invalid");
 
+const serenaMutationPatterns = ["serena_replace_*", "serena_insert_*", "serena_rename_*", "serena_delete_*", "serena_write_*", "serena_safe_delete_*", "serena_edit_*"];
+const serenaReadTools = ["serena_get_symbols_overview", "serena_find_symbol", "serena_find_declaration", "serena_find_implementations", "serena_find_referencing_symbols", "serena_get_diagnostics_for_file", "serena_search_for_pattern", "serena_read_memory", "serena_get_current_config", "serena_activate_project"];
+for (const team of ["openai", "daily"]) {
+  const config = read(team);
+  for (const agent of ["openai_explore", "reviewer", "reviewer_critical", "specialist"]) {
+    const permission = config.agent[agent]?.permission || {};
+    assert(serenaMutationPatterns.every((pattern) => permission[pattern] === "deny"), `${team}/${agent} Serena mutation surface`);
+    assert(permission["serena_*"] !== "deny", `${team}/${agent} read-only Serena access missing`);
+  }
+  const explore = config.agent.openai_explore.permission || {};
+  assert(serenaReadTools.every((tool) => explore[tool] !== "deny"), `${team}/openai_explore read-only Serena tools denied`);
+  assert(!JSON.stringify(config).includes("codegraph_codegraph_explore"), `${team} unsupported codegraph tool exposed`);
+}
+
 for (const team of ["best", "go", "openai", "daily"]) {
   const config = read(team);
   const serialized = JSON.stringify(config);
