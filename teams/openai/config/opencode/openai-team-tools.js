@@ -2273,11 +2273,19 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
          Object.defineProperty(evidence, "summary", { value: { recognized_count: 0, passed_count: 0, failed_count: 0, truncated_count: 0, status: "missing" }, enumerable: false });
        }
        const parsed = { status: evidence.summary?.status === "passed" ? "passed" : "failed", code: evidence.summary?.status === "passed" ? undefined : "TEST_RESULT_INVALID", evidence };
-      const update = await updateWorkPacketByIDIfCurrent(pending.test_task_id, { tester_status: ["pending", "required"] }, { tester_status: parsed.status === "passed" ? "passed" : "failed", ...(parsed.evidence ? { verification_evidence: parsed.evidence } : {}), ...(parsed.code ? { error_code: parsed.code } : {}) });
-      const target = update.packet || validation.packet;
-      await reconcileGateTarget(target);
-      if (update.matched && parsed.status !== "passed") gateError = new Error(parsed.code);
-      }
+       const update = await updateWorkPacketByIDIfCurrent(pending.test_task_id, { tester_status: ["pending", "required"] }, { tester_status: parsed.status === "passed" ? "passed" : "failed", ...(parsed.evidence ? { verification_evidence: parsed.evidence } : {}), ...(parsed.code ? { error_code: parsed.code } : {}) });
+       const target = update.packet || validation.packet;
+       await reconcileGateTarget(target);
+       if (parsed.status === "passed") {
+         await updateWorkPacketByIDIfCurrent(pending.packet_id, { tester_status: ["pending", "required"] }, {
+           phase: "foreground_completion",
+           outcome: "completed",
+           tester_status: "passed",
+           verification_status: "passed",
+         });
+       }
+       if (update.matched && parsed.status !== "passed") gateError = new Error(parsed.code);
+       }
     }
     if (gateEvent) {
       await finalizeReservation(pending, { outcome: "completed", result_summary: gateEvent.code, sessionID: pending.child_session_id || null, terminal: false });
