@@ -531,7 +531,11 @@ export_env() {
   export OPENCODE_CONFIG_DIR="$(dirname "$OPENCODE_CONFIG")"
   export OPENCODE_DISABLE_PROJECT_CONFIG=1
   export OPENCODE_DISABLE_CLAUDE_CODE=1
-  export OMO_PROFILE="$OMO_PROFILE"
+  if [ "${TEAM_NAME:-}" = "opencode-openai-daily" ]; then
+    unset OMO_PROFILE
+  else
+    export OMO_PROFILE="$OMO_PROFILE"
+  fi
   export OMO_SEND_ANONYMOUS_TELEMETRY=0
   export OMO_DISABLE_POSTHOG=1
   export OPENCODE_SERVER_URL="http://127.0.0.1:$PORT"

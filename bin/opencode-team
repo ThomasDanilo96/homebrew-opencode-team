@@ -10,7 +10,7 @@ while [ -h "$SOURCE" ]; do
     *) SOURCE="$SOURCE_DIR/$LINK" ;;
   esac
 done
-PACKAGE_ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+PACKAGE_ROOT="$(cd -L "$(dirname "$SOURCE")/.." && pwd -L)"
 VERSION_FILE="$PACKAGE_ROOT/VERSION"
 SERENA_VERSION="1.7.0"
 
@@ -71,6 +71,7 @@ serena_version_ok() {
 
 validate_profile_config() {
   local team="$1" config_file="$CONFIG_ROOT/$1/opencode.jsonc" xdg_root="$CONFIG_ROOT/$1/xdg-config"
+  validate_generated_surface "$team" || return 1
   if ! OPENCODE_CONFIG="$config_file" \
     OPENCODE_CONFIG_DIR="$(dirname "$config_file")" \
     OPENCODE_DISABLE_PROJECT_CONFIG=1 \
@@ -82,7 +83,82 @@ validate_profile_config() {
     printf '  %-16s INVALID (OpenCode rejected generated config)\n' "$team profile"
     return 1
   fi
+  if [ "$team" = daily ]; then
+    validate_omo_config "$team" || return 1
+  fi
   printf '  %-16s CONFIGURED\n' "$team profile"
+}
+
+validate_generated_surface() {
+  local team="$1" config_file="$CONFIG_ROOT/$team/opencode.jsonc" tui_file="$CONFIG_ROOT/$team/xdg-config/opencode/tui.json"
+  local key value
+  while IFS='=' read -r key value || [ -n "$key" ]; do
+    case "$key" in
+      PRE_SERVER_HOOK|RUNTIME_ENV_HOOK)
+        if [ -n "$value" ] && [ ! -f "$value" ]; then
+          printf '  %-16s INVALID (%s does not exist: %s)\n' "$team profile" "$key" "$value"
+          return 1
+        fi
+        if [ "$key" = PRE_SERVER_HOOK ] && [ -n "$value" ] && [ ! -x "$value" ]; then
+          printf '  %-16s INVALID (%s is not executable: %s)\n' "$team profile" "$key" "$value"
+          return 1
+        fi
+        ;;
+    esac
+  done < "$CONFIG_ROOT/$team/team-runtime.conf"
+  if [ ! -f "$tui_file" ]; then
+    printf '  %-16s INVALID (TUI config missing: %s)\n' "$team profile" "$tui_file"
+    return 1
+  fi
+  GENERATED_CONFIG_FILE="$config_file" GENERATED_TUI_FILE="$tui_file" node <<'NODE'
+const fs = require("node:fs");
+const files = [process.env.GENERATED_CONFIG_FILE, process.env.GENERATED_TUI_FILE];
+for (const file of files) {
+  let value;
+  try { value = JSON.parse(fs.readFileSync(file, "utf8")); }
+  catch (error) { console.error(`${file}: ${error.message}`); process.exit(1); }
+  for (const plugin of value.plugin ?? []) {
+    if (plugin.startsWith("/") && !fs.existsSync(plugin)) {
+      console.error(`${file}: missing plugin: ${plugin}`);
+      process.exit(1);
+    }
+  }
+}
+NODE
+}
+
+validate_omo_config() {
+  local team="$1" dependency_team=openai plugin_cli report
+  plugin_cli="$DATA_ROOT/dependencies/$dependency_team/node_modules/oh-my-openagent/dist/cli-node/index.js"
+  report="$CACHE_ROOT/$team/omo-doctor.json"
+  [ -f "$plugin_cli" ] || {
+    printf '  %-16s INVALID (OMO parser missing: %s)\n' "$team OMO config" "$plugin_cli"
+    return 1
+  }
+  mkdir -p "$(dirname "$report")"
+  env -u OMO_PROFILE \
+    OPENCODE_CONFIG="$CONFIG_ROOT/$team/opencode.jsonc" \
+    OPENCODE_CONFIG_DIR="$CONFIG_ROOT/$team" \
+    OPENCODE_DISABLE_PROJECT_CONFIG=1 \
+    XDG_CONFIG_HOME="$CONFIG_ROOT/$team/xdg-config" \
+    XDG_DATA_HOME="$DATA_ROOT/$team/data" \
+    XDG_CACHE_HOME="$CACHE_ROOT/$team" \
+    XDG_STATE_HOME="$STATE_ROOT/$team" \
+    node "$plugin_cli" doctor --platform opencode --json >"$report" 2>/dev/null || true
+  if ! OMO_DOCTOR_REPORT="$report" node <<'NODE'
+const fs = require("node:fs");
+const report = JSON.parse(fs.readFileSync(process.env.OMO_DOCTOR_REPORT, "utf8"));
+const invalid = report.results?.find((result) => result.name === "Configuration" && result.message?.startsWith("Configuration invalid"));
+if (invalid) {
+  for (const issue of invalid.issues ?? []) console.error(issue.description ?? issue.title);
+  process.exit(1);
+}
+NODE
+  then
+    printf '  %-16s INVALID (OMO parser rejected generated runtime: %s)\n' "$team OMO config" "$report"
+    return 1
+  fi
+  printf '  %-16s VALID\n' "$team OMO config"
 }
 
 ensure_serena() {
@@ -141,6 +217,7 @@ doctor() {
   require_command uv || failed=1
   require_command rg || failed=1
   setup_roots
+  ensure_generated_config_current || failed=1
   if [ -x "$DATA_ROOT/bin/serena" ] && serena_version_ok "$($DATA_ROOT/bin/serena --version 2>/dev/null || true)"; then
     printf '  %-16s OK (%s)\n' "Serena" "$SERENA_VERSION"
   else
@@ -398,6 +475,84 @@ PY
   fi
 }
 
+stale_generated_package_paths() {
+  OPENCODE_TEAM_CONFIG_ROOT="$CONFIG_ROOT" OPENCODE_TEAM_PACKAGE_ROOT="$PACKAGE_ROOT" python3 <<'PY'
+import os
+import pathlib
+import re
+
+config_root = pathlib.Path(os.environ["OPENCODE_TEAM_CONFIG_ROOT"])
+package_root = os.environ["OPENCODE_TEAM_PACKAGE_ROOT"]
+path_pattern = re.compile(r"/(?:[^\"'\s,)]*/)*(?:opencode-team|brew-opencode-team)/[^\"'\s,)]*")
+for path in sorted(config_root.glob("*/**/*")):
+    if not path.is_file() or path.name not in {"team-runtime.conf", "opencode.jsonc", "tui.json", "settings.json"}:
+        continue
+    text = path.read_text(errors="replace")
+    for candidate in path_pattern.findall(text):
+        candidate = candidate.rstrip(".;")
+        if candidate.startswith(package_root):
+            continue
+        if not pathlib.Path(candidate).exists():
+            print(f"{path}: {candidate}")
+PY
+}
+
+refresh_generated_configs() {
+  local team dependency_team hook_source hook_name
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT
+  SERENA_BIN="$DATA_ROOT/bin/serena"
+  export SERENA_BIN
+  [ -x "$SERENA_BIN" ] || {
+    printf 'Cannot refresh stale package config: Serena is missing; run setup\n' >&2
+    return 1
+  }
+  for team in best go openai daily; do
+    dependency_team="$team"
+    [ "$team" = daily ] && dependency_team=openai
+    export OMO_PLUGIN="$DATA_ROOT/dependencies/$dependency_team/node_modules/oh-my-openagent/dist/index.js"
+    [ -f "$OMO_PLUGIN" ] || {
+      printf 'Cannot refresh stale package config: OMO plugin is missing: %s\n' "$OMO_PLUGIN" >&2
+      return 1
+    }
+    mkdir -p "$CONFIG_ROOT/$team/xdg-config/opencode" "$CONFIG_ROOT/$team/claude-config"
+    case "$team" in
+      best) hook_source="$PACKAGE_ROOT/teams/best/patch-omo-hook-timeout.sh"; hook_name=patch-omo-hook-timeout.sh ;;
+      go) hook_source="$PACKAGE_ROOT/teams/go/patch-omo-task-completion.sh"; hook_name=patch-omo-task-completion.sh ;;
+      *) hook_source=""; hook_name="" ;;
+    esac
+    if [ -n "$hook_source" ]; then
+      mkdir -p "$DATA_ROOT/$team/hooks"
+      cp "$hook_source" "$DATA_ROOT/$team/hooks/$hook_name"
+      chmod 700 "$DATA_ROOT/$team/hooks/$hook_name"
+    fi
+    render_template "$PACKAGE_ROOT/teams/$team/team-runtime.conf.template" "$CONFIG_ROOT/$team/team-runtime.conf" || return 1
+    render_template "$PACKAGE_ROOT/teams/$team/opencode.jsonc.template" "$CONFIG_ROOT/$team/opencode.jsonc" || return 1
+    if [ -f "$PACKAGE_ROOT/teams/$team/tui.json.template" ]; then
+      render_template "$PACKAGE_ROOT/teams/$team/tui.json.template" "$CONFIG_ROOT/$team/xdg-config/opencode/tui.json" || return 1
+      chmod 600 "$CONFIG_ROOT/$team/xdg-config/opencode/tui.json"
+    fi
+    if [ -f "$PACKAGE_ROOT/teams/$team/claude-config/settings.json.template" ]; then
+      render_template "$PACKAGE_ROOT/teams/$team/claude-config/settings.json.template" "$CONFIG_ROOT/$team/claude-config/settings.json" || return 1
+      chmod 600 "$CONFIG_ROOT/$team/claude-config/settings.json"
+    fi
+    chmod 600 "$CONFIG_ROOT/$team/team-runtime.conf" "$CONFIG_ROOT/$team/opencode.jsonc"
+  done
+}
+
+ensure_generated_config_current() {
+  setup_roots
+  [ -d "$CONFIG_ROOT" ] || return 0
+  local stale
+  stale="$(stale_generated_package_paths)"
+  if [ -n "$stale" ]; then
+    printf 'Refreshing stale package-owned generated configuration\n' >&2
+    refresh_generated_configs || {
+      printf '%s\n' "$stale" >&2
+      return 1
+    }
+  fi
+}
+
 setup() {
   require_command python3 >/dev/null || { printf 'python3 is required for setup\n' >&2; return 1; }
   require_command npm >/dev/null || { printf 'npm is required for setup\n' >&2; return 1; }
@@ -469,6 +624,7 @@ start_team() {
       ;;
   esac
   setup_roots
+  ensure_generated_config_current || return 1
   local config_file="$CONFIG_ROOT/$team/team-runtime.conf"
   if [ ! -f "$config_file" ]; then
     printf '%s\n' 'OpenCode Team is not configured.' >&2
