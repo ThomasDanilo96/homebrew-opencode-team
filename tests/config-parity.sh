@@ -2,7 +2,7 @@
 set -euo pipefail
 
 : "${OPENCODE_TEAM_HOME:?run setup first with OPENCODE_TEAM_HOME}"
-ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${OPENCODE_TEAM_PACKAGE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
 node - "$OPENCODE_TEAM_HOME" "$ROOT" <<'NODE'
 const fs = require("node:fs");

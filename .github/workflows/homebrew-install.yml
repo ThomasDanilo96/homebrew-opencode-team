@@ -66,7 +66,7 @@ jobs:
             test -f "$required_file"
           done
           node --test "$package_root/shared/response-copy/tests/"*.test.mjs
-          OPENCODE_TEAM_HOME="$test_home" bash "$package_root/tests/config-parity.sh"
+           OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_HOME="$test_home" bash "$GITHUB_WORKSPACE/tests/config-parity.sh"
           ! rg -n '/Users/|\.opencode-team-staging|go-final-ux-v1|best-shared-v1' "$test_home"
           test "$(shasum -a 256 "$test_home/data/dependencies/best/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "a022deff9202c97e922a4a75c357beab420907f724fe9214267dad53fe72455e"
           test "$(shasum -a 256 "$test_home/data/dependencies/go/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "cf01dcad9a7a1b09840bf5f92d0dfb11cc724cdd00f32aa4c5a87af227c5b5bc"
