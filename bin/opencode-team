@@ -69,6 +69,22 @@ serena_version_ok() {
   [[ "$1" == *"$SERENA_VERSION"* ]]
 }
 
+validate_profile_config() {
+  local team="$1" config_file="$CONFIG_ROOT/$1/opencode.jsonc" xdg_root="$CONFIG_ROOT/$1/xdg-config"
+  if ! OPENCODE_CONFIG="$config_file" \
+    OPENCODE_CONFIG_DIR="$(dirname "$config_file")" \
+    OPENCODE_DISABLE_PROJECT_CONFIG=1 \
+    XDG_CONFIG_HOME="$xdg_root" \
+    XDG_DATA_HOME="$DATA_ROOT/$team/data" \
+    XDG_CACHE_HOME="$CACHE_ROOT/$team" \
+    XDG_STATE_HOME="$STATE_ROOT/$team" \
+    opencode debug config >/dev/null 2>&1; then
+    printf '  %-16s INVALID (OpenCode rejected generated config)\n' "$team profile"
+    return 1
+  fi
+  printf '  %-16s CONFIGURED\n' "$team profile"
+}
+
 ensure_serena() {
   local tool_root="$DATA_ROOT/tools/serena" tool_bin="$DATA_ROOT/bin" serena_bin version
   serena_bin="$tool_bin/serena"
@@ -143,8 +159,8 @@ doctor() {
     printf '  %-16s OPTIONAL / missing\n' "GitHub CLI"
   fi
   for team in best go openai daily; do
-    if [ -f "$CONFIG_ROOT/$team/team-runtime.conf" ]; then
-      printf '  %-16s CONFIGURED\n' "$team profile"
+    if [ -f "$CONFIG_ROOT/$team/team-runtime.conf" ] && [ -f "$CONFIG_ROOT/$team/opencode.jsonc" ]; then
+      validate_profile_config "$team" || failed=1
     else
       printf '  %-16s NOT CONFIGURED\n' "$team profile"
       failed=1

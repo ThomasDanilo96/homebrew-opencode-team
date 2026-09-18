@@ -16,6 +16,14 @@ for team in best go openai daily; do
   test -f "$TEST_ROOT/config/$team/team-runtime.conf"
   test -f "$TEST_ROOT/config/$team/opencode.jsonc"
   node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$TEST_ROOT/config/$team/opencode.jsonc"
+  OPENCODE_CONFIG="$TEST_ROOT/config/$team/opencode.jsonc" \
+    OPENCODE_CONFIG_DIR="$TEST_ROOT/config/$team" \
+    OPENCODE_DISABLE_PROJECT_CONFIG=1 \
+    XDG_CONFIG_HOME="$TEST_ROOT/config/$team/xdg-config" \
+    XDG_DATA_HOME="$TEST_ROOT/data/$team/data" \
+    XDG_CACHE_HOME="$TEST_ROOT/cache/$team" \
+    XDG_STATE_HOME="$TEST_ROOT/state/$team" \
+    opencode debug config >/dev/null
 done
 for tui_file in "${TUI_FILES[@]}"; do
   test -f "$tui_file"
@@ -27,6 +35,12 @@ before="$(shasum -a 256 "${CONFIG_FILES[@]}" "${TUI_FILES[@]}")"
 OPENCODE_TEAM_HOME="$TEST_ROOT" "$ROOT/bin/opencode-team" setup >/tmp/opencode-team-setup-smoke-second.out
 after="$(shasum -a 256 "${CONFIG_FILES[@]}" "${TUI_FILES[@]}")"
 test "$before" = "$after"
+printf '%s\n' '{' >"$TEST_ROOT/config/daily/opencode.jsonc"
+if OPENCODE_TEAM_HOME="$TEST_ROOT" "$ROOT/bin/opencode-team" doctor >/dev/null 2>&1; then
+  printf '%s\n' 'doctor accepted an invalid DAILY config' >&2
+  exit 1
+fi
+OPENCODE_TEAM_HOME="$TEST_ROOT" "$ROOT/bin/opencode-team" setup >/dev/null
 mkdir -p "$TEST_ROOT/data/daily/state/team/work-packets"
 printf '%s\n' '{"outcome":"completed","complexity":"TRIVIAL"}' >"$TEST_ROOT/data/daily/state/team/work-packets/0000000000000000000000000000000000000000000000000000000000000001.json"
 report="$(OPENCODE_TEAM_HOME="$TEST_ROOT" "$ROOT/bin/opencode-team" daily-report)"
