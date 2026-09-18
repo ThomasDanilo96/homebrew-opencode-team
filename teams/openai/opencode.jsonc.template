@@ -31,7 +31,7 @@
     "openai_explore": {
       "description": "Fast read-only semantic repository explorer.",
       "model": "openai/gpt-5.6-luna-fast",
-      "permission": { "edit": "deny", "write": "deny" },
+      "permission": { "edit": "deny", "write": "deny", "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false },
       "prompt_append": "For semantic code navigation, use Serena first and read-only. Use grep for exact text, glob for paths, and read for known bounded files."
     },
@@ -57,18 +57,19 @@
     "reviewer": {
       "description": "Read-only correctness, security, and architecture reviewer.",
       "model": "openai/gpt-5.6-sol",
-      "permission": { "edit": "deny", "write": "deny" },
+      "permission": { "edit": "deny", "write": "deny", "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false }
     },
     "reviewer_critical": {
       "description": "Read-only critical-risk security, release, deployment, and data-deletion reviewer.",
       "model": "openai/gpt-6-astra",
-      "permission": { "edit": "deny", "write": "deny" },
+      "permission": { "edit": "deny", "write": "deny", "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false }
     },
     "specialist": {
       "description": "Escalated specialist for difficult independent reasoning.",
       "model": "openai/gpt-6-astra",
+      "permission": { "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false }
     },
     "codex_executor": {
