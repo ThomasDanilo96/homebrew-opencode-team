@@ -33,6 +33,10 @@ test("work packet lease round-trips and canonical ID updates the real packet", (
   assert.equal(counted.tool_call_count, 1);
   assert.equal(counted.opencode_input_tokens, 3);
   assert.equal((await updateWorkPacketByID(packet.packet_id, { child_session_id: "child-1" })).child_session_id, "child-1");
+  const command = 'node -e \'const { multiply } = require("./calculator.js"); if (typeof multiply !== "function") process.exit(1)\'';
+  assert.deepEqual(JSON.parse((await updateWorkPacketByID(packet.packet_id, { verification_commands: [command] })).verification_commands), [command]);
+  assert.equal((await updateWorkPacketByID(packet.packet_id, { packet_id: "f".repeat(64), task_call_id: "corrupt" })).packet_id, packet.packet_id);
+  assert.equal((await listWorkPackets()).find((entry) => entry.packet_id === packet.packet_id).task_call_id, packet.task_call_id);
   assert.equal(await updateWorkPacketByID(packet.packet_id, { child_session_id: "child-2" }), null);
   assert.equal((await updateWorkPacketByID(packet.packet_id, { child_session_id: "child-1" })).child_session_id, "child-1");
 }));

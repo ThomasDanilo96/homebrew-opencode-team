@@ -31,6 +31,16 @@ export const sanitizeStringList = (value) => {
     return cleaned && cleaned.length <= 300 ? [cleaned] : [];
   }).slice(0, 8));
 };
+const sanitizeVerificationCommands = (value) => {
+  let entries = value;
+  if (typeof entries === "string") { try { entries = JSON.parse(entries); } catch { entries = []; } }
+  if (!Array.isArray(entries)) entries = [];
+  return JSON.stringify(entries.flatMap((entry) => {
+    if (typeof entry !== "string" || /[\r\n]/.test(entry)) return [];
+    const cleaned = entry.replace(/\s+/g, " ").replace(/(?:api[ _-]?key|password|token|secret)\s*[:=]\s*[^\s,;]+/gi, (match) => `${match.slice(0, match.search(/[:=]/) + 1)}[REDACTED]`).trim();
+    return cleaned && cleaned.length <= 300 ? [cleaned] : [];
+  }).slice(0, 8));
+};
 export const sanitizeVerificationEvidence = (value) => {
   let entries = value;
   if (typeof entries === "string") { try { entries = JSON.parse(entries); } catch { entries = []; } }
@@ -69,15 +79,23 @@ const clean = (value = {}) => Object.fromEntries(Object.entries(value).flatMap((
     if (key === "tester_dispatch_state" && !["pending", "dispatching", "requested", "observed"].includes(String(entry))) return [];
     const cleaned = redact(entry);
     const fingerprint = key === "task_fingerprint" || key === "workspace_fingerprint";
+    if ((fingerprint || key === "test_task_id" || key === "review_task_id" || key === "gate_target") && !/^[a-f0-9]{64}$/i.test(cleaned)) return [];
     return cleaned && (cleaned.length <= 256 || (fingerprint && /^[a-f0-9]{64,128}$/i.test(cleaned))) ? [[key, cleaned]] : [];
   }
   if (key === "verification_evidence") return [[key, sanitizeVerificationEvidence(entry)]];
+  if (key === "verification_commands") return [[key, sanitizeVerificationCommands(entry)]];
   if (key === "processed_token_event_hashes") return [[key, JSON.stringify(tokenEventHashes(entry))]];
   if (listStrings.has(key)) return [[key, sanitizeStringList(entry)]];
   if (numbers.has(key) && finite(entry) !== undefined && (!cumulativeNumbers.has(key) || entry >= 0)) return [[key, entry]];
   if (booleans.has(key) && typeof entry === "boolean") return [[key, entry]];
   return [];
 }));
+const immutableIdentity = (current, fields) => {
+  const cleaned = clean(fields);
+  if (typeof current?.packet_id === "string") cleaned.packet_id = current.packet_id;
+  if (typeof current?.task_call_id === "string") cleaned.task_call_id = current.task_call_id;
+  return cleaned;
+};
 const lockFor = (callID) => join(root(), `.${idFor(callID)}.lock`);
 const readOwner = async (lock) => { try { return JSON.parse(await readFile(join(lock, "owner.json"), "utf8")); } catch { return null; } };
 // Fencing is deliberately directory-rename based: a releaser must still own the
@@ -144,7 +162,7 @@ export const updateWorkPacket = async (callID, fields = {}) => withLock(callID, 
   try { current = JSON.parse(await readFile(file, "utf8")); } catch { return null; }
   if (fields.child_session_id && current.child_session_id && current.child_session_id !== fields.child_session_id) return null;
   const now = new Date().toISOString();
-  const next = clean({ ...current, ...clean(fields), updated_at: now });
+  const next = clean({ ...current, ...immutableIdentity(current, fields), updated_at: now });
   if ((next.phase === "foreground_completion" || next.phase === "background_completion" || (next.phase === "codex_terminal" && next.outcome && next.outcome !== "pending")) && !next.completed_at) next.completed_at = now;
   await atomicWrite(file, next);
   return next;
@@ -161,7 +179,7 @@ export const updateWorkPacketByID = async (packetID, fields = {}) => {
     if (String(current.packet_id || "").toLowerCase() !== id) return null;
     if (fields.child_session_id && current.child_session_id && current.child_session_id !== fields.child_session_id) return null;
     const now = new Date().toISOString();
-    const next = clean({ ...current, ...clean(fields), updated_at: now });
+    const next = clean({ ...current, ...immutableIdentity(current, fields), updated_at: now });
     if ((next.phase === "foreground_completion" || next.phase === "background_completion" || (next.phase === "codex_terminal" && next.outcome && next.outcome !== "pending")) && !next.completed_at) next.completed_at = now;
     await atomicWrite(file, next);
     return next;
@@ -194,7 +212,7 @@ export const updateWorkPacketByIDIfCurrent = async (packetID, expected = {}, fie
       : current[key] === value);
     if (!matched) return { packet: clean(current), matched: false };
     const now = new Date().toISOString();
-    const next = clean({ ...current, ...clean(fields), updated_at: now });
+    const next = clean({ ...current, ...immutableIdentity(current, fields), updated_at: now });
     if ((next.phase === "foreground_completion" || next.phase === "background_completion" || (next.phase === "codex_terminal" && next.outcome && next.outcome !== "pending")) && !next.completed_at) next.completed_at = now;
     await atomicWrite(file, next);
     return { packet: next, matched: true };

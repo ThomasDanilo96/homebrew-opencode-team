@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { ownerForProcess, canonicalAcquire, serializedReclaim } from "./lock-identity.js";
 
 const root = () => join(process.env.OPENAI_TEAM_STATE_ROOT || "/tmp", "task-state");
-const taskID = (value) => /^[a-f0-9]{64}$/i.test(String(value || "")) ? String(value) : createHash("sha256").update(String(value || "")).digest("hex");
+const taskID = (value) => /^[a-f0-9]{64}$/i.test(String(value || "")) ? String(value).toLowerCase() : createHash("sha256").update(String(value || "")).digest("hex");
 const fileFor = (fingerprint) => join(root(), `${taskID(fingerprint)}.json`);
 const lockFor = (fingerprint) => join(root(), `.${taskID(fingerprint)}.lock`);
 const leaseMs = () => { const value = Number(process.env.OPENAI_TASK_LEASE_MS ?? 1_200_000); return Number.isInteger(value) && value >= 1000 && value <= 3_600_000 ? value : 1_200_000; };
