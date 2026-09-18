@@ -80,7 +80,7 @@ jobs:
         run: |
           export PATH="$(brew --prefix node@22)/bin:$PATH"
           package_root="$(brew --prefix opencode-team)/libexec"
-           test "$(opencode-team version)" = "OpenCode Team 0.1.7"
+           test "$(opencode-team version)" = "OpenCode Team 0.1.8"
           test -f "$package_root/shared/maintenance/run-maintenance.sh"
           test -f "$package_root/shared/maintenance/opencode-cleanup.py"
           test -f "$package_root/shared/maintenance/openai-state-retention.mjs"
