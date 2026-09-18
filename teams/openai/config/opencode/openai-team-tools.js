@@ -606,6 +606,18 @@ const criteriaFrom = (objective) => String(objective || "").split(/\r?\n/).flatM
   return match ? [match[1].trim()] : [];
 });
 const normalizeVerificationCommand = (command) => String(command || "").trim().replace(/\s+/g, " ");
+export const discoverWorkspaceVerificationCommands = async (repository) => {
+  if (typeof repository !== "string" || !repository) return [];
+  const directory = resolve(repository);
+  let entries;
+  try { entries = await readdir(directory, { withFileTypes: true }); } catch { return []; }
+  const candidates = entries
+    .filter((entry) => entry.isFile() && /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(entry.name)
+      && /(?:\.test|\.spec|^test|^spec)\.js$/.test(entry.name))
+    .map((entry) => `node ${entry.name}`)
+    .filter((command) => isAllowlistedVerificationCommand(command));
+  return candidates.length === 1 ? candidates : [];
+};
 export const validatedVerificationAuthorization = (packet = {}) => {
   const recordedHashes = new Set(parseSerializedArray(packet?.expected_verification_hashes)
     .filter((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/i.test(hash))
@@ -1758,11 +1770,19 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
            const reviewPending = executionPolicy.next_agents.some((agent) => agent === "reviewer" || agent === "reviewer_critical");
            const testerRequired = executionPolicy.next_agents.includes("tester");
            const gatesPending = reviewPending || testerRequired;
-           const promotedVerification = promoteVerificationCommands(packet || {}, {
-             authoritative_objective: reservation?.authoritative_objective,
-             objective: packet?.acceptance_criteria,
-             stdout: result.stdout,
-           });
+            let promotedVerification = promoteVerificationCommands(packet || {}, {
+              authoritative_objective: reservation?.authoritative_objective,
+              objective: packet?.acceptance_criteria,
+              stdout: result.stdout,
+            });
+            if (testerRequired && promotedVerification.commands.length === 0) {
+              const discovered = await discoverWorkspaceVerificationCommands(repository);
+              if (discovered.length === 1) promotedVerification = promoteVerificationCommands({ ...(packet || {}), verification_commands: discovered }, {
+                authoritative_objective: reservation?.authoritative_objective,
+                objective: packet?.acceptance_criteria,
+                stdout: result.stdout,
+              });
+            }
           // The record observed before execution is only a resume hint.  A
           // successful handoff may have created or advanced recovery state, so
           // compare against the current durable identity before declaring it
