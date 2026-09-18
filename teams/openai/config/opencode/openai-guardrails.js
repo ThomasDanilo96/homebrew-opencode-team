@@ -1,14 +1,14 @@
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DAILY_COMPLEXITY_TO_GUARDRAIL, dailyFanout } from "../../../daily/daily-policy.mjs";
-import { analyzeObjective } from "./openai-routing.js";
+import { analyzeObjective, MUTATING_INTENT } from "./openai-routing.js";
 
 export const DEFAULT_GUARDRAIL_LIMITS = Object.freeze({ minutes: 15, toolCalls: 20, delegations: 1 });
 const CLASS_LIMITS = Object.freeze({ quick: { minutes: 5, toolCalls: 8, delegations: 1 }, normal: { minutes: 15, toolCalls: 20, delegations: 1 }, complex: { minutes: 45, toolCalls: 50, delegations: 2 }, long: { minutes: 120, toolCalls: 100, delegations: 2 } });
 const DAILY_CLASS_LIMITS = Object.freeze({ quick: { minutes: 5, toolCalls: 8 }, normal: { minutes: 15, toolCalls: 20 }, complex: { minutes: 45, toolCalls: 50 }, long: { minutes: 120, toolCalls: 100 } });
 const BOUNDS = { minutes: [1, 120], toolCalls: [1, 100], delegations: [1, 2] };
 const DAILY_BOUNDS = { minutes: [1, 120], toolCalls: [1, 100], delegations: [0, 10] };
-const STOP = /\b(?:stop|halt|cancel|abort|fermati|ferma|basta|arresta|annulla)\b/i;
+const STOP = /^\s*(?:stop|halt|cancel|abort|fermati|ferma|basta|arresta|annulla)\s*[.!?]*\s*$/iu;
 const RESUME = /\b(?:resume|restart|start|continue|riprendi|ripart(?:i|ire)|avvia|ricomincia)\b/i;
 const INTERNAL = /OMO_INTERNAL_INITIATOR|OH-MY-OPENCODE/i;
 const LONG = /\b(?:authorize|authorise|approved?|consent(?:ed)?)\b[^\n]{0,40}\b(?:long[- ]work|long[- ]running|duration|hours?)\b|\b(?:long[- ]work|long[- ]running|duration|hours?)\b[^\n]{0,40}\b(?:authorize|authorise|approved?|consent)\b/i;
@@ -124,7 +124,6 @@ const normalizedDomainText = (value) => normalizedScopeText(stripResponseFormatC
 const SCOPE_ACTION_WORDS = /\b(?:add(?!\s*\()|create|modify|change|implement|refactor|patch|delete|remove|drop|reset|rm|rename|update|fix|deploy|review|inspect|verify|approve|reject|confirm|completed?|work|run|write|operations?|agents?|otherwise|reason|but|include)\b|新增|添加|修改|更改|实现|重构|补丁|删除|移除|丢弃|重置|修复|确认|同意|批准|\b(?:aggiungi|crea|modifica|cambia|implementa|rifattorizza|elimina|rimuovi|reimposta|correggi|recensisci|verifica|approva|rifiuta|revisar|revisa|eliminar|elimina|borrar|borra)\b/giu;
 const objectiveTokens = (value) => normalizedDomainText(value).replace(SCOPE_ACTION_WORDS, " ").match(/[\p{L}\p{N}]+(?:[._-][\p{L}\p{N}]+)*/gu)?.flatMap((token) => token.split(/[._-]/u).filter((component) => component.length > 2 && !GENERIC_FILENAME_COMPONENTS.has(component))).filter((token) => !GENERIC_OBJECTIVE_TOKENS.has(token)) || [];
 const canonicalParts = (value) => String(value || "").match(/^Parent objective \(verbatim\):\n([\s\S]*?)\nDelegated scope:\n([\s\S]*)$/);
-const MUTATING_INTENT = /(?:\b(?:add(?!\s*\()|create|modify|change|implement|refactor|patch|delete|remove|drop|reset|rm|rename|update|fix|deploy)\b|新增|添加|修改|更改|实现|重构|补丁|删除|移除|丢弃|重置|修复|\b(?:aggiungi|crea|modifica|cambia|implementa|rifattorizza|elimina|rimuovi|reimposta|correggi|revisar|revisa|eliminar|elimina|borrar|borra)\b)/iu;
 const DESTRUCTIVE_INTENT = /(?:\b(?:delet(?:e|ing|ed|ion)|remov(?:e|ing|ed)|drop(?:ping|ped)?|reset(?:ting|ted)?|rm|destroy|erase)\b|删除|移除|丢弃|重置|消除|\b(?:elimina|eliminare|rimuovi|rimuovere|cancella|cancellare|reimposta|eliminar|borrar|borra)\b)/iu;
 const REVIEW_TASK_ID = /\breview_task_id\s*=\s*[a-f0-9]{64}\b/iu;
 const REVIEW_PROTOCOL_WORDS = new Set(["approve", "approves", "approved", "completed", "critical", "findings", "finding", "inspect", "inspection", "reject", "rejects", "result", "results", "review", "reviewed", "verify", "verification", "work"]);

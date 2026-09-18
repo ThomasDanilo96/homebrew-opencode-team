@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { dailyCost, dailyFanout, DAILY_AGENT_MODELS, DAILY_PRICING } from "../teams/daily/daily-policy.mjs";
-import { allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
+import { allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, isStopText, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
 import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
@@ -45,10 +45,14 @@ test("Daily template enables only orchestrator shell access and runtime forwards
   assert.match(template, /"interactive_bash": true/);
   assert.match(template, /"edit": "deny"/);
   assert.match(template, /"write": "deny"/);
+  assert.match(template, /"skill_mcp": "deny"/);
+  assert.match(template, /CodeGraph and skill_mcp are unavailable/);
   assert.match(template, /"openai_run_codex": false/);
   const premium = await readFile(new URL("../teams/openai/opencode.jsonc.template", import.meta.url), "utf8");
   assert.match(premium, /"bash": "deny"/);
   assert.match(premium, /"interactive_bash": "deny"/);
+  assert.match(premium, /"skill_mcp": "deny"/);
+  assert.match(premium, /CodeGraph and skill_mcp are unavailable/);
   const runtime = await readFile(new URL("../core/bin/team-runtime", import.meta.url), "utf8");
   assert.match(runtime, /OPENCODE_AUTH_SOURCE OPENAI_CODEX_AUTH_SOURCE SSH_AUTH_SOCK SSH_AGENT_PID/);
   assert.match(runtime, /\[\s*"\$\{!auth_var\+x\}"\s*=\s*x\s*\]/);
@@ -90,6 +94,40 @@ test("Routing ignores explicitly negated mutations without hiding genuine mutati
   assert.equal(analyzeObjective("do not ever modify files").classification, "READ_ONLY");
   assert.equal(analyzeObjective("do not modify files, but delete the file").classification, "MUTATING");
   assert.equal(analyzeObjective("do not modify files; then delete the file").classification, "MUTATING");
+});
+
+test("Italian and English mutation scopes bind across languages without widening authority", () => {
+  const italianParent = `Esegui un test controllato sul repository corrente.
+
+Aggiungi a calculator.js la funzione multiply(a, b).
+Esportala insieme alle funzioni esistenti.
+
+Poi modifica calculator.test.js per importare multiply
+e aggiungi assert.equal(multiply(4, 5), 20).`;
+  const englishChild = `Use the normal DAILY flow and modify only the current repository.
+
+In calculator.js, add function multiply(a, b) and export it.
+
+In calculator.test.js, import multiply and add
+assert.equal(multiply(4, 5), 20).
+
+Do not modify any other files.`;
+  assert.equal(analyzeObjective(italianParent).classification, "MUTATING");
+  assert.equal(analyzeObjective(englishChild).classification, "MUTATING");
+  assert.notEqual(canonicalDelegatedObjective(italianParent, englishChild), "");
+  assert.notEqual(canonicalDelegatedObjective(englishChild, italianParent), "");
+  assert.equal(canonicalDelegatedObjective(italianParent, "modify unrelated billing secrets"), "");
+});
+
+test("Conditional, negated, and quoted STOP mentions do not latch while standalone commands do", () => {
+  for (const text of ["Se fallisce, fermati", "Non fermarti", "Spiegami quando usare stop", "La parola è 'stop'"]) {
+    assert.equal(isStopText(text), false, text);
+    assert.equal(updateStopLatch({ stopped: false }, text).stopped, false, text);
+  }
+  for (const text of ["Fermati", "Stop", "Annulla", "Basta"]) {
+    assert.equal(isStopText(text), true, text);
+    assert.equal(updateStopLatch({ stopped: false }, text).stopped, true, text);
+  }
 });
 
 test("Serena project activation is read-only for the authorship guard", async () => {

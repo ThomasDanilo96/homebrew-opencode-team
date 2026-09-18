@@ -5,7 +5,7 @@ const REPOSITORY_MUTATING_TOOLS = new Set([
   "create_file", "remove_file", "move_file", "multi_edit", "write_file", "patch",
 ]);
 const READ_ONLY_AGENTS = new Set(["openai_explore", "openai_librarian", "specialist", "reviewer", "reviewer_critical", "tester"]);
-const MUTATING_ACTION = /\b(?:add(?!\s*(?:\(|[,.:]))|create|modify|change|implement|refactor|migrat(?:e|ion)?|patch|delete|rename|update|deploy)\b|\bfix(?:es|ed|ing)?\s+(?!(?:already|existing|applied)\b)|\bwrite\s+(?:code|file|files|script|tests?|implementation|changes?|operations?)\b|\b(?:apply|make)\s+(?:the\s+)?(?:changes?|edits?|fix(?:es)?|patch(?:es)?)\b|\brun\s+(?:any\s+)?write\s+operations?\b/i;
+export const MUTATING_INTENT = /(?:\b(?:add(?!\s*(?:\(|[,.:]))|create|modify|change|implement|refactor|migrat(?:e|ion)?|patch|delete|remove|drop|reset|rm|rename|update|fix|deploy)\b|\bwrite\s+(?:code|file|files|script|tests?|implementation|changes?|operations?)\b|\b(?:apply|make)\s+(?:the\s+)?(?:changes?|edits?|fix(?:es)?|patch(?:es)?)\b|\brun\s+(?:any\s+)?write\s+operations?\b|新增|添加|修改|更改|实现|重构|补丁|删除|移除|丢弃|重置|修复|\b(?:aggiungi|crea|modifica|cambia|implementa|rifattorizza|elimina|rimuovi|reimposta|correggi|revisar|revisa|eliminar|borrar|borra)\b)/iu;
 const NEGATED_MUTATION = /\b(?:make\s+no\s+edits?|no\s+edits?)\b|\b(?:do\s+not|don['’]t|must\s+not|never)\s+(?:(?:(?![.;]|\bthen\b).)*?\b(?:run\s+)?(?:any\s+)?write\s+operations?\b|(?:(?:ever|also|actually|just)\s+)*(?:add(?!\s*\()|create|modify|change|implement|refactor|migrat(?:e|ion)?|patch|delete|rename|update|deploy|fix(?:es|ed|ing)?|write\s+(?:code|file|files|script|tests?|implementation|changes?)|(?:apply|make)\s+(?:the\s+)?(?:changes?|edits?|fix(?:es)?|patch(?:es)?))(?:\s+(?:or|and)\s+(?:add(?!\s*\()|create|modify|change|implement|refactor|migrat(?:e|ion)?|patch|delete|rename|update|deploy|fix(?:es|ed|ing)?|write\s+(?:code|file|files|script|tests?|implementation|changes?)|(?:apply|make)\s+(?:the\s+)?(?:changes?|edits?|fix(?:es)?|patch(?:es)?)))*\b)/gi;
 const READ_ONLY_ACTION = /\b(?:analy[sz]e|inspect|audit|research|compare|review|map|understand|report|profile|investigate|find|read|propose|document|test|verify)\b/i;
 const REMOTE_CONTEXT = /\b(?:ssh|remote|server|vps|docker(?:\s+(?:ps|inspect|logs|images|stats|info)|\s+containers?)?|systemctl|journalctl|remote\s+logs?|host\s+diagnostics?|deployment\s+state)\b/i;
@@ -42,7 +42,7 @@ export const analyzeObjective = (objective) => {
       text: clauseText,
       // History/proposal language may qualify a request, but never neutralizes an
       // unquoted mutation verb in that same clause.
-      intent: MUTATING_ACTION.test(mutationClausePlain) && !PROPOSAL.test(clausePlain) ? "MUTATING" : READ_ONLY_ACTION.test(clausePlain) ? "READ_ONLY" : "AMBIGUOUS",
+      intent: MUTATING_INTENT.test(mutationClausePlain) && !PROPOSAL.test(clausePlain) ? "MUTATING" : READ_ONLY_ACTION.test(clausePlain) ? "READ_ONLY" : "AMBIGUOUS",
       remote: REMOTE_CONTEXT.test(clausePlain),
     };
   });
