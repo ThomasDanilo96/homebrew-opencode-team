@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { dailyCost, dailyFanout, DAILY_AGENT_MODELS, DAILY_PRICING } from "../teams/daily/daily-policy.mjs";
 import { allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
 import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
-import { latestUserObjective, resolveInitialObjectiveFromClient } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { latestUserObjective, OpenAITeamTools, resolveInitialObjectiveFromClient } from "../teams/openai/config/opencode/openai-team-tools.js";
 
 test("Daily shell policy is bounded by the genuine objective", () => {
   const env = { OPENAI_DAILY_PROFILE: "1" };
@@ -95,6 +97,30 @@ test("Serena project activation is read-only for the authorship guard", async ()
   await assert.doesNotReject(() => guard["tool.execute.before"]({
     agent: "openai_orchestrator", sessionID: "serena-read-only-test", tool: "serena_activate_project",
   }, { args: {} }));
+});
+
+test("Guardrail task denials are recorded without prompt contents", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openai-policy-denial-"));
+  const previous = process.env.OPENAI_TEAM_STATE_ROOT;
+  process.env.OPENAI_TEAM_STATE_ROOT = root;
+  try {
+    const client = { session: {
+      get: async () => ({ data: { id: "policy-root" } }),
+      messages: async () => ({ data: [] }),
+    } };
+    const plugin = await OpenAITeamTools({ client, listWorkPackets: async () => [] });
+    await assert.rejects(
+      () => plugin["tool.execute.before"]({ tool: "task", sessionID: "policy-root", agent: "openai_orchestrator" }, { args: { prompt: "secret-token inspect unrelated repository" } }),
+      /OBJECTIVE_UNBOUND/,
+    );
+    const log = await readFile(join(root, "logs", "authorship-guard.log"), "utf8");
+    assert.match(log, /policy_denied session_id=policy-root agent=openai_orchestrator tool=task policy_reason=OBJECTIVE_UNBOUND decision=BLOCK/);
+    assert.doesNotMatch(log, /secret-token|unrelated repository/);
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_TEAM_STATE_ROOT;
+    else process.env.OPENAI_TEAM_STATE_ROOT = previous;
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("Child review wording cannot override an explicitly requested read-only agent", () => {
@@ -292,6 +318,7 @@ test("Objective recovery selects the latest root user message and safely follows
     messages: async ({ path: { id } }) => ({ data: messages[id] }),
   } };
   assert.equal(latestUserObjective(messages.root), "Review the current fixture");
+  assert.equal(latestUserObjective({ messages: messages.root }), "Review the current fixture");
   const resolved = await resolveInitialObjectiveFromClient(client, "child");
   assert.deepEqual(resolved, { objective: "Review the current fixture", parentSessionID: "root", rootSessionID: "root" });
 });

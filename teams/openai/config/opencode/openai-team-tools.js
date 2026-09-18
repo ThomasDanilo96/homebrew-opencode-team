@@ -54,7 +54,8 @@ const PREMIUM_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-sol", openai
 const DAILY_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-luna", openai_explore: "openai/gpt-5.6-luna", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-luna", reviewer: "openai/gpt-5.6-terra", reviewer_critical: "openai/gpt-5.6-sol", specialist: "openai/gpt-5.6-terra", codex_executor: "openai/gpt-5.6-luna" };
 export const DEFAULT_AGENT_MODELS = process.env.OPENAI_DAILY_PROFILE === "1" ? DAILY_AGENT_MODELS : PREMIUM_AGENT_MODELS;
 export const latestUserObjective = (messages = []) => {
-  const latest = [...(Array.isArray(messages) ? messages : [])].reverse().find((message) => message?.info?.role === "user");
+  const entries = Array.isArray(messages) ? messages : Array.isArray(messages?.messages) ? messages.messages : [];
+  const latest = [...entries].reverse().find((message) => message?.info?.role === "user");
   const text = (latest?.parts || []).filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n").trim();
   return text || null;
 };
@@ -795,6 +796,15 @@ const recordObjectiveEvent = async (event, sessionID, parentSessionID, callID, a
   const path = objectiveLogPath();
   await mkdir(join(path, ".."), { recursive: true });
   await appendFile(path, `${new Date().toISOString()} ${event} ${sessionID || "-"} ${parentSessionID || "-"} ${callID || "-"} ${authorityState || "NONE"} ${action}\n`, { mode: 0o600 });
+};
+const recordPolicyDenial = async (input, error, agent) => {
+  const reason = String(error?.code || error?.message || "POLICY_ERROR").replace(/^OPENAI_GUARDRAIL_/, "").split(/[^A-Za-z0-9_]/u, 1)[0] || "POLICY_ERROR";
+  const sessionID = safeField(input?.sessionID || "-", 120) || "-";
+  const toolName = safeField(input?.tool || "-", 80) || "-";
+  const actor = safeField(agent || input?.agent || "unknown", 80) || "unknown";
+  const path = objectiveLogPath();
+  await mkdir(join(path, ".."), { recursive: true });
+  await appendFile(path, `${new Date().toISOString()} policy_denied session_id=${sessionID} agent=${actor} tool=${toolName} policy_reason=${reason} decision=BLOCK\n`, { mode: 0o600 });
 };
 
 export const OpenAITeamTools = async (pluginInput = {}) => {
@@ -1901,8 +1911,9 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     openai_remote_read: createRemoteReadTool(pluginInput.runRemoteRead),
   },
   "tool.execute.before": async (input, output) => {
-    guardToolExecution({ team: "openai", input, output });
-    const toolName = String(input.tool || "").toLowerCase();
+    try {
+      guardToolExecution({ team: "openai", input, output });
+      const toolName = String(input.tool || "").toLowerCase();
      let guard = await guardrailFor(input.sessionID);
      if (toolName === "task" && guard && !guard.authoritativeObjective) {
        const initialObjective = await resolveInitialObjective(input.sessionID);
@@ -2227,6 +2238,14 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       await pruneWorkPackets();
     } catch (error) {
       await finalizeReservation(reservations.get(input.callID), { outcome: "error", result_summary: "ADMISSION_SETUP_FAILED", terminal: false, taskAction: "fail" });
+      throw error;
+    }
+    } catch (error) {
+      if (error instanceof GuardrailPolicyError || String(error?.code || "").startsWith("OPENAI_GUARDRAIL_")) {
+        let agent = input.agent || null;
+        if (!agent) agent = await resolveSessionAgent(input.sessionID);
+        try { await recordPolicyDenial(input, error, agent); } catch {}
+      }
       throw error;
     }
   },
