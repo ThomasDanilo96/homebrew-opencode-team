@@ -16,7 +16,7 @@ for task in best-tool-output-gc best-retention openai-retention; do
   test -f "$plist"
   plutil -lint "$plist"
   rg -q "/opt/homebrew/bin/opencode-team" "$plist"
-  ! rg -q '/Users/thomasd|\.opencode-team-staging|/Cellar/' "$plist"
+  ! rg -q '/Users/|\.opencode-team-staging|/Cellar/' "$plist"
 done
 
 before="$(shasum -a 256 "$agent_root"/*.plist)"
