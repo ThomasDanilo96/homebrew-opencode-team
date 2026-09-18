@@ -6,6 +6,7 @@ ROOT="${OPENCODE_TEAM_PACKAGE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && 
 
 node - "$OPENCODE_TEAM_HOME" "$ROOT" <<'NODE'
 const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 
 const [home, root] = process.argv.slice(2);
@@ -77,6 +78,25 @@ for (const team of ["openai", "daily"]) {
   const explore = config.agent.openai_explore.permission || {};
   assert(serenaReadTools.every((tool) => explore[tool] !== "deny"), `${team}/openai_explore read-only Serena tools denied`);
   assert(!JSON.stringify(config).includes("codegraph_codegraph_explore"), `${team} unsupported codegraph tool exposed`);
+  const env = {
+    ...process.env,
+    OPENCODE_CONFIG: path.join(home, "config", team, "opencode.jsonc"),
+    OPENCODE_CONFIG_DIR: path.join(home, "config", team),
+    OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+    OPENCODE_DISABLE_CLAUDE_CODE: "1",
+    XDG_CONFIG_HOME: path.join(home, "config", team, "xdg-config"),
+    XDG_DATA_HOME: path.join(home, "data", team, "data"),
+    XDG_CACHE_HOME: path.join(home, "cache", team),
+    XDG_STATE_HOME: path.join(home, "state", team),
+  };
+  for (const agent of ["openai_orchestrator", "openai_explore"]) {
+    const resolved = spawnSync("opencode", ["debug", "agent", agent], { cwd: root, env, encoding: "utf8" });
+    assert(resolved.status === 0, `${team}/${agent} runtime config rejected: ${resolved.stderr}`);
+    const effective = JSON.parse(resolved.stdout);
+    const denied = new Set((effective.permission || []).filter((entry) => entry.action === "deny").map((entry) => entry.permission));
+    assert(denied.has("skill_mcp"), `${team}/${agent} effective skill_mcp surface`);
+    assert(denied.has("codegraph_*"), `${team}/${agent} effective codegraph surface`);
+  }
 }
 
 for (const team of ["best", "go", "openai", "daily"]) {
