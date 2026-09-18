@@ -27,7 +27,7 @@ jobs:
           sw_vers
           uname -m
           brew --prefix
-           test "$(opencode-team version)" = "OpenCode Team 0.1.7"
+           test "$(opencode-team version)" = "OpenCode Team 0.1.8"
           node --version
           opencode --version
           python3 --version
@@ -37,7 +37,7 @@ jobs:
           rg --version
           package_root="$(brew --prefix opencode-team)/libexec"
           test -x "$package_root/bin/opencode-team"
-           test "$(opencode-team version)" = "OpenCode Team 0.1.7"
+           test "$(opencode-team version)" = "OpenCode Team 0.1.8"
 
       - name: Clean-room setup and doctor
         run: |
