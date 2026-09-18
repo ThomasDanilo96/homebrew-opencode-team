@@ -25,6 +25,41 @@ test("only latest user turn is exported", () => {
   assert.doesNotMatch(result.text, /new-user/);
 });
 
+test("keeps the complete logical response across compaction", () => {
+  const a1 = assistant("a1", "u1");
+  const a2 = assistant("a2", "u1");
+  const a3 = assistant("a3", "continuation");
+  const final = assistant("final", "continuation");
+  const c1 = { id: "c1", parentID: "p", agent: "explore", model: { providerID: "test", id: "child" } };
+  const c2 = { id: "c2", parentID: "p", agent: "tester", model: { providerID: "test", id: "child" } };
+  const task = (id, messageID, sessionId) => ({ id, messageID, sessionID: "p", type: "tool", tool: "task", state: { status: "completed", metadata: { sessionId, parentSessionId: "p" } } });
+  const compactionUser = { id: "compact-user", role: "user", sessionID: "p", time: { created: 4 } };
+  const continuation = { id: "continuation", role: "user", sessionID: "p", time: { created: 5 } };
+  const result = exportLatestResponse({
+    parentSession: parent,
+    messages: {
+      p: [user("u1"), a1, a2, compactionUser, continuation, a3, final],
+      c1: [user("c1-user"), assistant("c1-answer", "c1-user")],
+      c2: [user("c2-user"), assistant("c2-answer", "c2-user")],
+    },
+    parts: {
+      "compact-user": [{ type: "compaction" }],
+      continuation: [{ type: "text", synthetic: true, text: "synthetic summary" }],
+      a1: [task("task-1", "a1", "c1"), text("a1-text", "a1", "A1"), { type: "tool", tool: "apply_patch", state: { input: { patchText: "P1" } } }],
+      a2: [text("a2-text", "a2", "A2")],
+      a3: [task("task-2", "a3", "c2"), text("a3-text", "a3", "A3"), { type: "tool", tool: "apply_patch", state: { input: { patchText: "P2" } } }],
+      final: [text("final-text", "final", "FINAL")],
+      "c1-answer": [text("c1-text", "c1-answer", "C1")],
+      "c2-answer": [text("c2-text", "c2-answer", "C2")],
+    },
+    sessions: new Map([["c1", c1], ["c2", c2]]),
+    statuses: new Map(),
+  });
+  assert.equal(result.status, "ready");
+  for (const marker of ["A1", "P1", "C1", "A2", "A3", "P2", "C2", "FINAL"]) assert.match(result.text, new RegExp(marker));
+  assert.doesNotMatch(result.text, /synthetic summary|reasoning|parentSessionId/);
+});
+
 test("includes a current child and excludes an old or unrelated child", () => {
   const a = assistant("a");
   const child = { id: "c", parentID: "p", agent: "explore", model: { providerID: "test", id: "child" } };
@@ -71,7 +106,7 @@ test("renders recognized tools, failures, redaction, bounds, and source order", 
     { type: "tool", tool: "grep", state: { input: { pattern: "NEW", path: "." }, output: "file.txt:NEW", status: "completed" } },
     { type: "tool", tool: "glob", state: { input: { pattern: "*.txt", path: "." }, output: "file.txt", status: "completed" } },
     { type: "tool", tool: "bash", state: { input: { command: "curl -H 'Authorization: Bearer secret'" }, error: "GH_TOKEN=secret", status: "error" } },
-    { type: "tool", tool: "unknown", state: { input: { command: "RAW_JSON" }, output: "RAW_JSON" } },
+    { type: "tool", tool: "unknown", state: { input: { raw: "RAW_JSON" }, output: "RAW_JSON" } },
     text("t2", "a", "after"),
   ];
   const result = fixture([user("u"), a], { a: parts });
@@ -106,11 +141,36 @@ test("renders real mutation and metadata-backed tool output", () => {
   assert.match(result.text, /\$ npm test[\s\S]*PASS tests\/app\.test\.js/);
 });
 
+test("preserves the beginning and end of a large patch", () => {
+  const a = assistant("a");
+  const source = ["const PATCH_BEGIN = true;", ...Array.from({ length: 300 }, (_, index) => `const line${index} = ${index};`), "const PATCH_END = true;"].join("\n");
+  const result = fixture([user("u"), a], { a: [{ type: "tool", tool: "apply_patch", state: { input: { patchText: source }, status: "completed" } }] });
+  assert.match(result.text, /PATCH_BEGIN/);
+  assert.match(result.text, /PATCH_END/);
+  assert.doesNotMatch(result.text, /tool output truncated/);
+});
+
 test("bounds very large tool output", () => {
   const a = assistant("a");
-  const result = fixture([user("u"), a], { a: [{ type: "tool", tool: "bash", state: { input: { command: "large" }, output: "x".repeat(5000), status: "completed" } }] });
+  const result = fixture([user("u"), a], { a: [{ type: "tool", tool: "bash", state: { input: { command: "large" }, output: "x".repeat(13000), status: "completed" } }] });
   assert.match(result.text, /\[tool output truncated\]/);
-  assert.ok(result.text.length < 4300);
+  assert.ok(result.text.length < 12500);
+});
+
+test("redacts all required secret forms in visible tool output", () => {
+  const a = assistant("a");
+  const output = [
+    "Authorization: Bearer bearer-secret",
+    "GH_TOKEN=gh-secret",
+    "GITHUB_TOKEN=github-secret",
+    "API_KEY=api-secret",
+    "PASSWORD=password-secret",
+    "COOKIE=cookie-secret",
+    "-----BEGIN PRIVATE KEY-----\\nprivate-secret\\n-----END PRIVATE KEY-----",
+  ].join("\n");
+  const result = fixture([user("u"), a], { a: [{ type: "tool", tool: "bash", state: { input: { command: "print-secrets" }, output, status: "completed" } }] });
+  assert.match(result.text, /<redacted>/);
+  for (const secret of ["bearer-secret", "gh-secret", "github-secret", "api-secret", "password-secret", "cookie-secret", "private-secret"]) assert.doesNotMatch(result.text, new RegExp(secret));
 });
 
 test("preserves visible parent output around a tool cycle", () => {

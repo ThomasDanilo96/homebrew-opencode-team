@@ -5,7 +5,10 @@ export function visibleTextParts(parts = []) {
     .filter(Boolean);
 }
 
-const MAX_TOOL_OUTPUT = 4000;
+const MAX_PATCH_OUTPUT = 200000;
+const MAX_CODE_OUTPUT = 200000;
+const MAX_COMMAND_OUTPUT = 12000;
+const MAX_SEARCH_OUTPUT = 12000;
 const KNOWN_TOOLS = new Set(["edit", "write", "create", "bash", "test", "read", "grep", "glob"]);
 
 function redact(value) {
@@ -17,9 +20,9 @@ function redact(value) {
     .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gi, "<redacted private key>");
 }
 
-function bounded(value) {
+function bounded(value, limit) {
   const text = redact(value).trim();
-  return text.length > MAX_TOOL_OUTPUT ? `${text.slice(0, MAX_TOOL_OUTPUT)}\n[tool output truncated]` : text;
+  return text.length > limit ? `${text.slice(0, limit)}\n[tool output truncated]` : text;
 }
 
 function pathOf(input) {
@@ -37,29 +40,30 @@ function formatTool(part) {
   const result = part.state?.error ?? part.state?.output ?? metadata.output;
   if (typeof metadata.diff === "string" && Array.isArray(metadata.files)) {
     const files = metadata.files.filter((file) => typeof file === "string").join(", ") || pathOf(input);
-    return `← Patched ${files}\n\n${bounded(metadata.diff)}`;
+    return `← Patched ${files}\n\n${bounded(metadata.diff, MAX_PATCH_OUTPUT)}`;
   }
-  if (typeof input.patchText === "string") return `← Applied patch\n\n${bounded(input.patchText)}`;
+  if (typeof input.patchText === "string") return `← Applied patch\n\n${bounded(input.patchText, MAX_PATCH_OUTPUT)}`;
   if (typeof input.oldString === "string" && typeof input.newString === "string") {
-    return `← Patched ${pathOf(input)}\n\n${diff(input.oldString, input.newString)}`;
+    return `← Patched ${pathOf(input)}\n\n${bounded(diff(input.oldString, input.newString), MAX_PATCH_OUTPUT)}`;
   }
-  if (typeof input.content === "string" && (tool === "write" || tool === "create")) {
-    const content = bounded(input.content);
+  if (typeof input.content === "string" && (tool === "write" || tool === "create" || input.filePath || input.path)) {
+    const content = bounded(input.content, MAX_CODE_OUTPUT);
     return `# Created ${pathOf(input)}${content ? `\n\n${content}` : ""}`;
   }
-  if (!KNOWN_TOOLS.has(tool)) return undefined;
-  if (tool === "edit") return `← Patched ${pathOf(input)}\n\n${diff(input.oldString, input.newString)}`;
+  if (!KNOWN_TOOLS.has(tool) && typeof input.command !== "string") return undefined;
+  if (tool === "edit") return `← Patched ${pathOf(input)}\n\n${bounded(diff(input.oldString, input.newString), MAX_PATCH_OUTPUT)}`;
   if (tool === "write" || tool === "create") {
-    const content = bounded(input.content);
+    const content = bounded(input.content, MAX_CODE_OUTPUT);
     return `# Created ${pathOf(input)}${content ? `\n\n${content}` : ""}`;
   }
   if (tool === "bash" || tool === "test") {
-    const command = bounded(input.command);
-    return `$ ${command}${result ? `\n\n${bounded(result)}` : ""}`;
+    const command = bounded(input.command, MAX_COMMAND_OUTPUT);
+    return `$ ${command}${result ? `\n\n${bounded(result, MAX_COMMAND_OUTPUT)}` : ""}`;
   }
-  if (tool === "read") return `→ Read ${pathOf(input)}${result ? `\n\n${bounded(result)}` : ""}`;
-  if (tool === "grep") return `✱ Grep "${redact(input.pattern)}" in ${redact(input.path || ".")}${result ? `\n\n${bounded(result)}` : ""}`;
-  return `✱ Glob "${redact(input.pattern)}" in ${redact(input.path || ".")}${result ? `\n\n${bounded(result)}` : ""}`;
+  if (tool === "read") return `→ Read ${pathOf(input)}${result ? `\n\n${bounded(result, MAX_SEARCH_OUTPUT)}` : ""}`;
+  if (tool === "grep") return `✱ Grep "${redact(input.pattern)}" in ${redact(input.path || ".")}${result ? `\n\n${bounded(result, MAX_SEARCH_OUTPUT)}` : ""}`;
+  if (tool === "glob") return `✱ Glob "${redact(input.pattern)}" in ${redact(input.path || ".")}${result ? `\n\n${bounded(result, MAX_SEARCH_OUTPUT)}` : ""}`;
+  return `$ ${bounded(input.command, MAX_COMMAND_OUTPUT)}${result ? `\n\n${bounded(result, MAX_COMMAND_OUTPUT)}` : ""}`;
 }
 
 export function safeVisibleToolParts(parts = []) {
@@ -71,7 +75,7 @@ export function safeVisibleToolParts(parts = []) {
 
 export function eligiblePartText(parts = []) {
   return parts.flatMap((part) => {
-    if (part?.type === "text" && !part.ignored && typeof part.text === "string") return [part.text.trim()].filter(Boolean);
+    if (part?.type === "text" && !part.ignored && typeof part.text === "string") return [redact(part.text).trim()].filter(Boolean);
     if (part?.type === "tool") return safeVisibleToolParts([part]);
     return [];
   });
