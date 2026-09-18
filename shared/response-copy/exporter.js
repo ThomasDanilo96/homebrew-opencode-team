@@ -33,21 +33,39 @@ function partsOf(source, messageID) {
   return chronological([...(source?.[messageID] ?? [])]);
 }
 
-function latestUser(messages) {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.role === "user") return { message: messages[index], index };
-  }
-  return undefined;
+function hasPartRecord(source, messageID) {
+  if (typeof source === "function") return true;
+  if (source instanceof Map) return source.has(messageID);
+  return Boolean(source && Object.prototype.hasOwnProperty.call(source, messageID));
 }
 
-function currentAssistantMessages(messages) {
-  const boundary = latestUser(messages);
+function isLogicalTurnUser(message, partsSource) {
+  if (message?.role !== "user") return false;
+  const parts = partsOf(partsSource, idOf(message));
+  if (!parts.length) return true;
+  return parts.some((part) => part?.type === "text" && !part.synthetic && !part.ignored);
+}
+
+function currentAssistantMessages(messages, partsSource) {
+  const hasPersistedUserParts = messages.some((message) => message?.role === "user" && hasPartRecord(partsSource, idOf(message)));
+  let boundary;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if ((!hasPersistedUserParts && messages[index]?.role === "user") || isLogicalTurnUser(messages[index], partsSource)) {
+      boundary = { message: messages[index], index };
+      break;
+    }
+  }
   if (!boundary) return { user: undefined, assistants: [] };
-  const assistants = [];
-  for (let index = boundary.index + 1; index < messages.length; index += 1) {
+  const logicalUserIDs = new Set();
+  for (let index = boundary.index; index < messages.length; index += 1) {
     const message = messages[index];
-    if (message?.role === "user") break;
-    if (message?.role === "assistant" && message.parentID === idOf(boundary.message)) assistants.push(message);
+    if (message?.role !== "user") continue;
+    if (index !== boundary.index && isLogicalTurnUser(message, partsSource)) break;
+    logicalUserIDs.add(idOf(message));
+  }
+  const assistants = [];
+  for (const message of messages) {
+    if (message?.role === "assistant" && logicalUserIDs.has(message.parentID)) assistants.push(message);
   }
   return { user: boundary.message, assistants };
 }
@@ -75,7 +93,7 @@ function sessionIsBusy(status) {
 function describeChild(session, messagesSource, partsSource, sessions, statuses, visited, launchOrder) {
   if (!session || visited.has(session.id)) return undefined;
   visited.add(session.id);
-  const { assistants } = currentAssistantMessages(messagesOf(messagesSource, session.id));
+  const { assistants } = currentAssistantMessages(messagesOf(messagesSource, session.id), partsSource);
   const text = [];
   const nested = [];
   let lastMessage;
@@ -102,7 +120,7 @@ function flattenChildren(children) {
 
 export function exportLatestResponse({ parentSession, messages, parts, sessions = new Map(), statuses = new Map() }) {
   const parentMessages = messagesOf(messages, parentSession.id);
-  const { user, assistants } = currentAssistantMessages(parentMessages);
+  const { user, assistants } = currentAssistantMessages(parentMessages, parts);
   const parentTexts = [];
   const finalTexts = [];
   const selectedChildren = [];

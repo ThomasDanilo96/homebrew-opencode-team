@@ -176,3 +176,48 @@ test("loads nested children when task parent metadata is absent", async () => {
   assert.match(clipboard, /SUBAGENT: librarian[\s\S]*nested output/);
   assert.match(clipboard, /FINAL RESPONSE/);
 });
+
+test("discovers children launched before and after compaction", async () => {
+  const childBefore = { id: "child-before", parentID: "parent", agent: "explore", model: { providerID: "test", id: "child" } };
+  const childAfter = { id: "child-after", parentID: "parent", agent: "tester", model: { providerID: "test", id: "child" } };
+  const sessions = { parent, "child-before": childBefore, "child-after": childAfter };
+  const parentMessages = [
+    { id: "u1", role: "user", sessionID: "parent", time: { created: 1 } },
+    { id: "a1", role: "assistant", sessionID: "parent", parentID: "u1", agent: "orchestrator", time: { created: 2 } },
+    { id: "compact-user", role: "user", sessionID: "parent", time: { created: 3 } },
+    { id: "continuation", role: "user", sessionID: "parent", time: { created: 4 } },
+    { id: "a2", role: "assistant", sessionID: "parent", parentID: "continuation", agent: "orchestrator", time: { created: 5 } },
+  ];
+  const task = (id, sessionId, parentSessionId = undefined) => ({ id, type: "tool", tool: "task", state: { status: "completed", metadata: { sessionId, parentSessionId } } });
+  const childMessages = (id, text) => [
+    { id: `${id}-user`, role: "user", sessionID: id, time: { created: 1 } },
+    { id: `${id}-assistant`, role: "assistant", sessionID: id, parentID: `${id}-user`, agent: sessions[id].agent, time: { created: 2 } },
+  ];
+  const parts = {
+    u1: [{ type: "text", text: "request" }],
+    a1: [task("before-task", "child-before", "parent"), { type: "text", text: "before work" }],
+    "compact-user": [{ type: "compaction" }],
+    continuation: [{ type: "text", synthetic: true, text: "summary" }],
+    a2: [task("after-task", "child-after"), { type: "text", text: "after work" }],
+    "child-before-assistant": [{ type: "text", text: "before child" }],
+    "child-after-assistant": [{ type: "text", text: "after child" }],
+  };
+  let clipboard;
+  const api = {
+    route: { current: { name: "session", params: { sessionID: "parent" } } },
+    client: { session: {
+      get: async ({ sessionID }) => ({ data: sessions[sessionID] }),
+      messages: async ({ sessionID }) => {
+        const messages = sessionID === "parent" ? parentMessages : childMessages(sessionID);
+        return { data: messages.map((info) => ({ info, parts: parts[info.id] ?? [] })) };
+      },
+      status: async () => ({ data: Object.fromEntries(Object.keys(sessions).map((id) => [id, { type: "idle" }])) }),
+    } },
+    renderer: { copyToClipboardOSC52: async (value) => { clipboard = value; } },
+    ui: { toast: () => {} },
+  };
+  await copyResponse(api);
+  assert.match(clipboard, /SUBAGENT: explore[\s\S]*before child/);
+  assert.match(clipboard, /SUBAGENT: tester[\s\S]*after child/);
+  assert.doesNotMatch(clipboard, /summary|parentSessionId/);
+});

@@ -2,20 +2,32 @@ function responseData(response) {
   return response?.data;
 }
 
-function taskPartsForCurrentTurn(messages, parts) {
+function isLogicalTurnUser(message, parts) {
+  if (message?.role !== "user") return false;
+  const messageParts = parts.get(message.id) ?? [];
+  if (!messageParts.length) return true;
+  return messageParts.some((part) => part?.type === "text" && !part.synthetic && !part.ignored);
+}
+
+function taskPartsForLogicalResponse(messages, parts) {
   let userIndex = -1;
   for (let index = messages.length - 1; index >= 0; index -= 1) {
-    if (messages[index]?.role === "user") {
+    if (isLogicalTurnUser(messages[index], parts)) {
       userIndex = index;
       break;
     }
   }
   if (userIndex < 0) return [];
-  const tasks = [];
-  for (let index = userIndex + 1; index < messages.length; index += 1) {
+  const logicalUserIDs = new Set();
+  for (let index = userIndex; index < messages.length; index += 1) {
     const message = messages[index];
-    if (message?.role === "user") break;
-    if (message?.role !== "assistant" || message.parentID !== messages[userIndex]?.id) continue;
+    if (message?.role !== "user") continue;
+    if (index !== userIndex && isLogicalTurnUser(message, parts)) break;
+    logicalUserIDs.add(message.id);
+  }
+  const tasks = [];
+  for (const message of messages) {
+    if (message?.role !== "assistant" || !logicalUserIDs.has(message.parentID)) continue;
     for (const part of parts.get(message.id) ?? []) {
       if (part?.type === "tool" && part.tool === "task") tasks.push(part);
     }
@@ -44,7 +56,7 @@ export async function loadResponseGraph(api, parentSessionID) {
       parts.set(entry.info.id, entry.parts ?? []);
     }
     messages.set(sessionID, sessionMessages);
-    for (const task of taskPartsForCurrentTurn(sessionMessages, parts)) {
+    for (const task of taskPartsForLogicalResponse(sessionMessages, parts)) {
       const childID = task.state?.metadata?.sessionId;
       const taskParentID = task.state?.metadata?.parentSessionId;
       if (typeof childID !== "string" || (taskParentID && taskParentID !== sessionID)) continue;
