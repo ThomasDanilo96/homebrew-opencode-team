@@ -1,8 +1,8 @@
 class OpencodeTeam < Formula
   desc "Portable runtime foundation for OpenCode Team"
   homepage "https://github.com/ThomasDanilo96/homebrew-opencode-team"
-  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.4.tar.gz"
-  sha256 "4eea1e59f2a82f8f3e6df7560c98c96a2128b71fd5aa8a27b86810038e15baa7"
+  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.5.tar.gz"
+  sha256 "27e566b523f0d8c3e85b052fc2d0f53f5dc2be9d396f7a392813c49597fd52be"
   license "MIT"
 
   depends_on "anomalyco/tap/opencode"
