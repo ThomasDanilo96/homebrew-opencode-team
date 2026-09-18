@@ -4,7 +4,13 @@ const hash = (value) => createHash("sha256").update(String(value)).digest("hex")
 const unsafe = /(?:[|;&<>`]|\$\(|\|\||\r|\n)/;
 const safePath = (value) => /^(?:tests\/)?[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(value) && !value.includes("..") && !value.startsWith("/");
 const testFilePath = (value) => safePath(value) && /(?:^|\/)(?:tests?|spec)\//.test(value) || safePath(value) && /(?:test|spec)\.[A-Za-z0-9]+$/.test(value);
+const safeNodeEval = (command) => {
+  const match = command.match(/^node\s+-e\s+(['"])([\s\S]*)\1$/);
+  if (!match || match[2].length > 2000 || /(?:child_process|process\.env|writeFile|appendFile|unlink|rename|mkdir|rmSync|exec\s*\(|spawn\s*\(|eval\s*\(|Function\s*\(|fetch\s*\()/i.test(match[2])) return false;
+  return /^[A-Za-z0-9_.$/\\'"{}()[\]=*!?:,+;\-\s]+$/.test(match[2]) && /\brequire\s*\(/.test(match[2]);
+};
 const commandCategory = (command) => {
+  if (safeNodeEval(command)) return "node_eval";
   if (unsafe.test(command) || /\s-c(?:\s|$)|\bnode\s+-e\b/.test(command)) return null;
   const argv = command.trim().split(/\s+/);
   if (!argv.length || argv.some((part) => !part)) return null;
@@ -27,6 +33,16 @@ const commandCategory = (command) => {
   if (argv[0] === "eslint" && argv.slice(1).length && argv.slice(1).every((part) => part === "--fix-dry-run" || safePath(part))) return "eslint";
   return null;
 };
+const normalizedCommandFromExecution = (value) => {
+  const raw = String(value || "").trim();
+  if (isAllowlistedVerificationCommand(raw)) return raw.replace(/\s+/g, " ");
+  const nodeEval = raw.match(/\bnode\s+-e\s+(['"])([\s\S]*)$/);
+  if (!nodeEval) return null;
+  let body = nodeEval[2].replace(/["']{1,4}$/, "");
+  body = body.replace(/["']+(?=!==|===|!=|==|<=|>=|[<>])/, "");
+  const command = `node -e '${body}'`;
+  return commandCategory(command) === "node_eval" ? command.replace(/\s+/g, " ") : null;
+};
 
 export const verificationCommandCategory = (command) => commandCategory(command);
 export const isAllowlistedVerificationCommand = (command) => commandCategory(command) !== null;
@@ -48,7 +64,7 @@ export const parseVerificationEvidence = (jsonl) => {
       const event = JSON.parse(line);
       const item = event?.item || event;
       if (item?.type !== "command_execution") continue;
-      const command = String(item.command ?? item.cmd ?? item.command_line ?? "");
+       const command = normalizedCommandFromExecution(item.command ?? item.cmd ?? item.command_line);
       const command_name = commandCategory(command);
       const exit = Number(item.exit_code ?? item.exitCode ?? item.status);
       if (!command_name || !Number.isInteger(exit)) continue;

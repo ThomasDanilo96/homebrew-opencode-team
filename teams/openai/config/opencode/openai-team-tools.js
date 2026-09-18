@@ -262,7 +262,8 @@ const tokenBudget = (agent, input) => {
 };
 const CODEX_SUMMARY_MAX_CHARS = 8192;
 const COMPACTION_CONTEXT_MAX_CHARS = 6000;
-const codexResult = (fields = {}) => ({
+const canonicalLifecycleID = (value) => typeof value === "string" && /^[a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : null;
+export const codexResult = (fields = {}) => ({
   code: "CODEX_COMPLETED",
   retryable: false,
   phase: "codex_execution",
@@ -270,6 +271,7 @@ const codexResult = (fields = {}) => ({
   provider_failure: false,
   codex_profile: null,
   ...fields,
+  ...(Object.fromEntries(["packet_id", "task_id", "test_task_id"].flatMap((key) => key in fields ? [[key, canonicalLifecycleID(fields[key])]] : []))),
 });
 const unwrapData = (value) => value?.data ?? value;
 const oneLine = (value, limit = 300) => String(value ?? "").replace(/\s+/g, " ").trim().slice(0, limit);
@@ -733,12 +735,31 @@ const commandsFromAuthorizedText = (text) => {
   }
   return candidates;
 };
+const normalizedCommandFromExecution = (value) => {
+  const raw = String(value || "").trim();
+  if (isAllowlistedVerificationCommand(raw)) return normalizeVerificationCommand(raw);
+  const nodeEval = raw.match(/\bnode\s+-e\s+(['"])([\s\S]*)$/);
+  if (!nodeEval) return null;
+  let body = nodeEval[2].replace(/["']{1,4}$/, "");
+  body = body.replace(/["']+(?=!==|===|!=|==|<=|>=|[<>])/, "");
+  const command = `node -e '${body}'`;
+  return isAllowlistedVerificationCommand(command) ? normalizeVerificationCommand(command) : null;
+};
+const commandsFromObjective = (objective) => {
+  const text = String(objective || "");
+  const file = text.match(/(?:only|file|modify|edit)\s+([A-Za-z0-9._/-]+\.js)\b/i)?.[1];
+  const functionName = text.match(/(?:function|add function)\s+([A-Za-z_$][A-Za-z0-9_$]*)\s*\(/i)?.[1];
+  if (!file || !functionName || file.includes("..")) return [];
+  const command = `node -e 'const { ${functionName} } = require("./${file}"); if (typeof ${functionName} !== "function") process.exit(1)'`;
+  return isAllowlistedVerificationCommand(command) ? [command] : [];
+};
 const commandsFromValidatedJSONL = (jsonl) => String(jsonl || "").split(/\r?\n/).flatMap((line) => {
   try {
     const event = JSON.parse(line), item = event?.item || event;
     if (String(item?.type || "").toLowerCase() !== "command_execution") return [];
     const command = item.command ?? item.cmd ?? item.command_line;
-    return typeof command === "string" ? [command] : [];
+    const normalized = normalizedCommandFromExecution(command);
+    return normalized ? [normalized] : [];
   } catch { return []; }
 });
 export const promoteVerificationCommands = (packet = {}, sources = {}) => {
@@ -752,7 +773,7 @@ export const promoteVerificationCommands = (packet = {}, sources = {}) => {
   const objective = [...objectiveTexts, ...criteriaTexts].filter((value) => typeof value === "string").join("\n");
   const jsonl = typeof sources === "object" && sources !== null && !Array.isArray(sources)
     ? sources.stdout ?? sources.jsonl ?? sources.result?.stdout ?? sources.result : "";
-  const candidates = [...existing, ...commandsFromAuthorizedText(objective), ...commandsFromValidatedJSONL(jsonl)];
+  const candidates = [...existing, ...commandsFromAuthorizedText(objective), ...commandsFromValidatedJSONL(jsonl), ...commandsFromObjective(objective)];
   const commands = [];
   const seen = new Set();
   for (const candidate of candidates) {

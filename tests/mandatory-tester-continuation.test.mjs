@@ -4,7 +4,8 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext, isMandatoryTesterPacketForSession, resolveMandatoryTesterPacketForSession, mandatoryTesterToolDecision, mandatoryTesterCommandOnlyError } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { codexResult, createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext, isMandatoryTesterPacketForSession, resolveMandatoryTesterPacketForSession, mandatoryTesterToolDecision, mandatoryTesterCommandOnlyError } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { verificationCommandCategory, parseVerificationEvidence } from "../teams/openai/config/opencode/execution-policy.js";
 import { gateTerminalPacketPatch } from "../teams/openai/config/opencode/gate-state.js";
 import { claimTask, completeTask, readTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
 import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
@@ -653,4 +654,30 @@ test("idle dispatch is single-flight and requested does not watchdog-fail", asyn
 test("Codex after-hook is not an initial mandatory-tester dispatch trigger", () => {
   assert.equal(mandatoryTesterDispatchTrigger("tool.execute.after"), false);
   assert.equal(mandatoryTesterDispatchTrigger("session.idle"), true);
+});
+
+test("bounded Codex node verification is captured and replay-authorized", () => {
+  const command = `node -e 'const { multiply } = require("./calculator.js"); if (multiply(4,5) !== 20) process.exit(1)'`;
+  const hash = createHash("sha256").update(command).digest("hex");
+  const promoted = promoteVerificationCommands({}, { stdout: JSON.stringify({ item: { type: "command_execution", command, exit_code: 0 } }) });
+  assert.equal(verificationCommandCategory(command), "node_eval");
+  assert.deepEqual(promoted, { commands: [command], hashes: [hash], criteria: [] });
+  const evidence = parseVerificationEvidence(JSON.stringify({ item: { type: "command_execution", command, exit_code: 0 } }));
+  assert.equal(evidence.summary.status, "passed");
+  assert.equal(isAuthorizedTesterVerificationCommand({ verification_commands: JSON.stringify([command]), expected_verification_hashes: JSON.stringify([hash]) }, command), true);
+  const wrapped = `/bin/zsh -lc "sed -n '1,220p' calculator.js && node -e 'const { multiply } = require(\\"./calculator.js\\"); if (multiply(4,5) "'!== 20) process.exit(1)'"'"`;
+  const wrappedEvidence = parseVerificationEvidence(JSON.stringify({ item: { type: "command_execution", command: wrapped, exit_code: 0 } }));
+  assert.equal(wrappedEvidence.summary.status, "passed");
+  const derived = promoteVerificationCommands({}, { authoritative_objective: "modify only calculator.js. add function multiply(a, b) returning a * b and export it alongside add." });
+  assert.deepEqual(derived.commands, ['node -e \'const { multiply } = require("./calculator.js"); if (typeof multiply !== "function") process.exit(1)\'']);
+});
+
+test("terminal lifecycle IDs stay canonical and do not reflect appended output", () => {
+  const packetID = "f9a11ed2a5e5dae1bb22c7eadd2d257d71b923664fe4a2ebce9288979c0c2b2d";
+  const terminal = codexResult({ packet_id: packetID, task_id: packetID, test_task_id: packetID });
+  assert.equal(terminal.packet_id, packetID);
+  assert.equal(terminal.task_id, packetID);
+  assert.equal(terminal.test_task_id, packetID);
+  assert.match(terminal.packet_id, /^[a-f0-9]{64}$/);
+  assert.equal(codexResult({ packet_id: `${packetID}${packetID.repeat(8)}` }).packet_id, null);
 });
