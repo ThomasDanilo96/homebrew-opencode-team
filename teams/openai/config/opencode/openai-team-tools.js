@@ -581,11 +581,12 @@ export const testerEvidenceFromMessages = (messages, pending = {}) => {
       if (String(part?.type || "").toLowerCase() !== "tool" || String(part?.tool || part?.name || "").toLowerCase() !== "bash") continue;
       const state = part.state || {};
       const status = String(state.status || part.status || "").toLowerCase();
+      if (status !== "completed") continue;
       const metadata = state.metadata || part.metadata || {};
       const input = state.input || part.input || part.args || {};
       const command = input.command ?? input.cmd;
       const exit = metadata.exit_code ?? metadata.exitCode ?? metadata.exit ?? state.exit_code ?? part.exit_code;
-      if (!validMessage || status !== "completed" || typeof command !== "string" || !Number.isInteger(exit) || !isAllowlistedVerificationCommand(command)) { invalid = true; continue; }
+      if (!validMessage || typeof command !== "string" || !Number.isInteger(exit) || !isAllowlistedVerificationCommand(command)) { invalid = true; continue; }
        const commandHash = createHash("sha256").update(command).digest("hex");
         if (!expectedHashes.has(commandHash)) continue;
        evidence.push({ command_hash: commandHash, command_name: verificationCommandCategory(command), exit_code: exit });

@@ -382,6 +382,26 @@ test("deterministic mandatory tester lifecycle reaches completed PASS", async ()
   assert.equal(packet.outcome, "completed");
 });
 
+test("denied tester Bash attempts are ignored before completed evidence", () => {
+  const command = "node calculator.test.js";
+  const packet = { child_session_id: "tester-child", started_at: new Date(0).toISOString(), verification_commands: [command], expected_verification_hashes: [calculatorHash] };
+  const messages = [
+    { info: { role: "assistant", agent: "tester", sessionID: "tester-child", time: { created: 1 } }, parts: [{ type: "tool", tool: "bash", state: { status: "error", input: { command: "rm calculator.test.js" }, error: "denied" } }] },
+    { info: { role: "assistant", agent: "tester", sessionID: "tester-child", time: { created: 2 } }, parts: [{ type: "tool", tool: "bash", state: { status: "completed", input: { command }, metadata: { exit_code: 0 } } }] },
+  ];
+  const evidence = testerEvidenceFromMessages(messages, packet);
+  assert.equal(evidence.summary.status, "passed");
+  assert.equal(evidence.summary.recognized_count, 1);
+  assert.equal(evidence.summary.invalid, undefined);
+});
+
+test("denied-only tester Bash evidence remains missing", () => {
+  const command = "node calculator.test.js";
+  const evidence = testerEvidenceFromMessages([{ info: { role: "assistant", agent: "tester", sessionID: "tester-child", time: { created: 1 } }, parts: [{ type: "tool", tool: "bash", state: { status: "error", input: { command } } }] }], { child_session_id: "tester-child", started_at: new Date(0).toISOString(), verification_commands: [command], expected_verification_hashes: [calculatorHash] });
+  assert.equal(evidence.summary.status, "missing");
+  assert.equal(evidence.summary.recognized_count, 0);
+});
+
 test("verification promotion extracts inline prose and preserves serialized durable arrays", () => {
   const command = "node calculator.test.js";
   const promoted = promoteVerificationCommands({
