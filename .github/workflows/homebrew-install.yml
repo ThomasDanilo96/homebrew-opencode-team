@@ -73,10 +73,7 @@ jobs:
           node --test "$package_root/shared/response-copy/tests/"*.test.mjs
           OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" bash "$GITHUB_WORKSPACE/tests/config-parity.sh"
           ! rg -n '/Users/|\.opencode-team-staging|go-final-ux-v1|best-shared-v1' "$test_home/config" "$test_home/state" "$test_home/cache/runtime"
-          printf 'BEST OMO SHA: '; shasum -a 256 "$shared_dependencies/best/node_modules/oh-my-openagent/dist/index.js"
-          printf 'GO OMO SHA: '; shasum -a 256 "$shared_dependencies/go/node_modules/oh-my-openagent/dist/index.js"
-          set -x
-          test "$(shasum -a 256 "$shared_dependencies/best/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "a022deff9202c97e922a4a75c357ecbeab420907f724fe9214267dad53fe72455e"
+          test "$(shasum -a 256 "$shared_dependencies/best/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "a022deff9202c97e922a4a75c357beab420907f724fe9214267dad53fe72455e"
           test "$(shasum -a 256 "$shared_dependencies/go/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "cf01dcad9a7a1b09840bf5f92d0dfb11cc724cdd00f32aa4c5a87af227c5b5bc"
 
       - name: Formula test and audit
