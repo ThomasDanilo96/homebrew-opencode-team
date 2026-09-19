@@ -24,7 +24,14 @@ usage() {
     '  opencode-team daily [--resume SESSION]' \
     '  opencode-team start <best|go|openai|daily> [--resume SESSION]' \
     '  opencode-team daily-report [--markdown]' \
-    '  opencode-team maintenance <best-tool-output-gc|best-retention|openai-retention|status>' \
+    '  opencode-team runtime-status' \
+    '  opencode-team runtime-gc [--apply]' \
+    '  opencode-team storage-accounting' \
+    '  opencode-team runtime-quota' \
+    '  opencode-team time-machine-exclude [--apply]' \
+    '  opencode-team time-machine-status' \
+    '  opencode-team legacy-classify [path ...]' \
+    '  opencode-team maintenance <best-tool-output-gc|best-retention|openai-retention|runtime-gc|status>' \
     '  opencode-team version'
 }
 
@@ -129,7 +136,7 @@ NODE
 
 validate_omo_config() {
   local team="$1" dependency_team=openai plugin_cli report
-  plugin_cli="$DATA_ROOT/dependencies/$dependency_team/node_modules/oh-my-openagent/dist/cli-node/index.js"
+  plugin_cli="$DEPENDENCY_ROOT/$dependency_team/node_modules/oh-my-openagent/dist/cli-node/index.js"
   report="$CACHE_ROOT/$team/omo-doctor.json"
   [ -f "$plugin_cli" ] || {
     printf '  %-16s INVALID (OMO parser missing: %s)\n' "$team OMO config" "$plugin_cli"
@@ -162,9 +169,14 @@ NODE
 }
 
 ensure_serena() {
-  local tool_root="$DATA_ROOT/tools/serena" tool_bin="$DATA_ROOT/bin" serena_bin version
+  local tool_root="$DATA_ROOT/tools/serena" tool_bin="$DATA_ROOT/bin" serena_bin version uv_cache="$CACHE_ROOT/uv"
+  if [ -n "${OPENCODE_TEAM_DEPENDENCY_ROOT:-}" ]; then
+    tool_root="$DEPENDENCY_ROOT/serena"
+    tool_bin="$DEPENDENCY_ROOT/bin"
+    uv_cache="$DEPENDENCY_ROOT/uv-cache"
+  fi
   serena_bin="$tool_bin/serena"
-  mkdir -p "$tool_root" "$tool_bin" "$CACHE_ROOT/uv"
+  mkdir -p "$tool_root" "$tool_bin" "$uv_cache"
   if [ -x "$serena_bin" ]; then
     version="$($serena_bin --version 2>/dev/null || true)"
     if serena_version_ok "$version"; then
@@ -174,7 +186,7 @@ ensure_serena() {
     fi
   fi
   printf '  %-18s installing %s\n' "Serena" "$SERENA_VERSION"
-  UV_TOOL_DIR="$tool_root" UV_TOOL_BIN_DIR="$tool_bin" UV_CACHE_DIR="$CACHE_ROOT/uv" \
+  UV_TOOL_DIR="$tool_root" UV_TOOL_BIN_DIR="$tool_bin" UV_CACHE_DIR="$uv_cache" \
     uv tool install --force --python python3 "serena-agent==$SERENA_VERSION" || return 1
   [ -x "$serena_bin" ] || { printf 'Serena install did not create %s\n' "$serena_bin" >&2; return 1; }
   version="$($serena_bin --version 2>/dev/null || true)"
@@ -218,7 +230,14 @@ doctor() {
   require_command rg || failed=1
   setup_roots
   ensure_generated_config_current || failed=1
-  if [ -x "$DATA_ROOT/bin/serena" ] && serena_version_ok "$($DATA_ROOT/bin/serena --version 2>/dev/null || true)"; then
+  local time_machine_report
+  if time_machine_report="$(time_machine_status 2>/dev/null)"; then
+    printf '  %-16s %s\n' "Time Machine" "$time_machine_report"
+  else
+    printf '  %-16s FAILED (%s)\n' "Time Machine" "$time_machine_report"
+    failed=1
+  fi
+  if [ -n "${SERENA_BIN:-}" ] && [ -x "$SERENA_BIN" ] && serena_version_ok "$($SERENA_BIN --version 2>/dev/null || true)"; then
     printf '  %-16s OK (%s)\n' "Serena" "$SERENA_VERSION"
   else
     printf '  %-16s NOT CONFIGURED\n' "Serena"
@@ -260,10 +279,17 @@ setup_roots() {
     STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/opencode-team"
     CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/opencode-team"
   fi
+  RUNTIME_ROOT="$CACHE_ROOT/runtime"
+  DEPENDENCY_ROOT="${OPENCODE_TEAM_DEPENDENCY_ROOT:-$DATA_ROOT/dependencies}"
+  if [ -n "${OPENCODE_TEAM_DEPENDENCY_ROOT:-}" ]; then
+    SERENA_BIN="$DEPENDENCY_ROOT/bin/serena"
+  else
+    SERENA_BIN="$DATA_ROOT/bin/serena"
+  fi
 }
 
 maintenance_tasks() {
-  printf '%s\n' best-tool-output-gc best-retention openai-retention
+  printf '%s\n' best-tool-output-gc best-retention openai-retention runtime-gc
 }
 
 maintenance_label() {
@@ -271,6 +297,7 @@ maintenance_label() {
     best-tool-output-gc) printf '%s\n' 'it.danilodantoni.opencode-team.best-tool-output-gc' ;;
     best-retention) printf '%s\n' 'it.danilodantoni.opencode-team.best-retention' ;;
     openai-retention) printf '%s\n' 'it.danilodantoni.opencode-team.openai-retention' ;;
+    runtime-gc) printf '%s\n' 'it.danilodantoni.opencode-team.runtime-gc' ;;
     *) return 1 ;;
   esac
 }
@@ -302,6 +329,7 @@ maintenance_status() {
       best-tool-output-gc) printf '  BEST tool-output GC  %s\n' "$status" ;;
       best-retention) printf '  BEST retention       %s\n' "$status" ;;
       openai-retention) printf '  OPENAI retention     %s\n' "$status" ;;
+      runtime-gc) printf '  Runtime GC           %s\n' "$status" ;;
     esac
   done
 }
@@ -325,6 +353,7 @@ hour, minute = {
     "best-tool-output-gc": (4, 45),
     "best-retention": (5, 0),
     "openai-retention": (4, 15),
+    "runtime-gc": (5, 30),
 }[task]
 plist = {
     "Label": label,
@@ -381,7 +410,7 @@ install_maintenance() {
 
 maintenance_command() {
   setup_roots
-  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
   if [ "${1:-}" = status ]; then
     [ "$#" -eq 1 ] || { usage >&2; return 2; }
     maintenance_status
@@ -389,13 +418,13 @@ maintenance_command() {
   fi
   [ "$#" -eq 1 ] || { usage >&2; return 2; }
   case "$1" in
-    best-tool-output-gc|best-retention|openai-retention)
+    best-tool-output-gc|best-retention|openai-retention|runtime-gc)
       local team=best
       [ "$1" = openai-retention ] && team=openai
-      [ -f "$CONFIG_ROOT/$team/team-runtime.conf" ] || {
+      if [ "$1" != runtime-gc ] && [ ! -f "$CONFIG_ROOT/$team/team-runtime.conf" ]; then
         printf 'Maintenance is not configured: %s\n' "$1" >&2
         return 1
-      }
+      fi
       exec "$PACKAGE_ROOT/shared/maintenance/run-maintenance.sh" "$1"
       ;;
     *)
@@ -408,7 +437,7 @@ maintenance_command() {
 install_dependencies() {
   local team="$1" dependency_team="$1"
   [ "$team" = daily ] && dependency_team=openai
-  local dependency_root="$DATA_ROOT/dependencies/$dependency_team"
+  local dependency_root="$DEPENDENCY_ROOT/$dependency_team"
   local package_file="$PACKAGE_ROOT/teams/$dependency_team/package.json"
   local lock_file="$PACKAGE_ROOT/teams/$dependency_team/package-lock.json"
   local marker="$dependency_root/.installed-lock-sha256"
@@ -428,7 +457,7 @@ install_dependencies() {
 }
 
 verify_best_omo() {
-  local target="$DATA_ROOT/dependencies/best/node_modules/oh-my-openagent/dist/index.js"
+  local target="$DEPENDENCY_ROOT/best/node_modules/oh-my-openagent/dist/index.js"
   [ -f "$target" ] || { printf 'BEST OMO package missing\n' >&2; return 1; }
   "$PACKAGE_ROOT/teams/best/patch-omo-hook-timeout.sh" "$target"
   python3 "$PACKAGE_ROOT/teams/best/patch-omo-core.py" "$target"
@@ -438,7 +467,7 @@ verify_best_omo() {
 }
 
 verify_go_omo() {
-  local target="$DATA_ROOT/dependencies/go/node_modules/oh-my-openagent/dist/index.js"
+  local target="$DEPENDENCY_ROOT/go/node_modules/oh-my-openagent/dist/index.js"
   [ -f "$target" ] || { printf 'GO OMO package missing\n' >&2; return 1; }
   python3 "$PACKAGE_ROOT/teams/go/patch-worker-done-v2.py" "$target"
   python3 "$PACKAGE_ROOT/teams/go/patch-routing.py" "$target"
@@ -461,6 +490,7 @@ values = {
     "@DATA_ROOT@": os.environ["DATA_ROOT"],
     "@STATE_ROOT@": os.environ["STATE_ROOT"],
     "@CACHE_ROOT@": os.environ["CACHE_ROOT"],
+    "@RUNTIME_ROOT@": os.environ["RUNTIME_ROOT"],
     "@OMO_PLUGIN@": os.environ.get("OMO_PLUGIN", "oh-my-openagent"),
     "@SERENA_BIN@": os.environ["SERENA_BIN"],
 }
@@ -499,8 +529,8 @@ PY
 
 refresh_generated_configs() {
   local team dependency_team hook_source hook_name
-  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT
-  SERENA_BIN="$DATA_ROOT/bin/serena"
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  SERENA_BIN="${SERENA_BIN:-$DATA_ROOT/bin/serena}"
   export SERENA_BIN
   [ -x "$SERENA_BIN" ] || {
     printf 'Cannot refresh stale package config: Serena is missing; run setup\n' >&2
@@ -509,7 +539,7 @@ refresh_generated_configs() {
   for team in best go openai daily; do
     dependency_team="$team"
     [ "$team" = daily ] && dependency_team=openai
-    export OMO_PLUGIN="$DATA_ROOT/dependencies/$dependency_team/node_modules/oh-my-openagent/dist/index.js"
+    export OMO_PLUGIN="$DEPENDENCY_ROOT/$dependency_team/node_modules/oh-my-openagent/dist/index.js"
     [ -f "$OMO_PLUGIN" ] || {
       printf 'Cannot refresh stale package config: OMO plugin is missing: %s\n' "$OMO_PLUGIN" >&2
       return 1
@@ -542,14 +572,31 @@ refresh_generated_configs() {
 ensure_generated_config_current() {
   setup_roots
   [ -d "$CONFIG_ROOT" ] || return 0
-  local stale
+  local stale config_missing=0 team
   stale="$(stale_generated_package_paths)"
-  if [ -n "$stale" ]; then
+  for team in best go openai daily; do
+    [ -f "$CONFIG_ROOT/$team/team-runtime.conf" ] || continue
+    grep -q '^RUNTIME_ROOT=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
+    grep -q '^PERSISTENT_DATA_ROOT=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
+  done
+  if [ -n "$stale" ] || [ "$config_missing" -eq 1 ]; then
     printf 'Refreshing stale package-owned generated configuration\n' >&2
     refresh_generated_configs || {
       printf '%s\n' "$stale" >&2
       return 1
     }
+  fi
+}
+
+install_time_machine_exclusions() {
+  [ "$(uname -s)" = Darwin ] || return 0
+  command -v tmutil >/dev/null 2>&1 || return 0
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  local result
+  if result="$(node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" time-machine-exclude --apply 2>&1)"; then
+    printf '  %-18s OK (runtime/dependencies only)\n' "Time Machine"
+  else
+    printf '  %-18s FAILED (%s)\n' "Time Machine" "$result" >&2
   fi
 }
 
@@ -561,21 +608,24 @@ setup() {
     require_command "$command_name" >/dev/null || { printf '%s is required for setup\n' "$command_name" >&2; return 1; }
   done
   setup_roots
-  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT
-  mkdir -p "$CONFIG_ROOT" "$DATA_ROOT" "$STATE_ROOT" "$CACHE_ROOT"
-  chmod 700 "$CONFIG_ROOT" "$DATA_ROOT" "$STATE_ROOT" "$CACHE_ROOT"
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  mkdir -p "$CONFIG_ROOT" "$DATA_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$RUNTIME_ROOT" "$DEPENDENCY_ROOT"
+  chmod 700 "$CONFIG_ROOT" "$DATA_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$RUNTIME_ROOT" "$DEPENDENCY_ROOT"
   printf 'OpenCode Team setup\n'
   printf '  config root       %s\n' "$CONFIG_ROOT"
   printf '  data root         %s\n' "$DATA_ROOT"
   printf '  state root        %s\n' "$STATE_ROOT"
   printf '  cache root        %s\n' "$CACHE_ROOT"
+  printf '  runtime root      %s\n' "$RUNTIME_ROOT"
+  printf '  dependency root   %s\n' "$DEPENDENCY_ROOT"
+  install_time_machine_exclusions
   ensure_serena || return 1
   ensure_codex || return 1
   for team in best go openai daily; do
     dependency_team="$team"
     [ "$team" = daily ] && dependency_team=openai
-    export OMO_PLUGIN="$DATA_ROOT/dependencies/$dependency_team/node_modules/oh-my-openagent/dist/index.js"
-    mkdir -p "$CONFIG_ROOT/$team/xdg-config" "$CONFIG_ROOT/$team/claude-config" "$DATA_ROOT/$team" "$STATE_ROOT/$team" "$CACHE_ROOT/$team"
+    export OMO_PLUGIN="$DEPENDENCY_ROOT/$dependency_team/node_modules/oh-my-openagent/dist/index.js"
+    mkdir -p "$CONFIG_ROOT/$team/xdg-config" "$CONFIG_ROOT/$team/claude-config" "$DATA_ROOT/$team" "$DATA_ROOT/$team/data" "$STATE_ROOT/$team" "$CACHE_ROOT/$team" "$RUNTIME_ROOT/$team"
     case "$team" in
       best) hook_source="$PACKAGE_ROOT/teams/best/patch-omo-hook-timeout.sh"; hook_name="patch-omo-hook-timeout.sh" ;;
       go) hook_source="$PACKAGE_ROOT/teams/go/patch-omo-task-completion.sh"; hook_name="patch-omo-task-completion.sh" ;;
@@ -611,6 +661,59 @@ setup() {
   printf '  %-18s OK (package-local)\n' "openai OMO"
   install_maintenance || return 1
   printf 'Setup complete. No runtime was started.\n'
+}
+
+runtime_status() {
+  setup_roots
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" status
+}
+
+runtime_gc() {
+  setup_roots
+  local apply=0
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --apply) apply=1; shift ;;
+      *) printf 'Unknown runtime-gc option: %s\n' "$1" >&2; return 2 ;;
+    esac
+  done
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  if [ "$apply" -eq 1 ]; then
+    node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" gc --apply
+  else
+    node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" gc
+  fi
+}
+
+storage_accounting() {
+  setup_roots
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" accounting
+}
+
+runtime_quota() {
+  setup_roots
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" quota
+}
+
+time_machine_exclude() {
+  setup_roots
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" time-machine-exclude "$@"
+}
+
+time_machine_status() {
+  setup_roots
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" time-machine-status
+}
+
+legacy_classify() {
+  setup_roots
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" legacy-classify "$@"
 }
 
 start_team() {
@@ -664,6 +767,34 @@ case "${1:-}" in
     shift
     setup_roots
     exec env OPENAI_TEAM_STATE_ROOT="$DATA_ROOT/daily/state/team" node "$PACKAGE_ROOT/teams/daily/bin/daily-report.mjs" "$@"
+    ;;
+  runtime-status)
+    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+    runtime_status
+    ;;
+  runtime-gc)
+    shift
+    runtime_gc "$@"
+    ;;
+  storage-accounting)
+    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+    storage_accounting
+    ;;
+  runtime-quota)
+    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+    runtime_quota
+    ;;
+  time-machine-exclude)
+    shift
+    time_machine_exclude "$@"
+    ;;
+  time-machine-status)
+    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+    time_machine_status
+    ;;
+  legacy-classify)
+    shift
+    legacy_classify "$@"
     ;;
   doctor)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
