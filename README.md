@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: public release `v0.1.11`.
+Status: public release `v0.1.12`.
 
 ## Goal
 
