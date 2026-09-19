@@ -102,8 +102,7 @@ jobs:
           shared_dependencies="$test_home/shared-dependencies"
           OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup >/dev/null
           tmux_socket="opencode-team-ci-$$"
-          export TMUX_TMPDIR="$test_home/tmux"
-          mkdir -p "$TMUX_TMPDIR"
+          export TMUX_TMPDIR=/tmp
           for team in best go openai daily; do
             run_dir="$(mktemp -d)"
             log="$run_dir/runtime.log"
