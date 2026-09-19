@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: public release `v0.1.10`.
+Status: public release `v0.1.11`.
 
 ## Goal
 
@@ -81,6 +81,12 @@ version-pinned Serena MCP server there, and generates the verified BEST and GO O
 bundles. It also schedules package-owned BEST tool-output GC and BEST/OPENAI
 retention jobs when no legacy maintenance agents are detected. It refuses unsupported
 Node versions and does not start a runtime.
+
+Runtime state is kept under the cache runtime root and published with process
+identity, heartbeat, size, and lifecycle state metadata. Use
+`opencode-team runtime-status` to inspect runs. `opencode-team runtime-gc` only
+reports old `RECLAIMABLE` runs by default; pass `--apply` to remove them. Runs
+marked `UNCERTAIN` are never reclaimed automatically.
 
 When legacy maintenance agents are present, setup reports `DEFERRED` and does not
 install duplicate jobs. Disposable setups write and validate LaunchAgent plists under
