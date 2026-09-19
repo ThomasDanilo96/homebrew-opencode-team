@@ -101,28 +101,25 @@ jobs:
           trap 'rm -rf "$test_home"' EXIT
           shared_dependencies="$test_home/shared-dependencies"
           OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup >/dev/null
-          terminate_tree() {
-            local parent="$1" child
-            for child in $(pgrep -P "$parent" 2>/dev/null || true); do
-              terminate_tree "$child"
-            done
-            kill -TERM "$parent" 2>/dev/null || true
-          }
+          tmux_socket="opencode-team-ci-$$"
+          export TMUX_TMPDIR="$test_home/tmux"
+          mkdir -p "$TMUX_TMPDIR"
           for team in best go openai daily; do
             run_dir="$(mktemp -d)"
             log="$run_dir/runtime.log"
-            (cd "$run_dir" && HOME="$test_home" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" TMUX=1 opencode-team "$team") >"$log" 2>&1 &
-            pid=$!
+            session="opencode-team-ci-$team-$$"
+            tmux -L "$tmux_socket" new-session -d -s "$session" \
+              "cd '$run_dir' && HOME='$test_home' OPENCODE_TEAM_HOME='$test_home' OPENCODE_TEAM_DEPENDENCY_ROOT='$shared_dependencies' opencode-team '$team' >'$log' 2>&1"
             ready=0
             for _ in $(seq 1 45); do
               readiness="$(HOME="$test_home" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team runtime-readiness 2>/dev/null || true)"
               if printf '%s' "$readiness" | jq -e '(.ready == true) and any(.runs[]; .state == "ACTIVE" and (.parent_session_id | length > 0) and .identity.launcher == "alive" and .identity.server == "alive")' >/dev/null 2>&1; then ready=1; break; fi
-              if ! kill -0 "$pid" 2>/dev/null; then break; fi
+              if ! tmux -L "$tmux_socket" has-session -t "$session" 2>/dev/null; then break; fi
               sleep 1
             done
+            if [ "$ready" -ne 1 ]; then cat "$log" >&2; fi
             test "$ready" -eq 1
-            terminate_tree "$pid"
-            wait "$pid" 2>/dev/null || true
+            tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
             for _ in $(seq 1 15); do
               if ! ps -axo pid=,command= | rg "$test_home" | rg -v 'rg ' >/dev/null; then break; fi
               sleep 1
