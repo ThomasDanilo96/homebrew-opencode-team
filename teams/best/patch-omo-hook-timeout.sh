@@ -3,7 +3,8 @@ set -euo pipefail
 
 OMO="${1:-${BEST_OMO_PATCH_TARGET:-}}"
 if [ -z "$OMO" ] && [ -n "${SANDBOX:-}" ]; then
-  OMO="$(cd "$SANDBOX/../dependencies/best/node_modules/oh-my-openagent/dist" && pwd)/index.js"
+BEST_DEPENDENCY_ROOT="${OPENCODE_TEAM_DEPENDENCY_ROOT:-$(cd "$SANDBOX/../dependencies" && pwd)}"
+OMO="$BEST_DEPENDENCY_ROOT/best/node_modules/oh-my-openagent/dist/index.js"
 fi
 EXPECTED_VERSION="4.19.4"
 UNPATCHED_SIGNATURE='options.pluginRoot = cmdHook.pluginRoot;'
