@@ -6,7 +6,7 @@
 _FORBIDDEN_CHARS='$~`(){};|&<>"'"'"''
 
 # All allowed configuration variables (for explicit unset before parsing)
-_ALL_CONFIG_VARS="TEAM_NAME SANDBOX TMUX_PREFIX OMO_PROFILE OPENCODE_CONFIG PRE_SERVER_HOOK RUNTIME_ENV_HOOK XDG_CONFIG_HOME_OVERRIDE CLAUDE_CONFIG_DIR_OVERRIDE NATIVE_UI_ONLY_AGENTS RESUME_ALLOWED_AGENTS BRIDGE_MODE"
+_ALL_CONFIG_VARS="TEAM_NAME SANDBOX RUNTIME_ROOT PERSISTENT_DATA_ROOT TMUX_PREFIX OMO_PROFILE OPENCODE_CONFIG PRE_SERVER_HOOK RUNTIME_ENV_HOOK XDG_CONFIG_HOME_OVERRIDE CLAUDE_CONFIG_DIR_OVERRIDE NATIVE_UI_ONLY_AGENTS RESUME_ALLOWED_AGENTS BRIDGE_MODE"
 
 # Validate TEAM_NAME format
 _validate_team_name() {
@@ -148,7 +148,7 @@ parse_team_config() {
     unset "$var"
   done
 
-  local allowed_keys="TEAM_NAME SANDBOX TMUX_PREFIX OMO_PROFILE OPENCODE_CONFIG PRE_SERVER_HOOK RUNTIME_ENV_HOOK XDG_CONFIG_HOME_OVERRIDE CLAUDE_CONFIG_DIR_OVERRIDE NATIVE_UI_ONLY_AGENTS RESUME_ALLOWED_AGENTS BRIDGE_MODE"
+  local allowed_keys="TEAM_NAME SANDBOX RUNTIME_ROOT PERSISTENT_DATA_ROOT TMUX_PREFIX OMO_PROFILE OPENCODE_CONFIG PRE_SERVER_HOOK RUNTIME_ENV_HOOK XDG_CONFIG_HOME_OVERRIDE CLAUDE_CONFIG_DIR_OVERRIDE NATIVE_UI_ONLY_AGENTS RESUME_ALLOWED_AGENTS BRIDGE_MODE"
   local line_num=0
   local seen_keys=""
 
@@ -207,7 +207,7 @@ parse_team_config() {
 
     # Absolute path check for path keys
     case "$key" in
-      SANDBOX|OPENCODE_CONFIG|PRE_SERVER_HOOK|RUNTIME_ENV_HOOK|XDG_CONFIG_HOME_OVERRIDE|CLAUDE_CONFIG_DIR_OVERRIDE)
+      SANDBOX|RUNTIME_ROOT|PERSISTENT_DATA_ROOT|OPENCODE_CONFIG|PRE_SERVER_HOOK|RUNTIME_ENV_HOOK|XDG_CONFIG_HOME_OVERRIDE|CLAUDE_CONFIG_DIR_OVERRIDE)
         case "$value" in
           /*) ;;
           *)
@@ -234,7 +234,7 @@ parse_team_config() {
   done < "$config_file"
 
   # Validate required keys (using indirect expansion, NO eval)
-  for required in TEAM_NAME SANDBOX TMUX_PREFIX OMO_PROFILE OPENCODE_CONFIG RESUME_ALLOWED_AGENTS BRIDGE_MODE; do
+  for required in TEAM_NAME SANDBOX RUNTIME_ROOT PERSISTENT_DATA_ROOT TMUX_PREFIX OMO_PROFILE OPENCODE_CONFIG RESUME_ALLOWED_AGENTS BRIDGE_MODE; do
     local val="${!required:-}"
     if [ -z "$val" ]; then
       echo "ERROR: Required key $required missing" >&2
@@ -247,6 +247,13 @@ parse_team_config() {
     echo "ERROR: SANDBOX does not exist or is not a directory: $SANDBOX" >&2
     return 1
   fi
+
+  for runtime_path in "$RUNTIME_ROOT" "$PERSISTENT_DATA_ROOT"; do
+    if [ ! -d "$runtime_path" ]; then
+      echo "ERROR: configured runtime path does not exist or is not a directory: $runtime_path" >&2
+      return 1
+    fi
+  done
 
   # Validate OPENCODE_CONFIG exists and is regular file
   if [ ! -f "$OPENCODE_CONFIG" ]; then

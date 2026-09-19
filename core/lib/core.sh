@@ -31,7 +31,7 @@ process_start_epoch() {
 
 write_process_identity() {
   local role="$1" pid="$2" start pgid sid tmp
-  case "$role" in launcher|server|bridge|watchdog|attach) ;; *) return 1 ;; esac
+  case "$role" in launcher|server|bridge|watchdog|attach|reaper) ;; *) return 1 ;; esac
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
   start=$(process_start_epoch "$pid") || return 1
   pgid=$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d ' ') || return 1
@@ -113,14 +113,18 @@ ensure_run_id() {
 }
 
 init_run_state() {
-  RUN_STATE_DIR="$SANDBOX/state/runs/$RUN_ID"
-  LOCK_ROOT="$SANDBOX/state/session-locks"
-  local expected_prefix="$SANDBOX/state/runs/"
+  RUN_STATE_DIR="$RUNTIME_ROOT/runs/$RUN_ID"
+  LOCK_ROOT="$PERSISTENT_DATA_ROOT/state/session-locks"
+  local expected_prefix="$RUNTIME_ROOT/runs/"
   case "$RUN_STATE_DIR" in
     "$expected_prefix"*) ;;
     *) die "RUN_STATE_DIR not under expected prefix" ;;
   esac
   mkdir -p "$RUN_STATE_DIR"
+}
+
+publish_manifest() {
+  node "$_CORE_DIR/runtime-manifest.mjs" "$RUN_STATE_DIR" publish >/dev/null 2>&1 || true
 }
 
 # --- Cleanup (certified GO order) ---
@@ -131,8 +135,12 @@ cleanup_run() {
   local _bridge_pid="${BRIDGE_PID:-}"
   local _server_pid="${SERVER_PID:-}"
   local _watchdog_pid=""
+  local _reaper_pid=""
   if [ -f "$RUN_STATE_DIR/watchdog.pid" ]; then
     _watchdog_pid=$(cat "$RUN_STATE_DIR/watchdog.pid" 2>/dev/null)
+  fi
+  if [ -f "$RUN_STATE_DIR/reaper.pid" ]; then
+    _reaper_pid=$(cat "$RUN_STATE_DIR/reaper.pid" 2>/dev/null)
   fi
   if [ -z "$_bridge_pid" ] && [ -f "$RUN_STATE_DIR/bridge.pid" ]; then
     _bridge_pid=$(cat "$RUN_STATE_DIR/bridge.pid" 2>/dev/null)
@@ -151,6 +159,10 @@ cleanup_run() {
   # Phase 2: watchdog
   if [ -n "$_watchdog_pid" ]; then
     safe_signal watchdog "$_watchdog_pid" TERM || true
+  fi
+
+  if [ -n "$_reaper_pid" ]; then
+    safe_signal reaper "$_reaper_pid" TERM || true
   fi
 
   # Phase 3: panes
@@ -461,6 +473,14 @@ validate_resume_session() {
 }
 
 # --- Watchdog ---
+start_reaper() {
+  bash "$_CORE_DIR/runtime-reaper.sh" "$RUN_STATE_DIR" >>"$RUN_STATE_DIR/reaper.log" 2>&1 &
+  local reaper_pid=$!
+  echo "$reaper_pid" > "$RUN_STATE_DIR/reaper.pid"
+  write_process_identity reaper "$reaper_pid" || die "Failed to record reaper identity"
+  log "Reaper PID: $reaper_pid"
+}
+
 start_watchdog() {
   local my_tmux="$1"
   (
@@ -543,6 +563,7 @@ export_env() {
   export XDG_DATA_HOME="$SANDBOX/data"
   export XDG_CACHE_HOME="$SANDBOX/cache"
   export XDG_STATE_HOME="$SANDBOX/state"
+  export RUNTIME_ROOT PERSISTENT_DATA_ROOT
   export BRIDGE_MODE="$BRIDGE_MODE"
   if [ -n "${CLAUDE_CONFIG_DIR_OVERRIDE:-}" ]; then
     export CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR_OVERRIDE"
@@ -550,6 +571,12 @@ export_env() {
     unset CLAUDE_CONFIG_DIR
   fi
   export NATIVE_UI_ONLY_AGENTS="${NATIVE_UI_ONLY_AGENTS:-}"
+}
+
+check_runtime_quota() {
+  local quota_output
+  quota_output=$(PACKAGE_ROOT="$(cd "$_CORE_DIR/../.." && pwd)" RUNTIME_ROOT="$RUNTIME_ROOT" DATA_ROOT="$(dirname "$PERSISTENT_DATA_ROOT")" STATE_ROOT="$SANDBOX/state" CACHE_ROOT="$(dirname "$RUNTIME_ROOT")" node "$_CORE_DIR/runtime-lifecycle.mjs" quota 2>/dev/null) || die "Runtime quota or disk-pressure guard refused this run"
+  log "Runtime quota admission passed"
 }
 
 source_runtime_env_hook() {
@@ -597,12 +624,23 @@ main() {
   # Write state files (NO premature server.pid)
   echo "$PORT" > "$RUN_STATE_DIR/port"
   echo "$RUN_ID" > "$RUN_STATE_DIR/run_id"
+  echo "$TEAM_NAME" > "$RUN_STATE_DIR/team"
+  echo "${JOB_TYPE:-interactive}" > "$RUN_STATE_DIR/job_type"
+  echo "$RUNTIME_ROOT" > "$RUN_STATE_DIR/runtime_root"
+  echo "$PWD" > "$RUN_STATE_DIR/working_directory"
+  echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$RUN_STATE_DIR/created_at"
+  echo "$PPID" > "$RUN_STATE_DIR/parent_pid"
+  echo "CREATING" > "$RUN_STATE_DIR/state"
   echo "$(python3 -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')" > "$RUN_STATE_DIR/real_home"
   echo "$session_mode" > "$RUN_STATE_DIR/session_mode"
+
+  start_reaper
+  publish_manifest
 
   # Export env
   export_env
   source_runtime_env_hook
+  check_runtime_quota
   bridge_opencode_auth
 
   log "Run ID: $RUN_ID  Port: $PORT  Mode: $session_mode"
@@ -630,6 +668,7 @@ main() {
 
   # Bridge
   start_bridge
+  node "$_CORE_DIR/runtime-manifest.mjs" "$RUN_STATE_DIR" state ACTIVE >/dev/null 2>&1 || true
 
   # Watchdog
   local my_tmux
@@ -637,6 +676,7 @@ main() {
   if [ -n "$my_tmux" ]; then
     start_watchdog "$my_tmux"
   fi
+  node "$_CORE_DIR/runtime-manifest.mjs" "$RUN_STATE_DIR" heartbeat >/dev/null 2>&1 || true
 
   if [ "${TEAM_RUNTIME_HEADLESS:-}" = 1 ]; then
     while kill -0 "$SERVER_PID" 2>/dev/null; do sleep 1; done
