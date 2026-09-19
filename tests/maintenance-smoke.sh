@@ -27,7 +27,8 @@ done
 before="$(shasum -a 256 "$agent_root"/*.plist)"
 "$CLI" setup >/tmp/opencode-team-maintenance-setup-second.out
 
-OPENCODE_TEAM_LEGACY_MAINTENANCE=1 "$CLI" setup >/tmp/opencode-team-maintenance-deferred.out
+mkdir -p "$TEST_ROOT/no-legacy-home"
+HOME="$TEST_ROOT/no-legacy-home" OPENCODE_TEAM_LEGACY_MAINTENANCE=1 "$CLI" setup >/tmp/opencode-team-maintenance-deferred.out
 test "$(< "$TEST_ROOT/state/maintenance/status/best-tool-output-gc")" = DEFERRED
 test "$(< "$TEST_ROOT/state/maintenance/status/best-retention")" = DEFERRED
 test "$(< "$TEST_ROOT/state/maintenance/status/openai-retention")" = DEFERRED
@@ -36,6 +37,66 @@ OPENCODE_TEAM_LEGACY_MAINTENANCE=1 "$CLI" maintenance status >"$TEST_ROOT/mainte
 rg -q 'BEST tool-output GC  DEFERRED' "$TEST_ROOT/maintenance-status.out"
 
 unset OPENCODE_TEAM_LEGACY_MAINTENANCE
+
+legacy_home="$TEST_ROOT/legacy-home"
+mkdir -p "$legacy_home/Library/LaunchAgents" "$legacy_home/.local/bin" "$legacy_home/.opencode-team-staging/unified-core-v1/teams/best"
+cp "$ROOT/shared/maintenance/opencode-cleanup.py" "$legacy_home/.local/bin/opencode-cleanup"
+chmod 0755 "$legacy_home/.local/bin/opencode-cleanup"
+cp "$ROOT/teams/best/tool-output-gc.mjs" "$legacy_home/.opencode-team-staging/unified-core-v1/teams/best/tool-output-gc.mjs"
+LEGACY_HOME="$legacy_home" python3 - <<'PY'
+import os
+import plistlib
+from pathlib import Path
+
+home = Path(os.environ["LEGACY_HOME"])
+base = home / "Library" / "LaunchAgents"
+cleanup = str(home / ".local" / "bin" / "opencode-cleanup")
+jobs = {
+    "com.thomasd.opencode-best-tool-output-gc": [str(home / ".opencode-team-staging" / "unified-core-v1" / "teams" / "best" / "tool-output-gc.mjs")],
+    "com.thomasd.opencode-best-retention": [cleanup, "--retention-only", "--live-retention", "--team", "best", "--max-families", "1", "--max-session-deletes", "3"],
+    "com.thomasd.opencode-retention": [cleanup, "--retention-only", "--live-retention", "--team", "openai", "--max-families", "3", "--max-session-deletes", "10"],
+    "com.thomasd.opencode-cleanup": [cleanup],
+}
+for label, arguments in jobs.items():
+    payload = {"Label": label, "ProgramArguments": arguments}
+    with (base / f"{label}.plist").open("wb") as stream:
+        plistlib.dump(payload, stream)
+PY
+HOME="$legacy_home" OPENCODE_TEAM_LEGACY_MAINTENANCE=1 "$CLI" setup >"$TEST_ROOT/legacy-migration.out"
+rg -q 'best-retention.*OK' "$TEST_ROOT/legacy-migration.out"
+rg -q 'openai-retention.*OK' "$TEST_ROOT/legacy-migration.out"
+test ! -e "$legacy_home/Library/LaunchAgents/com.thomasd.opencode-best-retention.plist"
+test ! -e "$legacy_home/Library/LaunchAgents/com.thomasd.opencode-retention.plist"
+test ! -e "$legacy_home/Library/LaunchAgents/com.thomasd.opencode-cleanup.plist"
+test -f "$TEST_ROOT/state/maintenance/launchagents/it.danilodantoni.opencode-team.best-retention.plist"
+test -f "$TEST_ROOT/state/maintenance/launchagents/it.danilodantoni.opencode-team.openai-retention.plist"
+
+LEGACY_HOME="$legacy_home" python3 - <<'PY'
+import os
+import plistlib
+from pathlib import Path
+
+home = Path(os.environ["LEGACY_HOME"])
+path = home / "Library" / "LaunchAgents" / "com.thomasd.opencode-best-retention.plist"
+payload = {
+    "Label": "com.thomasd.opencode-best-retention",
+    "ProgramArguments": [
+        str(home / ".local" / "bin" / "opencode-cleanup"),
+        "--retention-only", "--live-retention", "--team", "best",
+        "--max-families", "1", "--max-session-deletes", "99",
+    ],
+}
+with path.open("wb") as stream:
+    plistlib.dump(payload, stream)
+unknown = path.with_name("com.example.unrelated-maintenance.plist")
+with unknown.open("wb") as stream:
+    plistlib.dump({"Label": "com.example.unrelated-maintenance", "ProgramArguments": ["/bin/true"]}, stream)
+PY
+HOME="$legacy_home" OPENCODE_TEAM_LEGACY_MAINTENANCE=1 "$CLI" setup >"$TEST_ROOT/mutated-migration.out"
+test -f "$legacy_home/Library/LaunchAgents/com.thomasd.opencode-best-retention.plist"
+test -f "$legacy_home/Library/LaunchAgents/com.example.unrelated-maintenance.plist"
+test "$(< "$TEST_ROOT/state/maintenance/status/best-retention")" = DEFERRED
+
 lock_root="$TEST_ROOT/state/maintenance/locks"
 mkdir -p "$lock_root"
 current_start="$(LC_ALL=C ps -p "$$" -o lstart= | awk '{$1=$1; print}' | tr -s ' ' | tr ':' '_')"

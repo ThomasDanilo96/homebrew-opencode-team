@@ -275,10 +275,10 @@ setup_roots() {
     STATE_ROOT="$OPENCODE_TEAM_HOME/state"
     CACHE_ROOT="$OPENCODE_TEAM_HOME/cache"
   else
-    CONFIG_ROOT="${XDG_CONFIG_HOME:-$HOME/.config}/opencode-team"
-    DATA_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/opencode-team"
-    STATE_ROOT="${XDG_STATE_HOME:-$HOME/.local/state}/opencode-team"
-    CACHE_ROOT="${XDG_CACHE_HOME:-$HOME/.cache}/opencode-team"
+    CONFIG_ROOT="$HOME/.config/opencode-team"
+    DATA_ROOT="$HOME/.local/share/opencode-team"
+    STATE_ROOT="$HOME/.local/state/opencode-team"
+    CACHE_ROOT="$HOME/.cache/opencode-team"
   fi
   RUNTIME_ROOT="$CACHE_ROOT/runtime"
   DEPENDENCY_ROOT="${OPENCODE_TEAM_DEPENDENCY_ROOT:-$DATA_ROOT/dependencies}"
@@ -361,8 +361,36 @@ legacy_task_package_owned() {
       label=com.thomasd.opencode-best-tool-output-gc
       plist="$(legacy_maintenance_plist "$label")"
       [ -f "$plist" ] || return 1
-      executable="$(plutil -extract ProgramArguments.1 raw -o - "$plist" 2>/dev/null || true)"
+      executable="$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null || true)"
       [ "$executable" = "$HOME/.opencode-team-staging/unified-core-v1/teams/best/tool-output-gc.mjs" ] && [ -f "$executable" ]
+      ;;
+    best-retention|openai-retention)
+      label="$(legacy_label_for_task "$task")"
+      plist="$(legacy_maintenance_plist "$label")"
+      [ -f "$plist" ] || return 1
+      executable="$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null || true)"
+      [ "$executable" = "$HOME/.local/bin/opencode-cleanup" ] && [ -f "$executable" ] || return 1
+      python3 - "$plist" "$task" "$executable" <<'PY'
+import plistlib
+import sys
+
+path, task, executable = sys.argv[1:]
+with open(path, "rb") as stream:
+    plist = plistlib.load(stream)
+expected = [
+    executable,
+    "--retention-only",
+    "--live-retention",
+    "--team",
+    "best" if task == "best-retention" else "openai",
+    "--max-families",
+    "1" if task == "best-retention" else "3",
+    "--max-session-deletes",
+    "3" if task == "best-retention" else "10",
+]
+actual = list(plist.get("ProgramArguments", []))
+sys.exit(0 if actual == expected and plist.get("Label") in {"com.thomasd.opencode-best-retention", "com.thomasd.opencode-retention"} else 1)
+PY
       ;;
     *)
       return 1
@@ -374,12 +402,42 @@ migrate_legacy_task() {
   local task="$1" label plist
   case "$task" in
     best-tool-output-gc) label=com.thomasd.opencode-best-tool-output-gc ;;
+    best-retention) label=com.thomasd.opencode-best-retention ;;
+    openai-retention) label=com.thomasd.opencode-retention ;;
     *) return 1 ;;
   esac
   plist="$(legacy_maintenance_plist "$label")"
   launchctl bootout "gui/${UID:-$(id -u)}/$label" >/dev/null 2>&1 || true
   rm -f "$plist"
   printf '  %-18s migrated exact legacy job (%s)\n' "$task" "$label"
+}
+
+legacy_cleanup_package_owned() {
+  local label=com.thomasd.opencode-cleanup plist executable
+  plist="$(legacy_maintenance_plist "$label")"
+  [ -f "$plist" ] || return 1
+  executable="$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null || true)"
+  [ "$executable" = "$HOME/.local/bin/opencode-cleanup" ] && [ -f "$executable" ] || return 1
+  python3 - "$plist" "$executable" <<'PY'
+import plistlib
+import sys
+
+path, executable = sys.argv[1:]
+with open(path, "rb") as stream:
+    plist = plistlib.load(stream)
+expected = [executable]
+actual = list(plist.get("ProgramArguments", []))
+sys.exit(0 if actual == expected and plist.get("Label") == "com.thomasd.opencode-cleanup" else 1)
+PY
+}
+
+migrate_legacy_cleanup() {
+  local label=com.thomasd.opencode-cleanup plist
+  if ! legacy_cleanup_package_owned; then return 0; fi
+  plist="$(legacy_maintenance_plist "$label")"
+  launchctl bootout "gui/${UID:-$(id -u)}/$label" >/dev/null 2>&1 || true
+  rm -f "$plist"
+  printf '  legacy cleanup migrated exact job (%s)\n' "$label"
 }
 
 maintenance_status() {
@@ -446,6 +504,7 @@ PY
 install_maintenance() {
   local task plist label agent_dir status_marker legacy_label
   mkdir -p "$STATE_ROOT/maintenance/status" "$STATE_ROOT/maintenance/logs"
+  migrate_legacy_cleanup
   if [ -n "${OPENCODE_TEAM_HOME:-}" ]; then
     agent_dir="$STATE_ROOT/maintenance/launchagents"
   else
