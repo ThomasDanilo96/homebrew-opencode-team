@@ -7,7 +7,9 @@ if [ -x /opt/homebrew/opt/node@22/bin/node ]; then
   export PATH
 fi
 CLI="${OPENCODE_TEAM_CLI:-$ROOT/bin/opencode-team}"
-TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/opencode-team-maintenance.XXXXXX")"
+TMP_ROOT="${TMPDIR:-/tmp}"
+TMP_ROOT="${TMP_ROOT%/}"
+TEST_ROOT="$(mktemp -d "$TMP_ROOT/opencode-team-maintenance.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 export OPENCODE_TEAM_HOME="$TEST_ROOT"

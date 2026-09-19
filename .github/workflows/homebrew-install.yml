@@ -92,8 +92,8 @@ jobs:
           test -f "$package_root/shared/maintenance/opencode-cleanup.py"
           test -f "$package_root/shared/maintenance/openai-state-retention.mjs"
           test -f "$package_root/tests/maintenance-smoke.sh"
-          OPENCODE_TEAM_CLI=opencode-team \
-            bash "$package_root/tests/maintenance-smoke.sh"
+           OPENCODE_TEAM_CLI=opencode-team \
+             bash "$GITHUB_WORKSPACE/tests/maintenance-smoke.sh"
 
       - name: Disposable runtime smoke
         run: |
