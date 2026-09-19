@@ -2,16 +2,21 @@
 set -euo pipefail
 
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+if [ -x /opt/homebrew/opt/node@22/bin/node ]; then
+  PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+  export PATH
+fi
 CLI="${OPENCODE_TEAM_CLI:-$ROOT/bin/opencode-team}"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/opencode-team-maintenance.XXXXXX")"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 export OPENCODE_TEAM_HOME="$TEST_ROOT"
+export OPENCODE_TEAM_DEPENDENCY_ROOT="${OPENCODE_TEAM_TEST_DEPENDENCY_ROOT:-${TMPDIR:-/tmp}/opencode-team-shared-dependencies-${USER:-$(id -u)}}"
 export OPENCODE_TEAM_EXECUTABLE=/opt/homebrew/bin/opencode-team
 "$CLI" setup >/tmp/opencode-team-maintenance-setup.out
 
 agent_root="$TEST_ROOT/state/maintenance/launchagents"
-for task in best-tool-output-gc best-retention openai-retention; do
+for task in best-tool-output-gc best-retention openai-retention runtime-gc; do
   plist="$agent_root/it.danilodantoni.opencode-team.$task.plist"
   test -f "$plist"
   plutil -lint "$plist"
@@ -26,6 +31,7 @@ OPENCODE_TEAM_LEGACY_MAINTENANCE=1 "$CLI" setup >/tmp/opencode-team-maintenance-
 test "$(< "$TEST_ROOT/state/maintenance/status/best-tool-output-gc")" = DEFERRED
 test "$(< "$TEST_ROOT/state/maintenance/status/best-retention")" = DEFERRED
 test "$(< "$TEST_ROOT/state/maintenance/status/openai-retention")" = DEFERRED
+test "$(< "$TEST_ROOT/state/maintenance/status/runtime-gc")" = DEFERRED
 OPENCODE_TEAM_LEGACY_MAINTENANCE=1 "$CLI" maintenance status >"$TEST_ROOT/maintenance-status.out"
 rg -q 'BEST tool-output GC  DEFERRED' "$TEST_ROOT/maintenance-status.out"
 
@@ -160,5 +166,24 @@ wait "$openai_pid"
 rg -q 'SKIP_NO_BEST_TOOL_OUTPUT_STORE' "$TEST_ROOT/best-empty.out"
 "$CLI" maintenance best-retention >/dev/null
 "$CLI" maintenance openai-retention >/dev/null
+"$CLI" maintenance runtime-gc >"$TEST_ROOT/runtime-gc-maintenance.out"
+rg -q '"mode": "dry-run"|GC ' "$TEST_ROOT/runtime-gc-maintenance.out"
+
+mkdir -p "$TEST_ROOT/state/maintenance/logs" "$TEST_ROOT/data/openai/state/team/logs"
+python3 - "$TEST_ROOT/state/maintenance/logs/authorship-guard.log" "$TEST_ROOT/data/openai/state/team/logs/latency-metrics.jsonl" <<'PY'
+import pathlib
+import sys
+
+for path in sys.argv[1:]:
+    pathlib.Path(path).write_bytes(b"x" * 2048)
+PY
+OPENCODE_TEAM_LOG_MAX_BYTES=1024 OPENCODE_TEAM_LOG_ROTATIONS=2 "$CLI" maintenance runtime-gc >"$TEST_ROOT/runtime-gc-rotation.out"
+test -f "$TEST_ROOT/state/maintenance/logs/authorship-guard.log.1"
+test -f "$TEST_ROOT/data/openai/state/team/logs/latency-metrics.jsonl.1"
+test ! -s "$TEST_ROOT/state/maintenance/logs/authorship-guard.log"
+
+OPENCODE_TEAM_TEST_FREE_BYTES=1 OPENCODE_TEAM_MIN_FREE_DISK_BYTES=1000 "$CLI" storage-accounting >"$TEST_ROOT/storage-accounting.json"
+jq -e '.warnings[] | select(.code == "LOW_FREE_DISK")' "$TEST_ROOT/storage-accounting.json" >/dev/null
+jq -e '.categories["db-wal"].files | has("openai:opencode:opencode.db") and has("openai:codegraph:codegraph.db-wal")' "$TEST_ROOT/storage-accounting.json" >/dev/null
 
 printf '%s\n' 'MAINTENANCE SMOKE PASS'

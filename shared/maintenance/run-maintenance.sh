@@ -7,7 +7,7 @@ DATA_ROOT="${DATA_ROOT:?DATA_ROOT is required}"
 STATE_ROOT="${STATE_ROOT:?STATE_ROOT is required}"
 
 case "$TASK" in
-  best-tool-output-gc|best-retention|openai-retention) ;;
+  best-tool-output-gc|best-retention|openai-retention|runtime-gc) ;;
   *) printf 'Unknown maintenance task: %s\n' "$TASK" >&2; exit 2 ;;
 esac
 
@@ -175,5 +175,15 @@ case "$TASK" in
     OPENAI_TEAM_STATE_ROOT="$DATA_ROOT/openai/state/team" \
       OPENAI_WORK_PACKET_RETENTION_DAYS="${OPENAI_WORK_PACKET_RETENTION_DAYS:-7}" \
       node "$PACKAGE_ROOT/shared/maintenance/openai-state-retention.mjs"
+    ;;
+  runtime-gc)
+      RUNTIME_ROOT="${RUNTIME_ROOT:-${CACHE_ROOT:-$STATE_ROOT/cache}/runtime}" \
+      PACKAGE_ROOT="$PACKAGE_ROOT" DATA_ROOT="$DATA_ROOT" STATE_ROOT="$STATE_ROOT" \
+      CACHE_ROOT="${CACHE_ROOT:-$STATE_ROOT/cache}" DEPENDENCY_ROOT="${DEPENDENCY_ROOT:-$DATA_ROOT/dependencies}" \
+      node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" gc --apply
+      RUNTIME_ROOT="${RUNTIME_ROOT:-${CACHE_ROOT:-$STATE_ROOT/cache}/runtime}" \
+      PACKAGE_ROOT="$PACKAGE_ROOT" DATA_ROOT="$DATA_ROOT" STATE_ROOT="$STATE_ROOT" \
+      CACHE_ROOT="${CACHE_ROOT:-$STATE_ROOT/cache}" DEPENDENCY_ROOT="${DEPENDENCY_ROOT:-$DATA_ROOT/dependencies}" \
+      node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" rotate --apply
     ;;
 esac
