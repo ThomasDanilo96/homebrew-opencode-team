@@ -8,28 +8,95 @@ if [ -x /opt/homebrew/opt/node@22/bin/node ]; then
   export PATH
 fi
 
-if [ "${OPENAI_DAILY_CERTIFICATION_INTENTIONAL_FAILURE:-}" = 1 ]; then
-  false
-  printf '%s\n' 'OPENAI DAILY CERTIFICATION PASS'
-  exit 0
-fi
-
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/opencode-daily-cert.XXXXXX")"
 TEAM_HOME="$TEST_ROOT/team-home"
+DEP_ROOT="${OPENCODE_TEAM_TEST_DEPENDENCY_ROOT:-${TMPDIR:-/tmp}/opencode-team-shared-dependencies-${USER:-$(id -u)}}"
+DIAGNOSTICS_DIR="${OPENAI_DAILY_CERTIFICATION_DIAGNOSTICS_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/opencode-daily-cert-diagnostics.XXXXXX")}"
 RUNTIME_SESSION=""
 RUNTIME_PID=""
 SERVER_PID=""
 BRIDGE_PID=""
 WATCHDOG_PID=""
+REAPER_PID=""
 RUN_STATE_DIR=""
 PREFLIGHT_PID=""
 PRESERVE_TEST_ROOT="${OPENAI_DAILY_CERTIFICATION_KEEP_ARTIFACTS:-0}"
+FAILED=0
+
+copy_bounded() {
+  local source="$1" destination="$2" max_bytes="${3:-200000}"
+  [ -f "$source" ] || return 0
+  mkdir -p "$(dirname "$destination")"
+  python3 - "$source" "$destination" "$max_bytes" <<'PY'
+import pathlib
+import sys
+
+source = pathlib.Path(sys.argv[1])
+destination = pathlib.Path(sys.argv[2])
+limit = int(sys.argv[3])
+data = source.read_bytes()
+if len(data) > limit:
+    data = data[: limit // 2] + b"\n...[truncated]...\n" + data[-(limit // 2):]
+destination.write_bytes(data)
+PY
+}
+
+cap_diagnostics() {
+  local cap="${OPENAI_DAILY_CERTIFICATION_DIAGNOSTICS_MAX_BYTES:-5000000}"
+  python3 - "$DIAGNOSTICS_DIR" "$cap" <<'PY'
+import os
+import pathlib
+import sys
+
+root = pathlib.Path(sys.argv[1])
+cap = int(sys.argv[2])
+files = sorted((path for path in root.rglob("*") if path.is_file()), key=lambda path: (path.name == "result.txt", str(path)))
+total = sum(path.stat().st_size for path in files)
+for path in files:
+    if total <= cap or path.name == "result.txt":
+        continue
+    size = path.stat().st_size
+    keep = max(0, min(size, cap - (total - size)))
+    if keep == 0:
+        path.unlink()
+    elif keep < size:
+        data = path.read_bytes()
+        path.write_bytes(data[:keep // 2] + b"\n...[diagnostics truncated by cap]\n" + data[-(keep // 2):])
+    total = sum(candidate.stat().st_size for candidate in root.rglob("*") if candidate.is_file())
+PY
+}
+
+collect_diagnostics() {
+  mkdir -p "$DIAGNOSTICS_DIR"
+  for name in setup.out runtime.out runtime.err opencode-auth-list.out opencode-auth-list.err runtime-auth-list.out runtime-auth-list.err daily-mutation.out daily-fanout.out fanout-before.txt fanout-after.txt fanout-new.txt fanout-messages.jsonl sessions-after-fanout.json real-response-copy.txt benchmark-blocker.txt benchmark-compare.out benchmark-validate.out daily-report.json; do
+    copy_bounded "$TEST_ROOT/$name" "$DIAGNOSTICS_DIR/$name"
+  done
+  for name in OPENCODE_AUTH REAL_DAILY_RESPONSE_COPY REAL_4_CHILD_PARALLEL parent-session-id child-session-id opencode-auth-metadata.json codex-auth-metadata.json opencode-destination-metadata.json packet-schema.json; do
+    copy_bounded "$TEST_ROOT/$name" "$DIAGNOSTICS_DIR/$name" 50000
+  done
+  if [ -n "$RUN_STATE_DIR" ] && [ -d "$RUN_STATE_DIR" ]; then
+    for name in manifest.json state port parent_session_id launcher.identity server.identity bridge.identity watchdog.identity reaper.identity bridge.log reaper.log; do
+      copy_bounded "$RUN_STATE_DIR/$name" "$DIAGNOSTICS_DIR/run-state/$name"
+    done
+  fi
+  if [ -d "$TEAM_HOME/cache/runtime" ]; then
+    find "$TEAM_HOME/cache/runtime" -maxdepth 5 -name manifest.json -type f -print | while IFS= read -r manifest; do
+      copy_bounded "$manifest" "$DIAGNOSTICS_DIR/manifests/$(basename "$(dirname "$manifest")").json" 50000
+    done
+  fi
+  OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" runtime-status >"$DIAGNOSTICS_DIR/runtime-status.json" 2>"$DIAGNOSTICS_DIR/runtime-status.err" || true
+  printf 'result=failed\nsource_root_deleted=true\n' >"$DIAGNOSTICS_DIR/result.txt"
+  cap_diagnostics
+}
 
 cleanup() {
+  local exit_code=$?
+  [ "$exit_code" -eq 0 ] || FAILED=1
+  cd "$ROOT" 2>/dev/null || cd /tmp 2>/dev/null || true
   if [ -n "$PREFLIGHT_PID" ]; then
     kill "$PREFLIGHT_PID" >/dev/null 2>&1 || true
   fi
-  for pid in "$RUNTIME_PID" "$BRIDGE_PID" "$WATCHDOG_PID" "$SERVER_PID"; do
+  for pid in "$RUNTIME_PID" "$BRIDGE_PID" "$WATCHDOG_PID" "$REAPER_PID" "$SERVER_PID"; do
     if [ -n "$pid" ] && kill -0 "$pid" >/dev/null 2>&1; then
       kill "$pid" >/dev/null 2>&1 || true
     fi
@@ -40,19 +107,28 @@ cleanup() {
   if [ -n "$RUNTIME_PID" ]; then
     kill "$RUNTIME_PID" >/dev/null 2>&1 || true
   fi
-  if [ "$PRESERVE_TEST_ROOT" = 1 ]; then
-    printf 'certification_evidence_root=%s\n' "$TEST_ROOT" >&2
+  if [ "$FAILED" = 1 ] || [ "$PRESERVE_TEST_ROOT" = 1 ]; then
+    collect_diagnostics
+    printf 'certification_diagnostics_dir=%s\n' "$DIAGNOSTICS_DIR" >&2
   else
-    rm -rf "$TEST_ROOT"
+    rm -rf "$DIAGNOSTICS_DIR"
   fi
+  rm -rf "$TEAM_HOME" "$TEST_ROOT"
+  return "$exit_code"
 }
 trap cleanup EXIT INT TERM
 
 block() {
   printf 'CERTIFICATION BLOCKED: %s\n' "$*" >&2
-  PRESERVE_TEST_ROOT=1
+  FAILED=1
   exit 1
 }
+
+if [ "${OPENAI_DAILY_CERTIFICATION_INTENTIONAL_FAILURE:-}" = 1 ]; then
+  block "intentional failure probe"
+  printf '%s\n' 'OPENAI DAILY CERTIFICATION PASS'
+  exit 0
+fi
 
 assert_file() {
   [ -f "$1" ] || block "missing file: $1"
@@ -95,9 +171,10 @@ post_session_message() {
     status="$(curl -fsS --max-time 10 "http://127.0.0.1:$port/session/status" | jq -r --arg id "$parent_session" '.[$id].type // "unknown"')" || return 1
     count="$(curl -fsS --max-time 10 "http://127.0.0.1:$port/session/$parent_session/message" | jq 'length')" || return 1
     if [ "$count" -gt "$before_count" ] && [ "$status" != busy ] && [ "$status" != retry ]; then
-      jq -e 'any(.[]; .info.role == "assistant")' "$output" >/dev/null 2>&1 || curl -fsS --max-time 10 "http://127.0.0.1:$port/session/$parent_session/message" >"$output"
-      jq -e 'any(.[]; .info.role == "assistant")' "$output" >/dev/null || return 1
-      return 0
+      curl -fsS --max-time 10 "http://127.0.0.1:$port/session/$parent_session/message" >"$output"
+      if jq -e 'any(.[]; .info.role == "assistant")' "$output" >/dev/null 2>&1; then
+        return 0
+      fi
     fi
     sleep 1
   done
@@ -117,7 +194,7 @@ discover_opencode_auth_source() {
     -u XDG_CONFIG_HOME \
     -u XDG_DATA_HOME \
     -u XDG_STATE_HOME \
-    opencode auth list >"$out" 2>"$err"; then
+    opencode auth list --pure >"$out" 2>"$err"; then
     block "opencode auth list failed before metadata discovery; see $err"
   fi
   node - "$out" <<'NODE'
@@ -208,13 +285,13 @@ NODE
 }
 
 wait_for_runtime_state() {
-  local run_root="$TEAM_HOME/data/daily/state/runs" run_dir count
+  local run_root="$TEAM_HOME/cache/runtime/daily/runs" run_dir count
   for _ in $(seq 1 90); do
     if [ -d "$run_root" ]; then
       count="$(find "$run_root" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
       if [ "$count" = 1 ]; then
         run_dir="$(find "$run_root" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-        [ -f "$run_dir/port" ] && [ -f "$run_dir/server.pid" ] && [ -f "$run_dir/parent_session_id" ] && [ -f "$run_dir/bridge.identity" ] && [ -f "$run_dir/watchdog.identity" ] && {
+        [ -f "$run_dir/port" ] && [ -f "$run_dir/server.pid" ] && [ -f "$run_dir/parent_session_id" ] && [ -f "$run_dir/bridge.identity" ] && {
           printf '%s\n' "$run_dir"
           return 0
         }
@@ -236,13 +313,25 @@ fi
 if rg -q 'OPENAI DAILY CERTIFICATION PASS' "$probe_output"; then
   block "intentional failure printed PASS"
 fi
+if rg -q 'certification_evidence_root=' "$probe_output"; then
+  block "intentional failure preserved full root"
+fi
+probe_diag="$(sed -n 's/^certification_diagnostics_dir=//p' "$probe_output" | tail -n 1)"
+[ -n "$probe_diag" ] || block "intentional failure did not emit diagnostics dir"
+[ -d "$probe_diag" ] || block "intentional failure diagnostics dir missing"
+[ ! -d "$probe_diag/team-home" ] || block "intentional failure diagnostics included heavy team home"
+assert_file "$probe_diag/result.txt"
+rg -q 'source_root_deleted=true' "$probe_diag/result.txt" || block "intentional failure did not record source cleanup"
+probe_diag_bytes="$(du -sk "$probe_diag" | awk '{print $1 * 1024}')"
+[ "$probe_diag_bytes" -le "${OPENAI_DAILY_CERTIFICATION_DIAGNOSTICS_MAX_BYTES:-5000000}" ] || block "intentional failure diagnostics exceeded cap"
+rm -rf "$probe_diag"
 
 opencode_auth_source="$(discover_opencode_auth_source)" || block "opencode auth metadata did not include exactly one auth.json path"
 validate_auth_metadata "$opencode_auth_source" "OpenCode source" >"$TEST_ROOT/opencode-auth-metadata.json"
 codex_auth_source="${OPENAI_DAILY_CERTIFICATION_CODEX_AUTH_SOURCE:-$HOME/.codex/auth.json}"
 validate_auth_metadata "$codex_auth_source" "Codex source" >"$TEST_ROOT/codex-auth-metadata.json"
 
-OPENCODE_TEAM_HOME="$TEAM_HOME" "$ROOT/bin/opencode-team" setup >"$TEST_ROOT/setup.out"
+OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" setup >"$TEST_ROOT/setup.out"
 assert_file "$TEAM_HOME/config/daily/opencode.jsonc"
 node - "$TEAM_HOME/config/daily/opencode.jsonc" <<'NODE'
 const fs = require("node:fs");
@@ -264,7 +353,7 @@ printf '%s\n' "const { add } = require('./calculator.js');" 'if (add(2, 3) !== 5
 node "$fixture/calculator.test.js" >"$TEST_ROOT/fixture-baseline.out"
 
 cd "$fixture"
-TEAM_RUNTIME_HEADLESS=1 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_AUTH_SOURCE="$opencode_auth_source" \
+TEAM_RUNTIME_HEADLESS=1 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" OPENCODE_AUTH_SOURCE="$opencode_auth_source" \
   OPENAI_CODEX_AUTH_SOURCE="$codex_auth_source" "$ROOT/bin/opencode-team" daily >"$TEST_ROOT/runtime.out" 2>"$TEST_ROOT/runtime.err" &
 RUNTIME_PID=$!
 run_dir="$(wait_for_runtime_state)" || block "daily runtime did not publish bounded run state"
@@ -272,7 +361,8 @@ RUN_STATE_DIR="$run_dir"
 server_pid="$(< "$run_dir/server.pid")"
 SERVER_PID="$server_pid"
 BRIDGE_PID="$(< "$run_dir/bridge.pid")"
-WATCHDOG_PID="$(< "$run_dir/watchdog.pid")"
+[ -f "$run_dir/watchdog.pid" ] && WATCHDOG_PID="$(< "$run_dir/watchdog.pid")"
+[ -f "$run_dir/reaper.pid" ] && REAPER_PID="$(< "$run_dir/reaper.pid")"
 port="$(< "$run_dir/port")"
 parent_session="$(< "$run_dir/parent_session_id")"
 [ -n "$parent_session" ] || block "daily parent session was not created"
@@ -288,7 +378,7 @@ XDG_DATA_HOME="$TEAM_HOME/data/daily/data" XDG_CONFIG_HOME="$TEAM_HOME/config/da
 rg -q 'OpenAI' "$runtime_auth_output" || block "OpenCode provider preflight failed"
 printf '%s\n' PASS >"$TEST_ROOT/OPENCODE_AUTH"
 
-mutation_prompt='Inspect this fixture first using the appropriate repository worker. Then add multiply(a, b) to calculator.js, add a focused test, execute the test, and give a concise final summary. Work only inside this fixture.'
+mutation_prompt='Inspect this fixture first using the appropriate repository worker. The orchestrator MUST delegate the implementation to codex_executor, codex_executor MUST edit only calculator.js and calculator.test.js, and the tester MUST execute node calculator.test.js before completion. Add multiply(a, b) to calculator.js, add a focused test, execute the test, and give a concise final summary. Do not only describe edits: make the files change. Work only inside this fixture.'
 request_output="$TEST_ROOT/daily-mutation.out"
 if ! post_session_message "$request_output" "$mutation_prompt"; then
   block "real Daily parent request failed; see $request_output"
@@ -316,8 +406,8 @@ done
 rg -qi 'calculator\.test\.js|node .*calculator' "$TEST_ROOT/messages-"* || block "persisted messages do not prove test command"
 
 NODE_ROOT="$ROOT" NODE_SERVER="http://127.0.0.1:$port" NODE_PARENT="$parent_session" NODE_COPY="$TEST_ROOT/real-response-copy.txt" node <<'NODE'
-const fs = require("node:fs");
-const { pathToFileURL } = require("node:url");
+const fs = await import("node:fs");
+const { pathToFileURL } = await import("node:url");
 const { copyResponse } = await import(pathToFileURL(`${process.env.NODE_ROOT}/shared/response-copy/response-copy-plugin.js`));
 const base = process.env.NODE_SERVER;
 const get = async (path) => ({ data: await (await fetch(`${base}${path}`)).json() });
@@ -355,21 +445,27 @@ const result = Object.fromEntries(fields.map((field) => [field, packets.some((pa
 fs.writeFileSync(output, JSON.stringify({ packet_count: packets.length, fields: result }, null, 2), { mode: 0o600 });
 NODE
 report_output="$TEST_ROOT/daily-report.json"
-OPENCODE_TEAM_HOME="$TEAM_HOME" "$ROOT/bin/opencode-team" daily-report >"$report_output"
+OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" daily-report >"$report_output"
 jq -e '.completed_tasks >= 1' "$report_output" >/dev/null || block "daily-report did not see real work packets"
 
 curl -fsS --max-time 5 "http://127.0.0.1:$port/session" >"$TEST_ROOT/sessions-before-fanout.json"
 jq -er --arg parent "$parent_session" '.[] | select(.parentID == $parent) | .id' "$TEST_ROOT/sessions-before-fanout.json" | sort -u >"$TEST_ROOT/fanout-before.txt"
-fanout_prompt='Perform a read-only analysis of this fixture using exactly four independent parallel repository-worker slices: architecture, tests, runtime, and documentation. Each child must own one distinct slice, and all four must complete. Do not edit any file.'
+fanout_prompt='This is a hard acceptance gate. Before replying, use the orchestrator delegation tool to create exactly FOUR child sessions in parallel, one and only one for each distinct slice: architecture, tests, runtime, documentation. Include the exact slice name in each child prompt. Wait for all four child results, then summarize them. Do not perform the analysis yourself, do not skip delegation, and do not edit any file.'
 fanout_output="$TEST_ROOT/daily-fanout.out"
-fanout_start="$(date +%s%3N)"
-if ! post_session_message "$fanout_output" "$fanout_prompt"; then
-  block "real Daily four-slice request failed; see $fanout_output"
-fi
-fanout_end="$(date +%s%3N)"
-curl -fsS --max-time 5 "http://127.0.0.1:$port/session" >"$TEST_ROOT/sessions-after-fanout.json"
-jq -er --arg parent "$parent_session" '.[] | select(.parentID == $parent) | .id' "$TEST_ROOT/sessions-after-fanout.json" | sort -u >"$TEST_ROOT/fanout-after.txt"
-comm -13 "$TEST_ROOT/fanout-before.txt" "$TEST_ROOT/fanout-after.txt" >"$TEST_ROOT/fanout-new.txt"
+fanout_start="$(python3 -c 'import time; print(int(time.time() * 1000))')"
+for fanout_attempt in 1 2 3; do
+  if [ "$fanout_attempt" -gt 1 ]; then
+    fanout_prompt="The prior delegation was incomplete. Create only the missing repository-worker child slices now: architecture, tests, runtime, documentation. Use one child per missing slice, do not duplicate existing children, wait for them, and do not edit files. This is required before replying."
+  fi
+  post_session_message "$fanout_output" "$fanout_prompt" || block "real Daily four-slice request failed; see $fanout_output"
+  curl -fsS --max-time 5 "http://127.0.0.1:$port/session" >"$TEST_ROOT/sessions-after-fanout.json"
+  jq -er --arg parent "$parent_session" '.[] | select(.parentID == $parent) | .id' "$TEST_ROOT/sessions-after-fanout.json" | sort -u >"$TEST_ROOT/fanout-after.txt"
+  comm -13 "$TEST_ROOT/fanout-before.txt" "$TEST_ROOT/fanout-after.txt" >"$TEST_ROOT/fanout-new.txt"
+  fanout_count="$(wc -l <"$TEST_ROOT/fanout-new.txt" | tr -d ' ')"
+  [ "$fanout_count" -eq 4 ] && break
+  [ "$fanout_count" -lt 4 ] || block "real four-slice fanout created too many children"
+done
+fanout_end="$(python3 -c 'import time; print(int(time.time() * 1000))')"
 [ "$(wc -l <"$TEST_ROOT/fanout-new.txt" | tr -d ' ')" -eq 4 ] || block "real four-slice fanout did not create exactly four new children"
 for slice in architecture tests runtime documentation; do
   found=0
