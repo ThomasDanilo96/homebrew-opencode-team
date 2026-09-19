@@ -19,6 +19,27 @@ shared_bytes() {
 
 shared_before_bytes="$(shared_bytes)"
 
+ROOT_ISOLATION_HOME="$TEST_ROOT/root-isolation-home"
+mkdir -p "$ROOT_ISOLATION_HOME"
+HOME="$ROOT_ISOLATION_HOME" \
+XDG_CONFIG_HOME="$ROOT_ISOLATION_HOME/best/xdg-config" \
+XDG_DATA_HOME="$ROOT_ISOLATION_HOME/best/data" \
+XDG_STATE_HOME="$ROOT_ISOLATION_HOME/best/state" \
+XDG_CACHE_HOME="$ROOT_ISOLATION_HOME/best/cache" \
+SANDBOX="$ROOT_ISOLATION_HOME/best" \
+PERSISTENT_DATA_ROOT="$ROOT_ISOLATION_HOME/best/data" \
+RUNTIME_ROOT="$ROOT_ISOLATION_HOME/best/cache/runtime" \
+TEAM_RUNTIME_INNER=1 TEAM_NAME=best \
+OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" \
+  "$ROOT/bin/opencode-team" setup >"$TEST_ROOT/root-isolation.out"
+rg -q "config root       $ROOT_ISOLATION_HOME/.config/opencode-team$" "$TEST_ROOT/root-isolation.out"
+rg -q "data root         $ROOT_ISOLATION_HOME/.local/share/opencode-team$" "$TEST_ROOT/root-isolation.out"
+rg -q "state root        $ROOT_ISOLATION_HOME/.local/state/opencode-team$" "$TEST_ROOT/root-isolation.out"
+rg -q "cache root        $ROOT_ISOLATION_HOME/.cache/opencode-team$" "$TEST_ROOT/root-isolation.out"
+rg -q "runtime root      $ROOT_ISOLATION_HOME/.cache/opencode-team/runtime$" "$TEST_ROOT/root-isolation.out"
+rg -q "dependency root   $DEP_ROOT$" "$TEST_ROOT/root-isolation.out"
+! rg -q '/best/(xdg-config|data|state|cache)/opencode-team' "$TEST_ROOT/root-isolation.out"
+
 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" setup >/tmp/opencode-team-setup-smoke.out
 first_shared_bytes="$(shared_bytes)"
 TUI_FILES=()
@@ -111,9 +132,14 @@ rm -rf "$TEAM_HOME/cache/runtime/best"
 TEAM_RUNTIME_HEADLESS=1 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" best >"$TEST_ROOT/upgrade-start.out" 2>&1 &
 upgrade_pid=$!
 upgrade_ready=0
+upgrade_run_rel=""
 for _ in $(seq 1 30); do
   readiness="$(OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" runtime-readiness 2>/dev/null || true)"
-  if printf '%s' "$readiness" | jq -e '.ready == true' >/dev/null 2>&1; then upgrade_ready=1; break; fi
+  if printf '%s' "$readiness" | jq -e '.ready == true and ([.runs[] | select(.ready == true)] | length) == 1' >/dev/null 2>&1; then
+    upgrade_ready=1
+    upgrade_run_rel="$(printf '%s' "$readiness" | jq -r '.runs[] | select(.ready == true) | .run')"
+    break
+  fi
   if ! kill -0 "$upgrade_pid" 2>/dev/null; then break; fi
   sleep 1
 done
@@ -123,8 +149,36 @@ if [ "$upgrade_ready" -ne 1 ]; then
   wait "$upgrade_pid" 2>/dev/null || true
   exit 1
 fi
-kill "$upgrade_pid" 2>/dev/null || true
+case "$upgrade_run_rel" in best/runs/[0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F][0-9a-fA-F]) ;; *) printf 'invalid readiness run path: %s\n' "$upgrade_run_rel" >&2; exit 1 ;; esac
+upgrade_run_dir="$TEAM_HOME/cache/runtime/$upgrade_run_rel"
+test -d "$upgrade_run_dir"
+upgrade_identity_pids=""
+for role in launcher server bridge attach watchdog reaper; do
+  identity_file="$upgrade_run_dir/$role.identity"
+  if [ -f "$identity_file" ]; then
+    upgrade_identity_pids="$upgrade_identity_pids $(sed -n 's/^pid=//p' "$identity_file")"
+  fi
+done
+test "$(sed -n 's/^pid=//p' "$upgrade_run_dir/launcher.identity")" = "$upgrade_pid"
+kill -TERM "$upgrade_pid"
 wait "$upgrade_pid" 2>/dev/null || true
+for _ in $(seq 1 30); do
+  identities_alive=0
+  for pid in $upgrade_identity_pids; do
+    if kill -0 "$pid" 2>/dev/null; then identities_alive=1; fi
+  done
+  if [ "$identities_alive" -eq 0 ] && [ ! -e "$upgrade_run_dir" ]; then break; fi
+  sleep 1
+done
+for pid in $upgrade_identity_pids; do
+  if kill -0 "$pid" 2>/dev/null; then
+    printf 'controlled runtime identity survived SIGTERM: %s\n' "$pid" >&2
+    exit 1
+  fi
+done
+test ! -e "$upgrade_run_dir"
+post_readiness="$(OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" runtime-readiness)"
+printf '%s' "$post_readiness" | jq -e --arg run "$upgrade_run_rel" '[.runs[] | select(.run == $run)] | length == 0' >/dev/null
 printf '%s\n' 'UPGRADE SELF-HEAL START PASS'
 
 TEAM_NAME=opencode-openai-daily OMO_PROFILE=openai-daily BRIDGE_MODE=native_ui \

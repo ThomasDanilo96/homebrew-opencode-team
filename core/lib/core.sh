@@ -193,6 +193,11 @@ cleanup_run() {
   [ -d "$RUN_STATE_DIR" ] && rm -rf "$RUN_STATE_DIR"
 }
 
+cleanup_and_exit() {
+  cleanup_run
+  exit 0
+}
+
 # --- Pre-server hook (exit-status based, no string inspection) ---
 run_pre_server_hook() {
   local hook_path="$1"
@@ -603,7 +608,8 @@ main() {
   echo "$LAUNCHER_PID" > "$RUN_STATE_DIR/launcher.pid"
   write_process_identity launcher "$LAUNCHER_PID" || die "Failed to record launcher identity"
 
-  trap cleanup_run EXIT INT TERM HUP
+  trap cleanup_run EXIT
+  trap cleanup_and_exit INT TERM HUP
 
   local session_mode="${SESSION_MODE:-new}"
   local resume_session_id="${RESUME_SESSION_ID:-}"
