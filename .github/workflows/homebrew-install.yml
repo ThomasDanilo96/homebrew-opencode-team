@@ -109,11 +109,11 @@ jobs:
           for team in best go openai; do
             run_dir="$(mktemp -d)"
             log="$run_dir/runtime.log"
-            (cd "$run_dir" && OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" TMUX=1 opencode-team "$team") >"$log" 2>&1 &
+            (cd "$run_dir" && HOME="$test_home" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" TMUX=1 opencode-team "$team") >"$log" 2>&1 &
             pid=$!
             ready=0
             for _ in $(seq 1 45); do
-              if rg -q 'Server ready|Parent session' "$log"; then ready=1; break; fi
+              if rg -q 'Server ready|Parent session' "$log" || HOME="$test_home" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team runtime-status 2>/dev/null | rg -q 'ACTIVE|RUNNING'; then ready=1; break; fi
               if ! kill -0 "$pid" 2>/dev/null; then break; fi
               sleep 1
             done
