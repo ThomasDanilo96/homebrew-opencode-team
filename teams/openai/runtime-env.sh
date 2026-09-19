@@ -6,7 +6,7 @@ source "$TEAM_ROOT/../../shared/runtime-env/github-token.sh"
 
 OPENAI_TEAM_ROOT="$TEAM_ROOT"
 OPENAI_TEAM_STATE_ROOT="${SANDBOX:?SANDBOX must be set}/state/team"
-OPENAI_DEPENDENCY_ROOT="${OPENAI_DEPENDENCY_ROOT:-$(cd "$SANDBOX/../dependencies/openai" && pwd)}"
+OPENAI_DEPENDENCY_ROOT="${OPENAI_DEPENDENCY_ROOT:-${OPENCODE_TEAM_DEPENDENCY_ROOT:-$(cd "$SANDBOX/../dependencies" && pwd)}/openai}"
 CODEX_HOME="${CODEX_HOME:-$HOME/.codex}"
 OPENAI_CODEX_MODEL="${OPENAI_CODEX_MODEL:-}"
 OPENAI_CODEX_QUICK_PRIMARY="${OPENAI_CODEX_QUICK_PRIMARY:-gpt-5.3-codex-spark}"

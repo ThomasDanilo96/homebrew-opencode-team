@@ -1,6 +1,8 @@
 # Portable OPENAI DAILY profile. Values are rendered by opencode-team setup.
 TEAM_NAME=opencode-openai-daily
 SANDBOX=@DATA_ROOT@/daily
+RUNTIME_ROOT=@CACHE_ROOT@/runtime/daily
+PERSISTENT_DATA_ROOT=@DATA_ROOT@/daily/data
 TMUX_PREFIX=oc-openai-daily
 OMO_PROFILE=openai-daily
 OPENCODE_CONFIG=@CONFIG_ROOT@/daily/opencode.jsonc

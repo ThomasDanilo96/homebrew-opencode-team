@@ -4,12 +4,12 @@ set -euo pipefail
 : "${OPENCODE_TEAM_HOME:?run setup first with OPENCODE_TEAM_HOME}"
 ROOT="${OPENCODE_TEAM_PACKAGE_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 
-node - "$OPENCODE_TEAM_HOME" "$ROOT" <<'NODE'
+node - "$OPENCODE_TEAM_HOME" "$ROOT" "${OPENCODE_TEAM_DEPENDENCY_ROOT:-$OPENCODE_TEAM_HOME/data/dependencies}" <<'NODE'
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const path = require("node:path");
 
-const [home, root] = process.argv.slice(2);
+const [home, root, dependencyRoot] = process.argv.slice(2);
 const read = (team) => JSON.parse(fs.readFileSync(path.join(home, "config", team, "opencode.jsonc"), "utf8"));
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 const same = (actual, expected, label) => assert(JSON.stringify(actual) === JSON.stringify(expected), `${label} mismatch`);
@@ -28,7 +28,7 @@ same(best.agent.explore.model, "opencode-go/qwen3.7-plus", "BEST explore model")
 same(best.agent.librarian.model, "opencode-go/qwen3.7-plus", "BEST librarian model");
 same(best.compaction, { auto: true, prune: true, reserved: 10000 }, "BEST compaction");
 assert(best.mcp?.serena?.enabled === true, "BEST Serena MCP missing");
-assert(path.isAbsolute(best.mcp.serena.command[0]) && best.mcp.serena.command[0].startsWith(path.join(home, "data")), "BEST Serena path invalid");
+assert(path.isAbsolute(best.mcp.serena.command[0]) && (best.mcp.serena.command[0].startsWith(path.join(home, "data")) || best.mcp.serena.command[0].startsWith(dependencyRoot)), "BEST Serena path invalid");
 assert(best.provider?.["opencode-go"]?.options?.timeout === 300000, "BEST provider options missing");
 assert(best.plugin.length === 2 && path.isAbsolute(best.plugin[0]), "BEST plugin order/path invalid");
 
@@ -39,7 +39,7 @@ same(go.default_agent, "OpenCode-Builder", "GO default_agent");
 same(go.compaction, { auto: true, prune: true, reserved: 10000 }, "GO compaction");
 assert(go.disabled_providers.includes("openai"), "GO provider policy missing");
 assert(go.mcp?.serena?.enabled === true, "GO Serena MCP missing");
-assert(path.isAbsolute(go.mcp.serena.command[0]) && go.mcp.serena.command[0].startsWith(path.join(home, "data")), "GO Serena path invalid");
+assert(path.isAbsolute(go.mcp.serena.command[0]) && (go.mcp.serena.command[0].startsWith(path.join(home, "data")) || go.mcp.serena.command[0].startsWith(dependencyRoot)), "GO Serena path invalid");
 assert(go.provider?.["opencode-go"]?.options?.max_tokens === 32768, "GO provider options missing");
 assert(go.plugin.length === 1 && path.isAbsolute(go.plugin[0]), "GO plugin order/path invalid");
 
@@ -51,7 +51,7 @@ same(Object.keys(openai.agent).sort(), ["codex_executor", "openai_explore", "ope
 same(openai.enabled_providers, ["openai"], "OPENAI enabled providers");
 same(openai.compaction, { auto: true, prune: true, reserved: 10000 }, "OPENAI compaction");
 assert(openai.mcp?.serena?.enabled === true, "OPENAI Serena MCP missing");
-assert(path.isAbsolute(openai.mcp.serena.command[0]) && openai.mcp.serena.command[0].startsWith(path.join(home, "data")), "OPENAI Serena path invalid");
+assert(path.isAbsolute(openai.mcp.serena.command[0]) && (openai.mcp.serena.command[0].startsWith(path.join(home, "data")) || openai.mcp.serena.command[0].startsWith(dependencyRoot)), "OPENAI Serena path invalid");
 assert(openai.plugin.length === 3 && openai.plugin.every(path.isAbsolute), "OPENAI plugin paths invalid");
 
 const daily = read("daily");
@@ -62,7 +62,7 @@ same(Object.keys(daily.agent).sort(), ["codex_executor", "openai_explore", "open
 same(daily.enabled_providers, ["openai"], "OPENAI DAILY enabled providers");
 same(daily.compaction, { auto: true, prune: true, reserved: 24000 }, "OPENAI DAILY compaction");
 assert(daily.mcp?.serena?.enabled === true, "OPENAI DAILY Serena MCP missing");
-assert(path.isAbsolute(daily.mcp.serena.command[0]) && daily.mcp.serena.command[0].startsWith(path.join(home, "data")), "OPENAI DAILY Serena path invalid");
+assert(path.isAbsolute(daily.mcp.serena.command[0]) && (daily.mcp.serena.command[0].startsWith(path.join(home, "data")) || daily.mcp.serena.command[0].startsWith(dependencyRoot)), "OPENAI DAILY Serena path invalid");
 assert(daily.plugin.length === 3 && daily.plugin.every(path.isAbsolute), "OPENAI DAILY plugin paths invalid");
 assert(daily.plugin[1].endsWith("/teams/openai/config/opencode/openai-team-tools.js"), "OPENAI DAILY shared tools path invalid");
 

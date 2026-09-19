@@ -1,6 +1,8 @@
 # Portable OPENAI profile. Values are rendered by opencode-team setup.
 TEAM_NAME=opencode-openai-team-unified-candidate
 SANDBOX=@DATA_ROOT@/openai
+RUNTIME_ROOT=@CACHE_ROOT@/runtime/openai
+PERSISTENT_DATA_ROOT=@DATA_ROOT@/openai/data
 TMUX_PREFIX=oc-openai
 OMO_PROFILE=openai-candidate
 OPENCODE_CONFIG=@CONFIG_ROOT@/openai/opencode.jsonc

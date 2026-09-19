@@ -1,6 +1,8 @@
 # Portable GO profile. Values are rendered by opencode-team setup.
 TEAM_NAME=go
 SANDBOX=@DATA_ROOT@/go
+RUNTIME_ROOT=@CACHE_ROOT@/runtime/go
+PERSISTENT_DATA_ROOT=@DATA_ROOT@/go/data
 TMUX_PREFIX=oc-go-unified-candidate
 OMO_PROFILE=go-team-v2-visible
 OPENCODE_CONFIG=@CONFIG_ROOT@/go/opencode.jsonc

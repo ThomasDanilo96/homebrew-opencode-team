@@ -1,6 +1,8 @@
 # Portable BEST profile. Values are rendered by opencode-team setup.
 TEAM_NAME=best
 SANDBOX=@DATA_ROOT@/best
+RUNTIME_ROOT=@CACHE_ROOT@/runtime/best
+PERSISTENT_DATA_ROOT=@DATA_ROOT@/best/data
 TMUX_PREFIX=oc-best-unified-candidate
 OMO_PROFILE=best-team
 OPENCODE_CONFIG=@CONFIG_ROOT@/best/opencode.jsonc
