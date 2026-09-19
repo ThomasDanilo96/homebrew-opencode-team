@@ -127,7 +127,7 @@ kill "$upgrade_pid" 2>/dev/null || true
 wait "$upgrade_pid" 2>/dev/null || true
 printf '%s\n' 'UPGRADE SELF-HEAL START PASS'
 
-TEAM_NAME=opencode-openai-daily OMO_PROFILE=openai-daily \
+TEAM_NAME=opencode-openai-daily OMO_PROFILE=openai-daily BRIDGE_MODE=native_ui \
   OPENCODE_CONFIG="$TEAM_HOME/config/daily/opencode.jsonc" \
   OPENCODE_CONFIG_DIR="$TEAM_HOME/config/daily" \
   SANDBOX="$TEAM_HOME/data/daily" \
