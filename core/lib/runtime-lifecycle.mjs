@@ -179,6 +179,23 @@ const evaluateRun = (runDir) => {
   return { run: relative(runtimeRoot, runDir), path: runDir, decision: "delete", reason: "proven_inactive", state: manifest.state, identity };
 };
 
+const readinessForRun = (runDir) => {
+  const manifest = readJson(join(runDir, "manifest.json"));
+  const schema = validateManifest(manifest, runDir);
+  if (schema !== "ok") return { run: relative(runtimeRoot, runDir), ready: false, reason: schema };
+  const runID = String(manifest.run_id);
+  const identity = Object.fromEntries(["launcher", "server"].map((role) => [role, identityState(runDir, role, runID)]));
+  const ready = manifest.state === "ACTIVE" && Boolean(String(manifest.parent_session_id || "").trim()) && Object.values(identity).every((state) => state === "alive");
+  return {
+    run: relative(runtimeRoot, runDir),
+    ready,
+    reason: ready ? "active_server" : "incomplete_initialization",
+    state: manifest.state,
+    parent_session_id: String(manifest.parent_session_id || ""),
+    identity,
+  };
+};
+
 const runDirs = () => {
   const found = [];
   const directRuns = join(runtimeRoot, "runs");
@@ -439,6 +456,8 @@ if (command === "gc") {
 } else if (command === "status") {
   const decisions = runDirs().map(evaluateRun);
   print({ runs: decisions, storage: storageAccounting() });
+} else if (command === "readiness") {
+  print({ ready: runDirs().some((runDir) => readinessForRun(runDir).ready), runs: runDirs().map(readinessForRun) });
 } else if (command === "accounting") {
   print(storageAccounting());
 } else if (command === "quota") {

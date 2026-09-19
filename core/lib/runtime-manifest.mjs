@@ -56,7 +56,7 @@ if (command === "publish") {
     run_id: await readText("run_id"),
     team: await readText("team"),
     job_type: await readText("job_type") || "interactive",
-    session_id: await readText("parent_session_id"),
+    parent_session_id: await readText("parent_session_id"),
     ...processFields,
     parent_pid: Number(await readText("parent_pid")) || null,
     created_at: await readText("created_at") || new Date().toISOString(),
@@ -68,9 +68,11 @@ if (command === "publish") {
   };
 } else if (command === "state") {
   manifest.state = process.argv[4] || "UNCERTAIN";
+  manifest.parent_session_id = await readText("parent_session_id");
   manifest.last_heartbeat = new Date().toISOString();
   manifest = { ...manifest, ...processFields, size_bytes: await fileSize(runDirectory) };
 } else if (command === "heartbeat") {
+  manifest.parent_session_id = await readText("parent_session_id");
   manifest.last_heartbeat = new Date().toISOString();
   manifest = { ...manifest, ...processFields, size_bytes: await fileSize(runDirectory) };
 } else {
