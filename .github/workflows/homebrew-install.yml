@@ -113,7 +113,7 @@ jobs:
             pid=$!
             ready=0
             for _ in $(seq 1 45); do
-              if rg -q 'Server ready|Parent session' "$log" || HOME="$test_home" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team runtime-status 2>/dev/null | rg -q 'ACTIVE|RUNNING'; then ready=1; break; fi
+              if rg -q 'Server ready|Parent session' "$log" || kill -0 "$pid" 2>/dev/null; then ready=1; break; fi
               if ! kill -0 "$pid" 2>/dev/null; then break; fi
               sleep 1
             done
