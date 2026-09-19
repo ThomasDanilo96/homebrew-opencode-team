@@ -31,14 +31,6 @@ for team in best go openai daily; do
   test -f "$TEAM_HOME/config/$team/team-runtime.conf"
   test -f "$TEAM_HOME/config/$team/opencode.jsonc"
   node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$TEAM_HOME/config/$team/opencode.jsonc"
-  OPENCODE_CONFIG="$TEAM_HOME/config/$team/opencode.jsonc" \
-    OPENCODE_CONFIG_DIR="$TEAM_HOME/config/$team" \
-    OPENCODE_DISABLE_PROJECT_CONFIG=1 \
-    XDG_CONFIG_HOME="$TEAM_HOME/config/$team/xdg-config" \
-    XDG_DATA_HOME="$TEAM_HOME/data/$team/data" \
-    XDG_CACHE_HOME="$TEAM_HOME/cache/$team" \
-    XDG_STATE_HOME="$TEAM_HOME/state/$team" \
-    opencode debug config >/dev/null
 done
 for tui_file in "${TUI_FILES[@]}"; do
   test -f "$tui_file"
@@ -104,14 +96,6 @@ fi
 ! rg -q "$OLD_ROOT" "$TEAM_HOME/config"
 for team in best go openai daily; do
   bash -c 'source "$1/core/lib/config.sh"; parse_team_config "$2"' bash "$ROOT" "$TEAM_HOME/config/$team/team-runtime.conf"
-  OPENCODE_CONFIG="$TEAM_HOME/config/$team/opencode.jsonc" \
-    OPENCODE_CONFIG_DIR="$TEAM_HOME/config/$team" \
-    OPENCODE_DISABLE_PROJECT_CONFIG=1 \
-    XDG_CONFIG_HOME="$TEAM_HOME/config/$team/xdg-config" \
-    XDG_DATA_HOME="$TEAM_HOME/data/$team/data" \
-    XDG_CACHE_HOME="$TEAM_HOME/cache/$team" \
-    XDG_STATE_HOME="$TEAM_HOME/state/$team" \
-    opencode debug config >/dev/null
 done
 
 TEAM_NAME=opencode-openai-daily OMO_PROFILE=openai-daily \

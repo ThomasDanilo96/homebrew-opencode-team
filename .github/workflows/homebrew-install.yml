@@ -27,7 +27,7 @@ jobs:
           sw_vers
           uname -m
           brew --prefix
-           test "$(opencode-team version)" = "OpenCode Team 0.1.10"
+          test "$(opencode-team version)" = "OpenCode Team 0.1.11"
           node --version
           opencode --version
           python3 --version
@@ -37,16 +37,17 @@ jobs:
           rg --version
           package_root="$(brew --prefix opencode-team)/libexec"
           test -x "$package_root/bin/opencode-team"
-           test "$(opencode-team version)" = "OpenCode Team 0.1.10"
+          test "$(opencode-team version)" = "OpenCode Team 0.1.11"
 
       - name: Clean-room setup and doctor
         run: |
           test_home="$(mktemp -d)"
           trap 'rm -rf "$test_home"' EXIT
-          OPENCODE_TEAM_HOME="$test_home" opencode-team setup
-          OPENCODE_TEAM_HOME="$test_home" opencode-team doctor
+          shared_dependencies="$test_home/shared-dependencies"
+          OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup
+          OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team doctor
 
-          test -x "$test_home/data/bin/serena"
+          test -x "$shared_dependencies/bin/serena"
           for team in best go openai; do
             test -f "$test_home/config/$team/team-runtime.conf"
             test -f "$test_home/config/$team/opencode.jsonc"
@@ -62,25 +63,29 @@ jobs:
             "$package_root/shared/response-copy/response-copy-plugin.js" \
             "$package_root/teams/best/tui.json.template" \
             "$package_root/teams/go/tui.json.template" \
-            "$package_root/teams/openai/tui.json.template"; do
+            "$package_root/teams/openai/tui.json.template" \
+            "$package_root/core/lib/runtime-manifest.mjs" \
+            "$package_root/core/lib/runtime-lifecycle.mjs" \
+            "$package_root/core/lib/runtime-reaper.sh"; do
             test -f "$required_file"
           done
+          test -f "$test_home/state/maintenance/launchagents/it.danilodantoni.opencode-team.runtime-gc.plist"
           node --test "$package_root/shared/response-copy/tests/"*.test.mjs
-           OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_HOME="$test_home" bash "$GITHUB_WORKSPACE/tests/config-parity.sh"
+          OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" bash "$GITHUB_WORKSPACE/tests/config-parity.sh"
           ! rg -n '/Users/|\.opencode-team-staging|go-final-ux-v1|best-shared-v1' "$test_home"
-          test "$(shasum -a 256 "$test_home/data/dependencies/best/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "a022deff9202c97e922a4a75c357beab420907f724fe9214267dad53fe72455e"
-          test "$(shasum -a 256 "$test_home/data/dependencies/go/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "cf01dcad9a7a1b09840bf5f92d0dfb11cc724cdd00f32aa4c5a87af227c5b5bc"
+          test "$(shasum -a 256 "$shared_dependencies/best/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "a022deff9202c97e922a4a75c357ecbeab420907f724fe9214267dad53fe72455e"
+          test "$(shasum -a 256 "$shared_dependencies/go/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "cf01dcad9a7a1b09840bf5f92d0dfb11cc724cdd00f32aa4c5a87af227c5b5bc"
 
       - name: Formula test and audit
         run: |
           brew test ThomasDanilo96/opencode-team/opencode-team
-          brew audit --strict ThomasDanilo96/opencode-team/opencode-team
+          brew audit --strict --formula ThomasDanilo96/opencode-team/opencode-team
 
       - name: Installed v0.1.7 maintenance regression
         run: |
           export PATH="$(brew --prefix node@22)/bin:$PATH"
           package_root="$(brew --prefix opencode-team)/libexec"
-           test "$(opencode-team version)" = "OpenCode Team 0.1.10"
+          test "$(opencode-team version)" = "OpenCode Team 0.1.11"
           test -f "$package_root/shared/maintenance/run-maintenance.sh"
           test -f "$package_root/shared/maintenance/opencode-cleanup.py"
           test -f "$package_root/shared/maintenance/openai-state-retention.mjs"
@@ -92,7 +97,8 @@ jobs:
         run: |
           test_home="$(mktemp -d)"
           trap 'rm -rf "$test_home"' EXIT
-          OPENCODE_TEAM_HOME="$test_home" opencode-team setup >/dev/null
+          shared_dependencies="$test_home/shared-dependencies"
+          OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup >/dev/null
           terminate_tree() {
             local parent="$1" child
             for child in $(pgrep -P "$parent" 2>/dev/null || true); do
@@ -103,7 +109,7 @@ jobs:
           for team in best go openai; do
             run_dir="$(mktemp -d)"
             log="$run_dir/runtime.log"
-            (cd "$run_dir" && OPENCODE_TEAM_HOME="$test_home" TMUX=1 opencode-team "$team") >"$log" 2>&1 &
+            (cd "$run_dir" && OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" TMUX=1 opencode-team "$team") >"$log" 2>&1 &
             pid=$!
             ready=0
             for _ in $(seq 1 45); do

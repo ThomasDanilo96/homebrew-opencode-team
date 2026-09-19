@@ -84,6 +84,7 @@ for (const team of ["openai", "daily"]) {
     OPENCODE_CONFIG_DIR: path.join(home, "config", team),
     OPENCODE_DISABLE_PROJECT_CONFIG: "1",
     OPENCODE_DISABLE_CLAUDE_CODE: "1",
+    HOME: home,
     XDG_CONFIG_HOME: path.join(home, "config", team, "xdg-config"),
     XDG_DATA_HOME: path.join(home, "data", team, "data"),
     XDG_CACHE_HOME: path.join(home, "cache", team),
