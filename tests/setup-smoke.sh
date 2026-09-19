@@ -81,12 +81,19 @@ for (const team of ["best", "go", "openai", "daily"]) {
     };
     visit(path.join(configRoot, team));
     for (const candidate of matches) {
-      const contents = fs.readFileSync(candidate, "utf8");
-      fs.writeFileSync(candidate, contents.replaceAll(currentRoot, oldRoot));
+      let contents = fs.readFileSync(candidate, "utf8").replaceAll(currentRoot, oldRoot);
+      if (file === "team-runtime.conf") {
+        contents = contents.replace(/^RUNTIME_ROOT=.*\n/gm, "").replace(/^PERSISTENT_DATA_ROOT=.*\n/gm, "");
+      }
+      fs.writeFileSync(candidate, contents);
     }
   }
 }
 NODE
+
+for team in best go openai daily; do
+  rm -rf "$TEAM_HOME/cache/runtime/$team" "$TEAM_HOME/data/$team/data"
+done
 
 if ! OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" doctor >/tmp/opencode-team-setup-smoke-upgrade.out; then
   cat /tmp/opencode-team-setup-smoke-upgrade.out >&2
@@ -95,8 +102,30 @@ fi
 ! rg -q '/Cellar/opencode-team/[0-9]' "$TEAM_HOME/config"
 ! rg -q "$OLD_ROOT" "$TEAM_HOME/config"
 for team in best go openai daily; do
+  test -d "$TEAM_HOME/cache/runtime/$team"
+  test -d "$TEAM_HOME/data/$team/data"
   bash -c 'source "$1/core/lib/config.sh"; parse_team_config "$2"' bash "$ROOT" "$TEAM_HOME/config/$team/team-runtime.conf"
 done
+
+rm -rf "$TEAM_HOME/cache/runtime/best"
+TEAM_RUNTIME_HEADLESS=1 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" best >"$TEST_ROOT/upgrade-start.out" 2>&1 &
+upgrade_pid=$!
+upgrade_ready=0
+for _ in $(seq 1 30); do
+  readiness="$(OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" runtime-readiness 2>/dev/null || true)"
+  if printf '%s' "$readiness" | jq -e '.ready == true' >/dev/null 2>&1; then upgrade_ready=1; break; fi
+  if ! kill -0 "$upgrade_pid" 2>/dev/null; then break; fi
+  sleep 1
+done
+if [ "$upgrade_ready" -ne 1 ]; then
+  cat "$TEST_ROOT/upgrade-start.out" >&2
+  kill "$upgrade_pid" 2>/dev/null || true
+  wait "$upgrade_pid" 2>/dev/null || true
+  exit 1
+fi
+kill "$upgrade_pid" 2>/dev/null || true
+wait "$upgrade_pid" 2>/dev/null || true
+printf '%s\n' 'UPGRADE SELF-HEAL START PASS'
 
 TEAM_NAME=opencode-openai-daily OMO_PROFILE=openai-daily \
   OPENCODE_CONFIG="$TEAM_HOME/config/daily/opencode.jsonc" \

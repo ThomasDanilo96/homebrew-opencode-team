@@ -25,6 +25,7 @@ usage() {
     '  opencode-team start <best|go|openai|daily> [--resume SESSION]' \
     '  opencode-team daily-report [--markdown]' \
     '  opencode-team runtime-status' \
+    '  opencode-team runtime-readiness' \
     '  opencode-team runtime-gc [--apply]' \
     '  opencode-team storage-accounting' \
     '  opencode-team runtime-quota' \
@@ -288,6 +289,27 @@ setup_roots() {
   fi
 }
 
+ensure_profile_roots() {
+  local team="$1"
+  mkdir -p \
+    "$CONFIG_ROOT/$team/xdg-config" \
+    "$CONFIG_ROOT/$team/claude-config" \
+    "$DATA_ROOT/$team" \
+    "$DATA_ROOT/$team/data" \
+    "$STATE_ROOT/$team" \
+    "$CACHE_ROOT/$team" \
+    "$RUNTIME_ROOT/$team"
+  chmod 700 \
+    "$CONFIG_ROOT/$team" \
+    "$CONFIG_ROOT/$team/xdg-config" \
+    "$CONFIG_ROOT/$team/claude-config" \
+    "$DATA_ROOT/$team" \
+    "$DATA_ROOT/$team/data" \
+    "$STATE_ROOT/$team" \
+    "$CACHE_ROOT/$team" \
+    "$RUNTIME_ROOT/$team"
+}
+
 maintenance_tasks() {
   printf '%s\n' best-tool-output-gc best-retention openai-retention runtime-gc
 }
@@ -302,16 +324,62 @@ maintenance_label() {
   esac
 }
 
-legacy_maintenance_detected() {
+legacy_maintenance_plist() {
+  printf '%s/Library/LaunchAgents/%s.plist\n' "$HOME" "$1"
+}
+
+legacy_label_for_task() {
+  case "$1" in
+    best-tool-output-gc) printf '%s\n' com.thomasd.opencode-best-tool-output-gc ;;
+    best-retention) printf '%s\n' com.thomasd.opencode-best-retention ;;
+    openai-retention) printf '%s\n' com.thomasd.opencode-retention ;;
+    *) return 1 ;;
+  esac
+}
+
+legacy_task_detected() {
   [ "${OPENCODE_TEAM_LEGACY_MAINTENANCE:-}" = 1 ] && return 0
   [ -n "${OPENCODE_TEAM_HOME:-}" ] && return 1
-  local label plist
+  local label="$1" plist
+  plist="$(legacy_maintenance_plist "$label")"
+  [ -f "$plist" ] && return 0
+  launchctl print "gui/${UID:-$(id -u)}/$label" >/dev/null 2>&1
+}
+
+legacy_maintenance_detected() {
+  local label
   for label in com.thomasd.opencode-best-tool-output-gc com.thomasd.opencode-best-retention com.thomasd.opencode-retention; do
-    plist="$HOME/Library/LaunchAgents/$label.plist"
-    [ -f "$plist" ] && return 0
-    launchctl print "gui/${UID:-$(id -u)}/$label" >/dev/null 2>&1 && return 0
+    legacy_task_detected "$label" && return 0
   done
   return 1
+}
+
+legacy_task_package_owned() {
+  local task="$1" label plist executable
+  case "$task" in
+    best-tool-output-gc)
+      label=com.thomasd.opencode-best-tool-output-gc
+      plist="$(legacy_maintenance_plist "$label")"
+      [ -f "$plist" ] || return 1
+      executable="$(plutil -extract ProgramArguments.1 raw -o - "$plist" 2>/dev/null || true)"
+      [ "$executable" = "$HOME/.opencode-team-staging/unified-core-v1/teams/best/tool-output-gc.mjs" ] && [ -f "$executable" ]
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+migrate_legacy_task() {
+  local task="$1" label plist
+  case "$task" in
+    best-tool-output-gc) label=com.thomasd.opencode-best-tool-output-gc ;;
+    *) return 1 ;;
+  esac
+  plist="$(legacy_maintenance_plist "$label")"
+  launchctl bootout "gui/${UID:-$(id -u)}/$label" >/dev/null 2>&1 || true
+  rm -f "$plist"
+  printf '  %-18s migrated exact legacy job (%s)\n' "$task" "$label"
 }
 
 maintenance_status() {
@@ -376,21 +444,24 @@ PY
 }
 
 install_maintenance() {
-  local task plist label agent_dir status_marker
+  local task plist label agent_dir status_marker legacy_label
   mkdir -p "$STATE_ROOT/maintenance/status" "$STATE_ROOT/maintenance/logs"
-  if legacy_maintenance_detected; then
-    printf 'Maintenance migration deferred: legacy BEST GC/retention and OPENAI retention detected\n'
-    for task in $(maintenance_tasks); do
-      printf '%s\n' DEFERRED > "$STATE_ROOT/maintenance/status/$task"
-    done
-    return 0
-  fi
   if [ -n "${OPENCODE_TEAM_HOME:-}" ]; then
     agent_dir="$STATE_ROOT/maintenance/launchagents"
   else
     agent_dir="$HOME/Library/LaunchAgents"
   fi
   for task in $(maintenance_tasks); do
+    legacy_label="$(legacy_label_for_task "$task" 2>/dev/null || true)"
+    if [ -n "$legacy_label" ] && legacy_task_detected "$legacy_label"; then
+      if legacy_task_package_owned "$task"; then
+        migrate_legacy_task "$task"
+      else
+        printf '  %-18s deferred: ownership is not package-conclusive\n' "$task"
+        printf '%s\n' DEFERRED > "$STATE_ROOT/maintenance/status/$task"
+        continue
+      fi
+    fi
     label="$(maintenance_label "$task")"
     plist="$agent_dir/$label.plist"
     write_maintenance_plist "$task" "$plist"
@@ -544,7 +615,8 @@ refresh_generated_configs() {
       printf 'Cannot refresh stale package config: OMO plugin is missing: %s\n' "$OMO_PLUGIN" >&2
       return 1
     }
-    mkdir -p "$CONFIG_ROOT/$team/xdg-config/opencode" "$CONFIG_ROOT/$team/claude-config"
+    ensure_profile_roots "$team"
+    mkdir -p "$CONFIG_ROOT/$team/xdg-config/opencode"
     case "$team" in
       best) hook_source="$PACKAGE_ROOT/teams/best/patch-omo-hook-timeout.sh"; hook_name=patch-omo-hook-timeout.sh ;;
       go) hook_source="$PACKAGE_ROOT/teams/go/patch-omo-task-completion.sh"; hook_name=patch-omo-task-completion.sh ;;
@@ -625,7 +697,7 @@ setup() {
     dependency_team="$team"
     [ "$team" = daily ] && dependency_team=openai
     export OMO_PLUGIN="$DEPENDENCY_ROOT/$dependency_team/node_modules/oh-my-openagent/dist/index.js"
-    mkdir -p "$CONFIG_ROOT/$team/xdg-config" "$CONFIG_ROOT/$team/claude-config" "$DATA_ROOT/$team" "$DATA_ROOT/$team/data" "$STATE_ROOT/$team" "$CACHE_ROOT/$team" "$RUNTIME_ROOT/$team"
+    ensure_profile_roots "$team"
     case "$team" in
       best) hook_source="$PACKAGE_ROOT/teams/best/patch-omo-hook-timeout.sh"; hook_name="patch-omo-hook-timeout.sh" ;;
       go) hook_source="$PACKAGE_ROOT/teams/go/patch-omo-task-completion.sh"; hook_name="patch-omo-task-completion.sh" ;;
@@ -667,6 +739,12 @@ runtime_status() {
   setup_roots
   export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
   node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" status
+}
+
+runtime_readiness() {
+  setup_roots
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" readiness
 }
 
 runtime_gc() {
@@ -727,6 +805,7 @@ start_team() {
       ;;
   esac
   setup_roots
+  ensure_profile_roots "$team"
   ensure_generated_config_current || return 1
   local config_file="$CONFIG_ROOT/$team/team-runtime.conf"
   if [ ! -f "$config_file" ]; then
@@ -771,6 +850,10 @@ case "${1:-}" in
   runtime-status)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
     runtime_status
+    ;;
+  runtime-readiness)
+    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+    runtime_readiness
     ;;
   runtime-gc)
     shift
