@@ -15,6 +15,7 @@ const runtimeRoot = resolve(process.env.RUNTIME_ROOT || join(cacheRoot, "runtime
 const dependencyRoot = resolve(process.env.DEPENDENCY_ROOT || join(dataRoot, "dependencies"));
 const teams = ["best", "go", "openai", "daily"];
 const roles = ["launcher", "server", "bridge", "attach", "watchdog", "reaper"];
+const legacyFamily = /^(?:opencode-team-|opencode-daily-|openai-daily-|daily-(?:real|postcommit)-|opencode-daily-cert\.|\.opencode-team-daily-|omo-(?:hook-repro|ignore|inspect-npm|pack-name)(?:[-.].*)?$|openai-admit-concurrency-|opencode-(?:auth|best|cutover|maintenance|model|server)-)/i;
 
 const readText = (path) => {
   try { return readFileSync(path, "utf8").trim(); } catch { return ""; }
@@ -367,36 +368,51 @@ const rotateLogs = (apply) => {
   return { rotated, mode: apply ? "apply" : "dry-run" };
 };
 
-const classifyLegacy = () => {
-  const requested = process.argv.slice(3);
-  const discovered = [];
-  const walkFamilies = (root, depth) => {
+const legacyFamilyPath = (path) => {
+  const name = basename(path);
+  if (legacyFamily.test(name)) return true;
+  return name === ".omo" && legacyFamily.test(basename(dirname(path)));
+};
+
+const legacyTempRoots = () => {
+  const roots = ["/private/tmp"];
+  const visit = (root, depth) => {
     if (depth < 0 || !existsSync(root)) return;
     let entries;
     try { entries = readdirSync(root, { withFileTypes: true }); } catch { return; }
     for (const entry of entries) {
       const path = join(root, entry.name);
-      if (/opencode|openai|omo|team-runtime/i.test(entry.name)) discovered.push(path);
-      if (entry.isDirectory()) walkFamilies(path, depth - 1);
+      if (entry.isDirectory() && entry.name === "T") roots.push(path);
+      else if (entry.isDirectory() && depth > 0) visit(path, depth - 1);
     }
   };
-  const paths = requested.length ? requested : [
-    ...readdirSync(homedir(), { withFileTypes: true }).filter((entry) => entry.name.startsWith(".opencode-team-daily-live")).map((entry) => join(homedir(), entry.name)),
-    join(homedir(), ".opencode-team-daily-beta"),
-    ...discovered,
-  ];
-  if (!requested.length) {
-    walkFamilies("/private/tmp", 1);
-    walkFamilies("/var/folders", 3);
-    paths.push(...discovered);
+  visit("/var/folders", 3);
+  return roots;
+};
+
+const legacyDiscoveredPaths = () => {
+  const paths = readdirSync(homedir(), { withFileTypes: true })
+    .filter((entry) => legacyFamilyPath(entry.name) || entry.name === ".opencode-team-staging")
+    .map((entry) => join(homedir(), entry.name));
+  for (const root of legacyTempRoots()) {
+    let entries;
+    try { entries = readdirSync(root, { withFileTypes: true }); } catch { continue; }
+    paths.push(...entries.filter((entry) => legacyFamilyPath(entry.name)).map((entry) => join(root, entry.name)));
   }
+  return paths;
+};
+
+const classifyLegacy = () => {
+  const requested = process.argv.slice(3);
+  const paths = requested.length ? requested : legacyDiscoveredPaths();
   return paths.map((item) => {
     const path = resolve(item.replace(/^~(?=$|\/)/, homedir()));
     const open = openReferences(path);
     let info = null;
     try { const stat = lstatSync(path); info = { size_bytes: stat.isFile() ? stat.size : sizeOf(path, 10_000).bytes, mtime_ms: Math.floor(stat.mtimeMs), symlink: stat.isSymbolicLink() }; } catch {}
     const packageOwned = inside(path, dataRoot) || inside(path, cacheRoot) || inside(path, stateRoot);
-    const classification = packageOwned ? "package-owned" : open.state === "open" ? "legacy-active" : open.state === "error" || info?.symlink ? "legacy-uncertain" : "legacy-reclaimable-read-only";
+    const knownLegacy = packageOwned || legacyFamilyPath(path) || path === join(homedir(), ".opencode-team-staging");
+    const classification = open.state === "open" ? "legacy-active" : open.state === "error" || info?.symlink || !info || !knownLegacy ? "legacy-uncertain" : packageOwned ? "package-owned" : "legacy-reclaimable-read-only";
     return { path, exists: !!info, ...info, open_state: open.state, open_count: open.refs.length, open_refs: open.refs, live_process_refs: open.refs, classification };
   });
 };

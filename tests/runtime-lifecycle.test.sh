@@ -176,8 +176,23 @@ test -f "$OPENCODE_TEAM_HOME/data/best/data/opencode/codegraph.db"
 
 mkdir -p "$TEST_ROOT/legacy"
 printf '%s\n' legacy >"$TEST_ROOT/legacy/cache.log"
-"$ROOT/bin/opencode-team" legacy-classify "$TEST_ROOT/legacy" >"$TEST_ROOT/legacy.json"
-jq -e '.[0].classification == "legacy-reclaimable-read-only" and .[0].exists == true' "$TEST_ROOT/legacy.json" >/dev/null
+fixture_root="$TEST_ROOT/legacy-siblings"
+mkdir -p "$fixture_root"
+for fixture in opencode-team-setup.TEST opencode-daily-cert.TEST openai-daily-test.TEST com.apple.ap.promotedcontentd com.openai.codex com.openai.chat unrelated-app-cache random-user-file; do
+  printf '%s\n' fixture >"$fixture_root/$fixture"
+done
+"$ROOT/bin/opencode-team" legacy-classify \
+  "$fixture_root/opencode-team-setup.TEST" \
+  "$fixture_root/opencode-daily-cert.TEST" \
+  "$fixture_root/com.apple.ap.promotedcontentd" \
+  "$fixture_root/unrelated-app-cache" \
+  "$fixture_root/random-user-file" >"$TEST_ROOT/legacy.json"
+jq -e 'all(.[0:3][]; .classification == "legacy-reclaimable-read-only")' "$TEST_ROOT/legacy.json" >/dev/null
+jq -e 'all(.[3:][]; .classification == "legacy-uncertain")' "$TEST_ROOT/legacy.json" >/dev/null
+printf '%s\n' symlink >"$TEST_ROOT/legacy-target"
+ln -s "$TEST_ROOT/legacy-target" "$TEST_ROOT/opencode-team-symlink.TEST"
+"$ROOT/bin/opencode-team" legacy-classify "$open_dir" "$TEST_ROOT/opencode-team-symlink.TEST" >"$TEST_ROOT/legacy-safety.json"
+jq -e '.[0].classification == "legacy-active" and .[1].classification == "legacy-uncertain"' "$TEST_ROOT/legacy-safety.json" >/dev/null
 test -f "$TEST_ROOT/legacy/cache.log"
 
 "$ROOT/bin/opencode-team" time-machine-exclude >"$TEST_ROOT/tm.json"
