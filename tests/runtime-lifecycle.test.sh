@@ -178,22 +178,46 @@ mkdir -p "$TEST_ROOT/legacy"
 printf '%s\n' legacy >"$TEST_ROOT/legacy/cache.log"
 fixture_root="$TEST_ROOT/legacy-siblings"
 mkdir -p "$fixture_root"
-for fixture in opencode-team-setup.TEST opencode-daily-cert.TEST openai-daily-test.TEST com.apple.ap.promotedcontentd com.openai.codex com.openai.chat unrelated-app-cache random-user-file; do
+for fixture in opencode-team-setup.TEST opencode-daily-cert.TEST openai-daily-test.TEST omo-hook-repro.TEST com.apple.ap.promotedcontentd com.openai.codex com.openai.chat unrelated-app-cache random-user-file; do
   printf '%s\n' fixture >"$fixture_root/$fixture"
 done
 "$ROOT/bin/opencode-team" legacy-classify \
   "$fixture_root/opencode-team-setup.TEST" \
   "$fixture_root/opencode-daily-cert.TEST" \
+  "$fixture_root/openai-daily-test.TEST" \
+  "$fixture_root/omo-hook-repro.TEST" \
   "$fixture_root/com.apple.ap.promotedcontentd" \
+  "$fixture_root/com.openai.chat" \
+  "$fixture_root/com.openai.codex" \
   "$fixture_root/unrelated-app-cache" \
   "$fixture_root/random-user-file" >"$TEST_ROOT/legacy.json"
-jq -e 'all(.[0:3][]; .classification == "legacy-reclaimable-read-only")' "$TEST_ROOT/legacy.json" >/dev/null
-jq -e 'all(.[3:][]; .classification == "legacy-uncertain")' "$TEST_ROOT/legacy.json" >/dev/null
+jq -e 'all(.[0:4][]; .classification == "legacy-reclaimable-read-only")' "$TEST_ROOT/legacy.json" >/dev/null
+jq -e 'all(.[4:][]; .classification == "legacy-uncertain")' "$TEST_ROOT/legacy.json" >/dev/null
 printf '%s\n' symlink >"$TEST_ROOT/legacy-target"
 ln -s "$TEST_ROOT/legacy-target" "$TEST_ROOT/opencode-team-symlink.TEST"
 "$ROOT/bin/opencode-team" legacy-classify "$open_dir" "$TEST_ROOT/opencode-team-symlink.TEST" >"$TEST_ROOT/legacy-safety.json"
 jq -e '.[0].classification == "legacy-active" and .[1].classification == "legacy-uncertain"' "$TEST_ROOT/legacy-safety.json" >/dev/null
 test -f "$TEST_ROOT/legacy/cache.log"
+
+cat >"$TEST_ROOT/fake-lsof" <<'EOF'
+#!/usr/bin/env bash
+case "${OPENCODE_TEAM_LSOF_MODE:-multiple}" in
+  beginning) printf 'p123\nfignored\n' ;;
+  multiple) printf 'p123\np456\np123\n' ;;
+  clear) printf 'fignored\nnignored\n' ;;
+  failure) exit 2 ;;
+  *) exit 64 ;;
+esac
+EOF
+chmod +x "$TEST_ROOT/fake-lsof"
+for mode in beginning multiple clear failure; do
+  OPENCODE_TEAM_LSOF="$TEST_ROOT/fake-lsof" OPENCODE_TEAM_LSOF_MODE="$mode" \
+    "$ROOT/bin/opencode-team" legacy-classify "$fixture_root/opencode-team-setup.TEST" >"$TEST_ROOT/lsof-$mode.json"
+done
+jq -e '.[0].open_state == "open" and .[0].open_refs == [123] and .[0].open_count == 1' "$TEST_ROOT/lsof-beginning.json" >/dev/null
+jq -e '.[0].open_state == "open" and .[0].open_refs == [123,456] and .[0].open_count == 2' "$TEST_ROOT/lsof-multiple.json" >/dev/null
+jq -e '.[0].open_state == "clear" and .[0].open_refs == [] and .[0].open_count == 0' "$TEST_ROOT/lsof-clear.json" >/dev/null
+jq -e '.[0].open_state == "error" and .[0].classification == "legacy-uncertain"' "$TEST_ROOT/lsof-failure.json" >/dev/null
 
 "$ROOT/bin/opencode-team" time-machine-exclude >"$TEST_ROOT/tm.json"
 jq -e 'all(.[]; .mode == "dry-run" and .child_covered == true)' "$TEST_ROOT/tm.json" >/dev/null

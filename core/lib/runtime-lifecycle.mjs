@@ -15,7 +15,7 @@ const runtimeRoot = resolve(process.env.RUNTIME_ROOT || join(cacheRoot, "runtime
 const dependencyRoot = resolve(process.env.DEPENDENCY_ROOT || join(dataRoot, "dependencies"));
 const teams = ["best", "go", "openai", "daily"];
 const roles = ["launcher", "server", "bridge", "attach", "watchdog", "reaper"];
-const legacyFamily = /^(?:opencode-team-|opencode-daily-|openai-daily-|daily-(?:real|postcommit)-|opencode-daily-cert\.|\.opencode-team-daily-|omo-(?:hook-repro|ignore|inspect-npm|pack-name)(?:[-.].*)?$|openai-admit-concurrency-|opencode-(?:auth|best|cutover|maintenance|model|server)-)/i;
+const legacyFamily = /^(?:opencode-team-|opencode-daily-|openai-daily-|daily-(?:real|postcommit)-|opencode-daily-cert[.-]|\.opencode-team-daily-|omo-(?:hook-repro|ignore|inspect-npm|pack-name)(?:[-.].*)?$|openai-admit-concurrency-|opencode-(?:auth|best|cutover|maintenance|model|server)-)/i;
 
 const readText = (path) => {
   try { return readFileSync(path, "utf8").trim(); } catch { return ""; }
@@ -87,7 +87,10 @@ const openReferences = (path) => {
   if (!existsSync(path)) return { state: "missing", refs: [] };
   const result = lsof(["-Fpn", "+D", path]);
   if (result.error || ![0, 1].includes(result.status ?? 1)) return { state: "error", refs: [] };
-  const refs = [...(result.stdout || "").matchAll(/\np(\d+)\n/g)].map((match) => Number(match[1]));
+  const refs = (result.stdout || "").split(/\r?\n/).flatMap((line) => {
+    const match = line.match(/^p(\d+)$/);
+    return match ? [Number(match[1])] : [];
+  });
   return { state: refs.length ? "open" : "clear", refs: [...new Set(refs)] };
 };
 
