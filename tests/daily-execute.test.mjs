@@ -354,6 +354,33 @@ test("waitForRuntimeReady and prompt polling use injected fetch without model ca
   }
 });
 
+test("prompt polling skips empty intermediate assistant messages", async () => {
+  const run = prepareRun(byTask("lookup-routing-contract", CONTROL_PROFILE));
+  let messageCalls = 0;
+  try {
+    const fetch = async (url) => {
+      if (url.endsWith("/message")) {
+        messageCalls += 1;
+        return {
+          ok: true,
+          json: async () => messageCalls === 1
+            ? []
+            : messageCalls === 2
+            ? [{ info: { role: "assistant" }, parts: [] }]
+            : [{ info: { role: "assistant" }, parts: [{ type: "text", text: "final answer" }] }],
+        };
+      }
+      if (url.endsWith("/prompt_async")) return { ok: true, json: async () => ({ accepted: true }) };
+      if (url.endsWith("/session/status")) return { ok: true, json: async () => ({ ses_parent: { type: "unknown" } }) };
+      throw new Error(`unexpected url: ${url}`);
+    };
+    const response = await postPromptAndPoll({ baseUrl: "http://127.0.0.1:5678", parent_session_id: "ses_parent" }, "Objective", { fetch, sleep: async () => {} });
+    assert.equal(response.assistant.parts[0].text, "final answer");
+  } finally {
+    rmSync(run.root, { recursive: true, force: true });
+  }
+});
+
 test("evaluator returns deterministic PASS, PARTIAL, FAIL and rejects unknown labels", () => {
   const run = prepareRun(byTask("lookup-routing-contract", TREATMENT_PROFILE));
   try {

@@ -562,6 +562,14 @@ function lastAssistant(messages) {
   return assistants.at(-1) ?? null;
 }
 
+function assistantText(message) {
+  return (Array.isArray(message?.parts) ? message.parts : [])
+    .filter((part) => part?.type === "text" && typeof part.text === "string")
+    .map((part) => part.text)
+    .join("\n")
+    .trim();
+}
+
 export async function postPromptAndPoll(runtime, prompt, options = {}) {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") throw Object.assign(new Error("fetch_unavailable"), { code: "FETCH_UNAVAILABLE" });
@@ -582,8 +590,9 @@ export async function postPromptAndPoll(runtime, prompt, options = {}) {
     const statuses = await fetchJson(fetchImpl, `${runtime.baseUrl}/session/status`);
     latestStatus = statuses?.[runtime.parent_session_id]?.type ?? "unknown";
     latest = await fetchJson(fetchImpl, `${sessionUrl}/message`);
-    if (!["busy", "retry"].includes(latestStatus) && assistantCount(latest) > beforeAssistantCount) {
-      return { status: "OK", session_status: latestStatus, before_count: Array.isArray(before) ? before.length : null, after_count: Array.isArray(latest) ? latest.length : null, assistant: lastAssistant(latest), messages: latest };
+    const assistant = lastAssistant(latest);
+    if (!["busy", "retry"].includes(latestStatus) && assistantCount(latest) > beforeAssistantCount && assistantText(assistant)) {
+      return { status: "OK", session_status: latestStatus, before_count: Array.isArray(before) ? before.length : null, after_count: Array.isArray(latest) ? latest.length : null, assistant, messages: latest };
     }
     await sleep(options.intervalMs ?? 1000);
   }
@@ -593,15 +602,15 @@ export async function postPromptAndPoll(runtime, prompt, options = {}) {
 async function defaultExecuteTask(run, profileHandle, deps = {}) {
   const runtime = profileHandle?.runtime ?? await waitForRuntimeReady(run, { fetch: deps.fetch, sleep: deps.sleep, now: deps.now, timeoutMs: deps.readinessTimeoutMs, intervalMs: deps.readinessIntervalMs });
   const response = await postPromptAndPoll(runtime, buildTaskPrompt(run), { fetch: deps.fetch, sleep: deps.sleep, now: deps.now, timeoutMs: deps.promptTimeoutMs, intervalMs: deps.promptPollIntervalMs });
-  const assistantText = boundedText(response.assistant ?? "", 4096);
+  const responseText = boundedText(assistantText(response.assistant), 4096);
   return {
     error_code: "NONE",
-    response_text: assistantText,
+    response_text: responseText,
     response_evidence: {
       session_status: response.session_status,
       before_count: response.before_count,
       after_count: response.after_count,
-      assistant_excerpt: assistantText,
+      assistant_excerpt: responseText,
     },
   };
 }
