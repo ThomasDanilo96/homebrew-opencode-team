@@ -24,6 +24,7 @@ usage() {
     '  opencode-team daily [--resume SESSION]' \
     '  opencode-team start <best|go|openai|daily> [--resume SESSION]' \
     '  opencode-team daily-report [--markdown]' \
+    '  opencode-team daily-benchmark <list|validate|prepare|report> [options]' \
     '  opencode-team runtime-status' \
     '  opencode-team runtime-readiness' \
     '  opencode-team runtime-gc [--apply]' \
@@ -905,6 +906,10 @@ case "${1:-}" in
     shift
     setup_roots
     exec env OPENAI_TEAM_STATE_ROOT="$DATA_ROOT/daily/state/team" node "$PACKAGE_ROOT/teams/daily/bin/daily-report.mjs" "$@"
+    ;;
+  daily-benchmark)
+    shift
+    exec node "$PACKAGE_ROOT/benchmarks/daily/runner.mjs" "$@"
     ;;
   runtime-status)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
