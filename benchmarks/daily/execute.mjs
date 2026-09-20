@@ -2,7 +2,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DAILY_PRICING, dailyCost } from "../../teams/daily/daily-policy.mjs";
@@ -377,6 +377,15 @@ export function buildRunEnv(run, extra = {}, env = process.env) {
     OPENCODE_TEAM_DEPENDENCY_ROOT: dependencyRootForRun(run, env),
     ...extra,
   };
+  const hostHome = env.HOME || homedir();
+  if (!Object.hasOwn(next, "OPENCODE_AUTH_SOURCE")) {
+    const source = join(hostHome, ".local/share/opencode/auth.json");
+    if (existsSync(source)) next.OPENCODE_AUTH_SOURCE = source;
+  }
+  if (!Object.hasOwn(next, "OPENAI_CODEX_AUTH_SOURCE")) {
+    const source = join(hostHome, ".codex/auth.json");
+    if (existsSync(source)) next.OPENAI_CODEX_AUTH_SOURCE = source;
+  }
   if (env.OPENCODE_AUTH_SOURCE) next.OPENCODE_AUTH_SOURCE = env.OPENCODE_AUTH_SOURCE;
   if (env.OPENAI_CODEX_AUTH_SOURCE) next.OPENAI_CODEX_AUTH_SOURCE = env.OPENAI_CODEX_AUTH_SOURCE;
   return next;

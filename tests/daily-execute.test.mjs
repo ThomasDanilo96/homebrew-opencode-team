@@ -6,6 +6,7 @@ import { join } from "node:path";
 import {
   CONTROL_PROFILE,
   TREATMENT_PROFILE,
+  buildRunEnv,
   buildRunMatrix,
   collectTelemetryFromRoot,
   defaultStartProfile,
@@ -25,6 +26,16 @@ const manifest = loadManifest();
 const selection = loadSelection();
 const matrix = () => buildRunMatrix({ manifest, selection, generation: 2 });
 const byTask = (taskId, profile) => matrix().find((run) => run.task_id === taskId && run.profile === profile);
+
+test("isolated runtime bridges default host auth sources without copying credentials", () => {
+  const run = prepareRun(byTask("lookup-routing-contract", CONTROL_PROFILE));
+  const env = buildRunEnv(run, {}, { HOME: process.env.HOME });
+  assert.equal(env.OPENCODE_AUTH_SOURCE, join(process.env.HOME, ".local/share/opencode/auth.json"));
+  assert.equal(env.OPENAI_CODEX_AUTH_SOURCE, join(process.env.HOME, ".codex/auth.json"));
+  assert.equal(env.OPENCODE_TEAM_HOME, run.home.root);
+  rmSync(run.root, { recursive: true, force: true });
+});
+
 const fakeLifecycle = {
   setupProfile: async () => ({ status: "OK" }),
   startProfile: async () => ({ status: "OK" }),
