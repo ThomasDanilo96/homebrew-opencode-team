@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { cpSync, existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DAILY_CONTRACT, OPENAI_CONTRACT, verifyDailyContract } from "./contract.mjs";
 import { summarizeDailyPackets } from "../../teams/daily/bin/daily-report.mjs";
@@ -38,7 +39,7 @@ export function createIsolatedRunRoot(prefix = "opencode-daily-benchmark-") {
 export function prepareTasks(manifest, profile, selected = manifest.tasks) {
   const root = createIsolatedRunRoot();
   const tasks = selected.map((task) => {
-    const worktree = join(root, "worktrees", task.task_id);
+    const worktree = join(root, "worktrees", task.task_id, profile);
     cpSync(join(ROOT, "benchmarks/daily/fixtures"), worktree, { recursive: true });
     return { task_id: task.task_id, tier: task.tier, objective: task.objective, verification: task.verification, profile, fixture: task.fixture, worktree, start_timestamp: null, end_timestamp: null, status: "prepared", raw_metrics: null };
   });
@@ -51,9 +52,9 @@ export function normalizeResult(result = {}) {
   const normalized = {};
   for (const name of numeric) normalized[name] = Number.isFinite(result[name]) && result[name] >= 0 ? result[name] : null;
   for (const name of ["success", "tester_required", "tester_launched", "review_required", "gate_order_correct", "final_success_only_after_required_gates"]) normalized[name] = typeof result[name] === "boolean" ? result[name] : null;
-  for (const name of ["objective_classification", "profile", "codex_profile", "codex_primary_model", "reviewer_type", "tester_result", "review_result", "error_code"]) normalized[name] = typeof result[name] === "string" ? result[name] : null;
-  normalized.subagent_types_used = Array.isArray(result.subagent_types_used) ? [...result.subagent_types_used] : [];
-  normalized.model_mix = result.model_mix && typeof result.model_mix === "object" ? { ...result.model_mix } : {};
+  for (const name of ["objective_classification", "profile", "codex_profile", "codex_primary_model", "reviewer_type", "tester_result", "review_result", "error_code", "tester_skip_classification", "review_skip_classification", "premature_finalization_classification"]) normalized[name] = typeof result[name] === "string" ? result[name] : null;
+  normalized.subagent_types_used = Array.isArray(result.subagent_types_used) ? result.subagent_types_used.filter((name) => typeof name === "string" && name !== "title" && name !== "undefined") : [];
+  normalized.model_mix = result.model_mix && typeof result.model_mix === "object" ? Object.fromEntries(["Luna", "Terra", "Sol", "other"].map((model) => [model, Number.isFinite(result.model_mix[model]) && result.model_mix[model] >= 0 ? result.model_mix[model] : 0])) : { Luna: 0, Terra: 0, Sol: 0, other: 0 };
   normalized.successful_subagents = Number.isSafeInteger(result.successful_subagents) ? result.successful_subagents : null;
   normalized.failed_subagents = Number.isSafeInteger(result.failed_subagents) ? result.failed_subagents : null;
   normalized.retried_subagents = Number.isSafeInteger(result.retried_subagents) ? result.retried_subagents : null;
@@ -66,7 +67,56 @@ export function aggregate(results) {
   const rows = results.map(normalizeResult);
   const quality = { pass: rows.filter((row) => row.success === true).length, partial: rows.filter((row) => row.success === null || row.success === undefined).length, fail: rows.filter((row) => row.success === false).length };
   const value = (name) => rows.map((row) => row[name]).filter(Number.isFinite);
-  return { count: rows.length, quality, wall_clock_ms: { median: percentile(value("wall_clock_ms"), 0.5), p95: percentile(value("wall_clock_ms"), 0.95) }, totals: Object.fromEntries(numeric.filter((name) => name !== "wall_clock_ms").map((name) => [name, value(name).length ? value(name).reduce((a, b) => a + b, 0) : null])), missing_metrics: numeric.filter((name) => value(name).length !== rows.length), model_calls: Object.fromEntries(["Luna", "Terra", "Sol", "other"].map((model) => [model, rows.reduce((count, row) => count + (row.model_mix[model] ?? 0), 0)])), gates: { tester_required: rows.filter((row) => row.tester_required === true).length, tester_pass: rows.filter((row) => row.tester_result === "PASS").length, tester_fail: rows.filter((row) => row.tester_result === "FAIL").length, tester_skipped_incorrectly: rows.filter((row) => row.tester_required === true && row.tester_launched !== true).length, review_required: rows.filter((row) => row.review_required === true).length, review_pass: rows.filter((row) => row.review_result === "PASS").length, review_reject: rows.filter((row) => row.review_result === "REJECT").length, final_success_before_gate: rows.filter((row) => row.success === true && row.final_success_only_after_required_gates !== true).length } };
+  return { count: rows.length, quality, wall_clock_ms: { median: percentile(value("wall_clock_ms"), 0.5), p95: percentile(value("wall_clock_ms"), 0.95) }, totals: Object.fromEntries(numeric.filter((name) => name !== "wall_clock_ms").map((name) => [name, value(name).length ? value(name).reduce((a, b) => a + b, 0) : null])), missing_metrics: numeric.filter((name) => value(name).length !== rows.length), model_calls: Object.fromEntries(["Luna", "Terra", "Sol", "other"].map((model) => [model, rows.reduce((count, row) => count + (row.model_mix[model] ?? 0), 0)])), gates: { tester_required: rows.filter((row) => row.tester_required === true).length, tester_pass: rows.filter((row) => row.tester_result === "PASS").length, tester_fail: rows.filter((row) => row.tester_result === "FAIL").length, tester_skipped_incorrectly: rows.filter((row) => row.tester_skip_classification === "REAL_TESTER_SKIP").length, unknown_tester_launch: rows.filter((row) => row.tester_required === true && row.tester_launched === null).length, review_required: rows.filter((row) => row.review_required === true).length, review_pass: rows.filter((row) => row.review_result === "PASS").length, review_reject: rows.filter((row) => row.review_result === "REJECT").length, review_skipped_incorrectly: rows.filter((row) => row.review_skip_classification === "REAL_REVIEW_SKIP").length, final_success_before_gate: rows.filter((row) => row.premature_finalization_classification === "REAL_PREMATURE_FINALIZATION").length, unknown_finalization: rows.filter((row) => row.final_success_only_after_required_gates === null).length } };
+}
+
+function fixturePath(root, path) {
+  const resolvedRoot = realpathSync(root);
+  const candidate = resolve(root, path);
+  const resolvedCandidate = realpathSync(candidate);
+  const escaped = relative(resolvedRoot, resolvedCandidate).startsWith("..") || isAbsolute(relative(resolvedRoot, resolvedCandidate));
+  if (escaped) throw new Error(`symlink_escape:${path}`);
+  return resolvedCandidate;
+}
+
+function fixtureEntries(root, current = "") {
+  const directory = join(root, current);
+  return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+    const path = join(current, entry.name);
+    const absolute = join(root, path);
+    if (entry.isDirectory()) return fixtureEntries(root, path);
+    const stat = lstatSync(absolute);
+    if (entry.isSymbolicLink()) fixturePath(root, path);
+    const content = stat.isFile() ? readFileSync(absolute) : Buffer.from(`${stat.mode}:${entry.isSymbolicLink() ? realpathSync(absolute) : "special"}`);
+    return [{ path, type: entry.isSymbolicLink() ? "symlink" : stat.isFile() ? "file" : "special", sha256: createHash("sha256").update(content).digest("hex"), mode: stat.mode & 0o7777 }];
+  });
+}
+
+export function captureFixtureState(root) {
+  const resolvedRoot = realpathSync(root);
+  return { root: resolvedRoot, files: Object.fromEntries(fixtureEntries(resolvedRoot).map((entry) => [entry.path, entry])) };
+}
+
+export function compareFixtureState(baseline, root) {
+  const current = captureFixtureState(root);
+  const before = baseline.files;
+  const after = current.files;
+  const changed = Object.keys(after).filter((path) => before[path] && (before[path].sha256 !== after[path].sha256 || before[path].mode !== after[path].mode)).sort();
+  const added = Object.keys(after).filter((path) => !before[path]).sort();
+  const deleted = Object.keys(before).filter((path) => !after[path]).sort();
+  return { changed, added, deleted, outside_fixture: [] };
+}
+
+export function establishTaskBaselines(metadata) {
+  const tasks = metadata.tasks.map((task) => ({ ...task, fixture_baseline: captureFixtureState(task.worktree) }));
+  const updated = { ...metadata, tasks };
+  writeFileSync(join(metadata.root, "benchmark.json"), `${JSON.stringify(updated, null, 2)}\n`, { mode: 0o600 });
+  return updated;
+}
+
+export function scoreTaskFixture(task) {
+  if (!task.fixture_baseline) throw new Error(`missing_fixture_baseline:${task.task_id}`);
+  return compareFixtureState(task.fixture_baseline, task.worktree);
 }
 
 export function groupResults(results, field) {

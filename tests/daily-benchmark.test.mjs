@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { loadManifest, validateManifest, createIsolatedRunRoot, prepareTasks, normalizeResult, aggregate, externalEvidenceStatus, buildReport } from "../benchmarks/daily/runner.mjs";
+import { loadManifest, validateManifest, createIsolatedRunRoot, prepareTasks, captureFixtureState, compareFixtureState, normalizeResult, aggregate, externalEvidenceStatus, buildReport } from "../benchmarks/daily/runner.mjs";
 import { verifyDailyContract } from "../benchmarks/daily/contract.mjs";
 
 test("DAILY contract matches the frozen source assignment", () => {
@@ -53,4 +53,66 @@ test("report blocks certification when external evidence is absent", () => {
   const report = buildReport({ evidence: externalEvidenceStatus(undefined), results: [] });
   assert.equal(report.certification, "BLOCKED_EXTERNAL_EVIDENCE");
   assert.equal(report.external_evidence.reason, "missing_OPENAI_DAILY_BENCHMARK_RESULTS");
+});
+
+test("fixture scoring ignores benchmark and runtime paths outside the fixture", () => {
+  const root = createIsolatedRunRoot("opencode-daily-fixture-test-");
+  const fixture = join(root, "worktrees", "task", "daily");
+  mkdirSync(fixture, { recursive: true });
+  writeFileSync(join(fixture, "answer.txt"), "stable\n");
+  const baseline = captureFixtureState(fixture);
+  writeFileSync(join(root, "logs", "runtime.log"), "generated\n");
+  assert.deepEqual(compareFixtureState(baseline, fixture), { changed: [], added: [], deleted: [], outside_fixture: [] });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("fixture scoring detects content, new, deleted, mode, and rejects symlink escape", () => {
+  const root = createIsolatedRunRoot("opencode-daily-fixture-test-");
+  const fixture = join(root, "worktrees", "task", "daily");
+  mkdirSync(fixture, { recursive: true });
+  writeFileSync(join(fixture, "changed.txt"), "before\n");
+  writeFileSync(join(fixture, "deleted.txt"), "gone\n");
+  const baseline = captureFixtureState(fixture);
+  writeFileSync(join(fixture, "changed.txt"), "after\n");
+  rmSync(join(fixture, "deleted.txt"));
+  writeFileSync(join(fixture, "added.txt"), "new\n");
+  chmodSync(join(fixture, "changed.txt"), 0o755);
+  assert.deepEqual(compareFixtureState(baseline, fixture), {
+    changed: ["changed.txt"],
+    added: ["added.txt"],
+    deleted: ["deleted.txt"],
+    outside_fixture: [],
+  });
+  symlinkSync(root, join(fixture, "escape"));
+  assert.throws(() => compareFixtureState(baseline, fixture), /symlink_escape/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("mtime-only fixture changes are ignored", () => {
+  const root = createIsolatedRunRoot("opencode-daily-fixture-test-");
+  const fixture = join(root, "worktrees", "task", "daily");
+  mkdirSync(fixture, { recursive: true });
+  writeFileSync(join(fixture, "stable.txt"), "stable\n");
+  const baseline = captureFixtureState(fixture);
+  const now = new Date(Date.now() + 10000);
+  const file = join(fixture, "stable.txt");
+  utimesSync(file, now, now);
+  assert.deepEqual(compareFixtureState(baseline, fixture), { changed: [], added: [], deleted: [], outside_fixture: [] });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("gate scoring preserves unknown state", () => {
+  const unknown = normalizeResult({ tester_required: true, tester_launched: null, review_required: true, final_success_only_after_required_gates: null });
+  const known = normalizeResult({ tester_required: true, tester_launched: false, tester_skip_classification: "REAL_TESTER_SKIP", review_required: true, review_skip_classification: "REAL_REVIEW_SKIP", final_success_only_after_required_gates: false, premature_finalization_classification: "REAL_PREMATURE_FINALIZATION" });
+  const report = aggregate([unknown, known]);
+  assert.equal(report.gates.tester_skipped_incorrectly, 1);
+  assert.equal(report.gates.review_skipped_incorrectly, 1);
+  assert.equal(report.gates.final_success_before_gate, 1);
+  assert.equal(report.gates.unknown_tester_launch, 1);
+  assert.equal(report.gates.unknown_finalization, 1);
+});
+
+test("model mix excludes system labels and unknown agents", () => {
+  const report = aggregate([{ success: true, model_mix: { Luna: 2, title: 8, undefined: 4, other: 3 } }]);
+  assert.deepEqual(report.model_calls, { Luna: 2, Terra: 0, Sol: 0, other: 3 });
 });
