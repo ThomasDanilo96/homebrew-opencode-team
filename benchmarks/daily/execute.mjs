@@ -1,12 +1,14 @@
 #!/usr/bin/env node
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { closeSync, cpSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DAILY_PRICING, dailyCost } from "../../teams/daily/daily-policy.mjs";
 import { captureFixtureState, compareFixtureState, loadManifest, normalizeResult } from "./runner.mjs";
+import { assertKnownVerificationLabels, classifyFixtureDiff, evaluateRun } from "./evaluate.mjs";
+import { atomicWriteFile, buildFingerprints, ensureCheckpointCompatible, loadCheckpoint, writeCheckpoint } from "./checkpoint.mjs";
 
 export const CONTROL_PROFILE = "OPENAI";
 export const TREATMENT_PROFILE = "DAILY";
@@ -15,7 +17,7 @@ const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const OPENCODE_TEAM_BIN = join(ROOT, "bin/opencode-team");
 const DEFAULT_SELECTION = join(ROOT, "benchmarks/daily/selection-12.json");
 const FIXTURES = join(ROOT, "benchmarks/daily/fixtures");
-const EVIDENCE_FILES = Object.freeze(["metadata", "fixture-before", "fixture-after", "fixture-diff", "result", "telemetry", "gate-evidence", "runtime-summary"]);
+const EVIDENCE_FILES = Object.freeze(["metadata", "fixture-before", "fixture-after", "fixture-diff", "result", "telemetry", "gate-evidence", "runtime-summary", "assistant-response"]);
 const SECRET_KEY = /(?:^|_)(?:api_?key|secret|token|password|credential|auth)(?:_|$)/i;
 const SECRET_VALUE = /\bsk-[A-Za-z0-9_-]{8,}\b|(?:api[_-]?key|secret|token|password|credential)\s*[:=]\s*\S+/i;
 const finite = (value) => Number.isFinite(value) && value >= 0 ? value : null;
@@ -138,12 +140,19 @@ export function createRunRoot(prefix = "opencode-daily-execute-") {
 
 export function prepareRun(run, { root = createRunRoot() } = {}) {
   assertAssignmentIntegrity(run);
+  assertKnownVerificationLabels(run);
+  mkdirSync(root, { recursive: true, mode: 0o700 });
   root = realpathSync(root);
+  for (const path of ["fixture", "home/config", "home/data", "home/state", "home/cache/runtime", "runtime", "logs", "evidence"]) {
+    mkdirSync(join(root, path), { recursive: true, mode: 0o700 });
+  }
   const fixtureRoot = join(root, "fixture");
   cpSync(FIXTURES, fixtureRoot, { recursive: true });
+  const dependencyRoot = run.dependency_root ?? join(root, "home/data/dependencies");
   const prepared = {
     ...run,
     root,
+    dependency_root: dependencyRoot,
     fixture_root: fixtureRoot,
     home: {
       root: join(root, "home"),
@@ -263,19 +272,21 @@ export function collectTelemetryFromRoot(run, stateRoot = telemetryStateRoot(run
     compaction_count: { value: integer(sumMetric(related, ["compaction_count", "compact_count"])), source: related.some((record) => record.compaction_count !== undefined || record.compact_count !== undefined) ? "telemetry" : null },
     wrapper_round_trips: { value: integer(sumMetric(related, ["wrapper_round_trips", "wrapper_turns"])), source: related.some((record) => record.wrapper_round_trips !== undefined || record.wrapper_turns !== undefined) ? "telemetry" : null },
   };
-  const explicitCost = numericFrom(related, ["cost", "estimated_cost"]);
+  const explicitCost = numericFrom(related, ["provider_reported_cost", "cost"]);
   const model = related.map((record) => record.executed_model || record.requested_model || record.model).find(Boolean) ?? null;
-  let cost = explicitCost;
-  if (cost.value === null && run.profile === TREATMENT_PROFILE && model) {
+  let estimatedCost = { value: null, source: null };
+  if (run.profile === TREATMENT_PROFILE && model) {
     const key = String(model).toLowerCase().replace(/^openai\//, "");
     const input = metrics.uncached_input_tokens.value;
     const cached = metrics.cached_input_tokens.value;
     const output = metrics.output_tokens.value;
     if ([input, cached, output].every((value) => value !== null)) {
-      cost = { value: dailyCost({ model: key, input, cached, output }), source: DAILY_PRICING.source };
+      estimatedCost = { value: dailyCost({ model: key, input, cached, output }), source: DAILY_PRICING.source };
     }
   }
-  metrics.cost = run.profile === CONTROL_PROFILE && explicitCost.value === null ? { value: null, source: null } : cost;
+  metrics.provider_reported_cost = explicitCost;
+  metrics.estimated_cost = estimatedCost;
+  metrics.cost = { value: estimatedCost.value ?? explicitCost.value, source: estimatedCost.source ?? explicitCost.source };
   return {
     schema_version: 1,
     source_root: stateRoot,
@@ -324,23 +335,40 @@ function requiredChecks(run, rawResult, fixtureDiff) {
 }
 
 export function normalizeExecutionResult({ run, rawResult = {}, telemetry, gateEvidence, fixtureDiff, durationMs, timedOut = false, runtimeError = null }) {
-  const checks = requiredChecks(run, rawResult, fixtureDiff);
-  const checkValues = Object.values(checks);
-  const readOnlyFailed = run.verification.includes("no_files_changed") && checks.no_files_changed !== true;
-  const success = timedOut || runtimeError || readOnlyFailed ? false : rawResult.success === true && checkValues.every(Boolean);
-  const correctness = checkValues.length ? checkValues.filter(Boolean).length / checkValues.length : (success ? 1 : 0);
+  let evaluation;
+  try {
+    evaluation = evaluateRun({ run, rawResult, telemetry, gateEvidence, fixtureDiff });
+  } catch (error) {
+    evaluation = {
+      success: false,
+      correctness_score: 0,
+      required_checks: {},
+      outcome: "FAIL",
+      harness_error: error?.message ?? "HARNESS_ERROR",
+    };
+    runtimeError ??= { code: error?.code ?? "HARNESS_ERROR" };
+  }
+  const success = timedOut || runtimeError ? false : evaluation.success;
   const metrics = telemetry?.metrics ?? {};
+  const taskDuration = finite(rawResult.task_duration_ms) ?? finite(rawResult.duration_ms) ?? finite(metrics.duration_ms);
+  const providerCost = finite(rawResult.provider_reported_cost) ?? finite(rawResult.cost) ?? finite(metrics.provider_reported_cost);
+  const estimatedCost = finite(rawResult.estimated_cost) ?? finite(metrics.estimated_cost);
   const result = {
     schema_version: 1,
     success,
-    correctness_score: Number(correctness.toFixed(6)),
-    required_checks: checks,
-    duration_ms: finite(rawResult.duration_ms) ?? finite(metrics.duration_ms) ?? finite(durationMs),
+    outcome: evaluation.outcome,
+    correctness_score: evaluation.correctness_score,
+    required_checks: evaluation.required_checks,
+    task_duration_ms: taskDuration,
+    runtime_total_ms: finite(durationMs),
+    duration_ms: taskDuration ?? finite(durationMs),
     uncached_input_tokens: finite(rawResult.uncached_input_tokens) ?? finite(metrics.uncached_input_tokens),
     cached_input_tokens: finite(rawResult.cached_input_tokens) ?? finite(metrics.cached_input_tokens),
     output_tokens: finite(rawResult.output_tokens) ?? finite(metrics.output_tokens),
     reasoning_tokens: finite(rawResult.reasoning_tokens) ?? finite(metrics.reasoning_tokens),
-    cost: finite(rawResult.cost) ?? finite(metrics.cost),
+    provider_reported_cost: providerCost,
+    estimated_cost: estimatedCost,
+    cost: estimatedCost ?? providerCost,
     retry_count: integer(rawResult.retry_count) ?? integer(metrics.retry_count),
     tool_call_count: integer(rawResult.tool_call_count) ?? integer(metrics.tool_call_count),
     compaction_count: integer(rawResult.compaction_count) ?? integer(metrics.compaction_count),
@@ -350,7 +378,7 @@ export function normalizeExecutionResult({ run, rawResult = {}, telemetry, gateE
     complexity: String(rawResult.complexity ?? run.tier ?? "unknown"),
     reasoning_effort: String(rawResult.reasoning_effort ?? "unknown"),
     reviewer_outcome: String(rawResult.reviewer_outcome ?? gateEvidence?.review_result ?? "UNKNOWN"),
-    error_code: String(rawResult.error_code ?? (timedOut ? "TIMEOUT" : runtimeError ? runtimeError.code ?? "RUNTIME_FAILURE" : "NONE")),
+    error_code: String(rawResult.error_code && rawResult.error_code !== "NONE" ? rawResult.error_code : timedOut ? "TIMEOUT" : runtimeError ? runtimeError.code ?? "RUNTIME_FAILURE" : evaluation.harness_error ? "HARNESS_ERROR" : "NONE"),
   };
   return { ...result, raw_metrics: normalizeResult({ ...result, ...gateEvidence, profile: run.profile.toLowerCase() }) };
 }
@@ -367,7 +395,10 @@ const childExit = (child) => new Promise((resolvePromise, reject) => {
 });
 
 export function dependencyRootForRun(run, env = process.env) {
-  return env.OPENCODE_TEAM_DEPENDENCY_ROOT || join(run.home.root, "data/dependencies");
+  if (env.OPENCODE_TEAM_DEPENDENCY_ROOT) return env.OPENCODE_TEAM_DEPENDENCY_ROOT;
+  if (run.dependency_root) return run.dependency_root;
+  if (env.OPENAI_DEPENDENCY_ROOT) return dirname(env.OPENAI_DEPENDENCY_ROOT);
+  return join(run.home.root, "data/dependencies");
 }
 
 export function buildRunEnv(run, extra = {}, env = process.env) {
@@ -377,6 +408,7 @@ export function buildRunEnv(run, extra = {}, env = process.env) {
     OPENCODE_TEAM_DEPENDENCY_ROOT: dependencyRootForRun(run, env),
     ...extra,
   };
+  if (!Object.hasOwn(next, "OPENAI_DEPENDENCY_ROOT")) next.OPENAI_DEPENDENCY_ROOT = join(next.OPENCODE_TEAM_DEPENDENCY_ROOT, "openai");
   const hostHome = env.HOME || homedir();
   if (!Object.hasOwn(next, "OPENCODE_AUTH_SOURCE")) {
     const source = join(hostHome, ".local/share/opencode/auth.json");
@@ -411,7 +443,7 @@ async function runCommand({ run, args, logName, env = {}, detached = false, wait
   }
   const exited = childExit(child);
   if (detached) child.unref?.();
-  const handle = { child, pid: child.pid, stdout: stdoutPath, stderr: stderrPath, exited };
+  const handle = { child, pid: child.pid, process_group_id: detached ? child.pid : null, stdout: stdoutPath, stderr: stderrPath, exited };
   if (!wait) return handle;
   const exit = await exited;
   if (exit.code !== 0) {
@@ -561,14 +593,15 @@ export async function postPromptAndPoll(runtime, prompt, options = {}) {
 async function defaultExecuteTask(run, profileHandle, deps = {}) {
   const runtime = profileHandle?.runtime ?? await waitForRuntimeReady(run, { fetch: deps.fetch, sleep: deps.sleep, now: deps.now, timeoutMs: deps.readinessTimeoutMs, intervalMs: deps.readinessIntervalMs });
   const response = await postPromptAndPoll(runtime, buildTaskPrompt(run), { fetch: deps.fetch, sleep: deps.sleep, now: deps.now, timeoutMs: deps.promptTimeoutMs, intervalMs: deps.promptPollIntervalMs });
+  const assistantText = boundedText(response.assistant ?? "", 4096);
   return {
-    success: false,
-    error_code: "UNSCORED_ASSISTANT_RESPONSE",
+    error_code: "NONE",
+    response_text: assistantText,
     response_evidence: {
       session_status: response.session_status,
       before_count: response.before_count,
       after_count: response.after_count,
-      assistant_excerpt: boundedText(response.assistant ?? "", 4096),
+      assistant_excerpt: assistantText,
     },
   };
 }
@@ -599,7 +632,7 @@ export async function defaultStopProfile(_run, handle, _reason, deps = {}) {
   if (!handle?.pid) return { status: "NOT_STARTED" };
   const kill = deps.kill ?? process.kill;
   try {
-    kill(-handle.pid, "TERM");
+    kill(-handle.pid, "SIGTERM");
   } catch (error) {
     if (error?.code === "ESRCH") return { status: "OK", reason: "already_exited" };
     throw Object.assign(error, { code: error?.code ?? "STOP_SIGNAL_FAILED" });
@@ -615,6 +648,21 @@ export async function defaultStopProfile(_run, handle, _reason, deps = {}) {
   throw Object.assign(new Error("runtime_stop_timeout"), { code: "STOP_FAILED" });
 }
 
+export async function forceCleanupRuntime(run, handle, deps = {}) {
+  if (!handle?.pid) return { status: "NOT_STARTED" };
+  const kill = deps.kill ?? process.kill;
+  try {
+    kill(-handle.pid, "SIGKILL");
+  } catch (error) {
+    if (error?.code !== "ESRCH") throw Object.assign(error, { code: error?.code ?? "FORCE_CLEANUP_FAILED" });
+  }
+  const runDir = handle.runtime?.run_dir;
+  if (runDir && String(runDir).startsWith(join(run.home.root, "cache/runtime"))) {
+    rmSync(runDir, { recursive: true, force: true });
+  }
+  return { status: "OK" };
+}
+
 export function defaultHooks(deps = {}) {
   return {
     now: deps.now ?? (() => Date.now()),
@@ -627,6 +675,7 @@ export function defaultHooks(deps = {}) {
     collectTelemetry: async (run) => collectTelemetryFromRoot(run),
     collectGateEvidence: async (run) => collectGateEvidenceFromRoot(run),
     stopProfile: (run, handle, reason) => defaultStopProfile(run, handle, reason, deps),
+    forceCleanup: (run, handle) => forceCleanupRuntime(run, handle, deps),
   };
 }
 
@@ -643,6 +692,31 @@ async function withTimeout(promise, timeoutMs, hooks) {
   return result;
 }
 
+let activeRuntime = null;
+let activeCheckpointFlush = null;
+
+export async function handleBenchmarkSignal(signal, hooks = defaultHooks()) {
+  const active = activeRuntime;
+  if (active?.run) {
+    mkdirSync(active.run.evidence_root, { recursive: true, mode: 0o700 });
+    atomicWriteFile(join(active.run.evidence_root, "interruption.json"), `${JSON.stringify({ schema_version: 1, signal, interrupted_at: new Date().toISOString(), run: { sequence: active.run.sequence, task_id: active.run.task_id, profile: active.run.profile } }, null, 2)}\n`);
+  }
+  if (active?.run && active?.handle) {
+    try { await hooks.stopProfile(active.run, active.handle, "interrupted"); } catch {}
+  }
+  if (activeCheckpointFlush) {
+    try { activeCheckpointFlush(); } catch {}
+  }
+}
+
+export function installBenchmarkSignalHandlers(hooks = defaultHooks()) {
+  for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+    process.once(signal, () => {
+      handleBenchmarkSignal(signal, hooks).finally(() => process.exit(130));
+    });
+  }
+}
+
 export async function executeRun(runPlan, options = {}) {
   const hooks = { ...defaultHooks(options.deps ?? {}), ...(options.hooks ?? {}) };
   const run = prepareRun(runPlan, options.prepare ?? {});
@@ -655,6 +729,7 @@ export async function executeRun(runPlan, options = {}) {
     fixtureBaseline = captureFixtureState(run.fixture_root);
     writeEvidence(run, "fixture-before", fixtureBaseline);
     profileHandle = await hooks.startProfile(run);
+    activeRuntime = { run, handle: profileHandle };
     runtime.start_status = profileHandle?.status ?? "OK";
     const completion = await withTimeout(Promise.resolve(hooks.executeTask(run, profileHandle)), options.timeoutMs ?? 30 * 60 * 1000, hooks);
     if (completion.timedOut) {
@@ -667,6 +742,7 @@ export async function executeRun(runPlan, options = {}) {
     runtime.error_code = error?.code ?? "RUNTIME_FAILURE";
     rawResult = { success: false, error_code: runtime.error_code };
   } finally {
+    activeRuntime = profileHandle ? { run, handle: profileHandle } : null;
     try {
       gateEvidence = normalizeGateEvidence(await hooks.collectGateEvidence(run, profileHandle));
     } catch (error) {
@@ -687,15 +763,17 @@ export async function executeRun(runPlan, options = {}) {
     } catch (error) {
       runtime.stop_status = "FAILED";
       runtime.stop_error_code = error?.code ?? "STOP_FAILURE";
+      runtime.error_code = "INFRA_FAILURE";
+      rawResult = { ...rawResult, success: false, error_code: "INFRA_FAILURE" };
     }
   }
   fixtureAfter = captureFixtureState(run.fixture_root);
-  fixtureDiff = compareFixtureState(fixtureBaseline ?? fixtureAfter, run.fixture_root);
+  fixtureDiff = classifyFixtureDiff(compareFixtureState(fixtureBaseline ?? fixtureAfter, run.fixture_root), run.fixture_root, startedAt);
   const endedAt = hooks.now();
   runtime.duration_ms = Math.max(0, endedAt - startedAt);
-  runtime.status = rawResult.success === true && !runtime.timed_out && !runtime.error_code ? "COMPLETED" : runtime.timed_out ? "TIMEOUT" : runtime.error_code === "AUTH_FAILURE" ? "AUTH_FAILURE" : "FAILED";
   if (rawResult.response_evidence) runtime.response_evidence = rawResult.response_evidence;
   const result = normalizeExecutionResult({ run, rawResult, telemetry, gateEvidence, fixtureDiff, durationMs: runtime.duration_ms, timedOut: runtime.timed_out, runtimeError: runtime.error_code ? { code: runtime.error_code } : null });
+  runtime.status = result.success === true && !runtime.timed_out && !runtime.error_code ? "COMPLETED" : runtime.timed_out ? "TIMEOUT" : runtime.error_code === "AUTH_FAILURE" ? "AUTH_FAILURE" : runtime.error_code === "INFRA_FAILURE" ? "INFRA_FAILURE" : "FAILED";
   const metadata = { ...run, started_at: new Date(startedAt).toISOString(), ended_at: new Date(endedAt).toISOString(), evidence_files: Object.fromEntries(EVIDENCE_FILES.map((name) => [name, join(run.evidence_root, `${name}.json`)])) };
   writeEvidence(run, "metadata", metadata);
   writeEvidence(run, "fixture-after", fixtureAfter);
@@ -704,7 +782,47 @@ export async function executeRun(runPlan, options = {}) {
   writeEvidence(run, "telemetry", telemetry);
   writeEvidence(run, "gate-evidence", gateEvidence);
   writeEvidence(run, "runtime-summary", runtime);
+  if (rawResult.response_evidence) writeEvidence(run, "assistant-response", rawResult.response_evidence);
+  if (runtime.stop_status === "FAILED" && profileHandle) {
+    try { await hooks.forceCleanup(run, profileHandle); } catch (error) { runtime.force_cleanup_error_code = error?.code ?? "FORCE_CLEANUP_FAILED"; }
+  }
+  if (activeRuntime?.run?.root === run.root) activeRuntime = null;
   return { run, result, telemetry, gateEvidence, fixtureDiff, runtime };
+}
+
+export function currentGitCommit(deps = {}) {
+  const runner = deps.spawnSync ?? spawnSync;
+  const result = runner("git", ["rev-parse", "HEAD"], { cwd: ROOT, encoding: "utf8" });
+  return result.status === 0 ? result.stdout.trim() : null;
+}
+
+export function createGenerationRoot(generation, prefix = "opencode-daily-generation-") {
+  const root = mkdtempSync(join(tmpdir(), `${prefix}${generation}-`));
+  for (const path of ["runs", "dependencies"]) mkdirSync(join(root, path), { recursive: true, mode: 0o700 });
+  return root;
+}
+
+function rowForOutcome(outcome) {
+  return {
+    schema_version: 1,
+    generation: outcome.run.generation,
+    sequence: outcome.run.sequence,
+    task_index: outcome.run.task_index,
+    task_id: outcome.run.task_id,
+    variant: outcome.run.variant,
+    profile: outcome.run.profile,
+    evidence_root: outcome.run.evidence_root,
+    run_root: outcome.run.root,
+    runtime_status: outcome.runtime.status,
+    result: outcome.result,
+  };
+}
+
+function terminalValid(row) {
+  if (!row || !Number.isSafeInteger(row.sequence) || !row.result) return false;
+  const code = row.result.error_code;
+  if (code === "INFRA_FAILURE" || code === "INTERRUPTED") return false;
+  return ["COMPLETED", "FAILED", "TIMEOUT", "AUTH_FAILURE"].includes(row.runtime_status);
 }
 
 export async function executeBenchmark(options = {}) {
@@ -716,26 +834,70 @@ export async function executeBenchmark(options = {}) {
   if (errors.length) throw new Error(errors.join(","));
   if (options.dryRun) return { dry_run: true, output: renderDryRunPlan({ manifest, selection, generation }) };
   if (!options.real) throw new Error("real_execution_requires_--real");
-  const runs = buildRunMatrix({ manifest, selection, generation });
-  const results = [];
-  for (const run of runs) results.push(await executeRun(run, options));
-  return { dry_run: false, generation, results };
+  const generationRoot = options.generationRoot ? resolve(options.generationRoot) : createGenerationRoot(generation);
+  mkdirSync(join(generationRoot, "runs"), { recursive: true, mode: 0o700 });
+  const commit = options.commit ?? currentGitCommit(options.deps ?? {});
+  const fingerprints = buildFingerprints({ manifest, selection, commit });
+  const expectedState = {
+    schema_version: 1,
+    generation,
+    suite_version: manifest.suite_version,
+    package_version: manifest.package_version,
+    selection_version: selection.selection_version,
+    generation_root: generationRoot,
+    stable_gen2_sequence_start: 0,
+    fingerprints,
+  };
+  ensureCheckpointCompatible(generationRoot, expectedState, { resume: options.resume === true });
+  const checkpoint = loadCheckpoint(generationRoot);
+  const prior = new Map((checkpoint.results ?? []).map((row) => [row.sequence, row]));
+  const sharedDependencyRoot = options.dependencyRoot ?? process.env.OPENCODE_TEAM_DEPENDENCY_ROOT ?? (process.env.OPENAI_DEPENDENCY_ROOT ? dirname(process.env.OPENAI_DEPENDENCY_ROOT) : join(generationRoot, "dependencies"));
+  mkdirSync(sharedDependencyRoot, { recursive: true, mode: 0o700 });
+  const runs = buildRunMatrix({ manifest, selection, generation }).map((run) => ({ ...run, dependency_root: sharedDependencyRoot }));
+  const maxRuns = Number.isSafeInteger(options.maxRuns) ? options.maxRuns : null;
+  const throughSequence = Number.isSafeInteger(options.throughSequence) ? options.throughSequence : null;
+  const results = [...(checkpoint.results ?? [])];
+  let executed = 0;
+  activeCheckpointFlush = () => writeCheckpoint(generationRoot, expectedState, results);
+  activeCheckpointFlush();
+  for (const run of runs) {
+    if (throughSequence !== null && run.sequence > throughSequence) break;
+    if (maxRuns !== null && executed >= maxRuns) break;
+    const existing = prior.get(run.sequence);
+    if (terminalValid(existing)) continue;
+    if (existing && !options.retryInfra) throw new Error(`resume_requires_explicit_retry_policy:${run.sequence}`);
+    const runRoot = join(generationRoot, "runs", String(run.sequence).padStart(2, "0"));
+    if (existing) rmSync(runRoot, { recursive: true, force: true });
+    const outcome = await executeRun(run, { ...options, prepare: { ...(options.prepare ?? {}), root: runRoot } });
+    const row = rowForOutcome(outcome);
+    const index = results.findIndex((candidate) => candidate.sequence === row.sequence);
+    if (index >= 0) results[index] = row;
+    else results.push(row);
+    prior.set(row.sequence, row);
+    executed += 1;
+    activeCheckpointFlush();
+  }
+  activeCheckpointFlush = null;
+  return { dry_run: false, generation, generation_root: generationRoot, results };
 }
 
 export function parseArgs(argv) {
-  const args = { command: argv[0] ?? "execute", selectionPath: DEFAULT_SELECTION, manifestPath: undefined, dryRun: false, real: false };
+  const args = { command: argv[0] ?? "execute", selectionPath: DEFAULT_SELECTION, manifestPath: undefined, dryRun: false, real: false, resume: false, retryInfra: false };
   for (let index = 1; index < argv.length; index += 1) {
     const [rawKey, inline] = argv[index].split("=", 2);
     if (!rawKey.startsWith("--")) throw new Error(`unknown_argument:${argv[index]}`);
     const key = rawKey.slice(2).replaceAll("-", "_");
-    if (["dry_run", "real"].includes(key)) args[key === "dry_run" ? "dryRun" : key] = true;
+    if (["dry_run", "real", "resume", "retry_infra"].includes(key)) args[key === "dry_run" ? "dryRun" : key === "retry_infra" ? "retryInfra" : key] = true;
     else {
       const value = inline ?? argv[++index];
       if (!value) throw new Error(`missing_value:${rawKey}`);
       if (key === "selection") args.selectionPath = value;
       else if (key === "manifest") args.manifestPath = value;
+      else if (key === "generation_root") args.generationRoot = value;
       else if (key === "generation") args.generation = Number(value);
       else if (key === "timeout_ms") args.timeoutMs = Number(value);
+      else if (key === "max_runs") args.maxRuns = Number(value);
+      else if (key === "through_sequence") args.throughSequence = Number(value);
       else throw new Error(`unknown_option:${rawKey}`);
     }
   }
@@ -747,10 +909,11 @@ async function main(argv) {
   if (args.command !== "execute") throw new Error("usage: daily-benchmark execute --selection <selection.json> --generation <n> [--dry-run|--real]");
   const result = await executeBenchmark(args);
   if (result.dry_run) process.stdout.write(result.output);
-  else process.stdout.write(`${JSON.stringify({ schema_version: 1, generation: result.generation, runs: result.results.map(({ run, result: runResult, runtime }) => ({ task_id: run.task_id, variant: run.variant, profile: run.profile, evidence_root: run.evidence_root, success: runResult.success, runtime_status: runtime.status })) }, null, 2)}\n`);
+  else process.stdout.write(`${JSON.stringify({ schema_version: 1, generation: result.generation, generation_root: result.generation_root, runs: result.results.map((row) => ({ sequence: row.sequence, task_id: row.task_id, variant: row.variant, profile: row.profile, evidence_root: row.evidence_root, success: row.result?.success, runtime_status: row.runtime_status })) }, null, 2)}\n`);
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+  installBenchmarkSignalHandlers();
   main(process.argv.slice(2)).catch((error) => {
     process.stderr.write(`${error.message}\n`);
     process.exitCode = 2;

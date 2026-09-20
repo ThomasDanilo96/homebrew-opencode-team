@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   CONTROL_PROFILE,
@@ -20,6 +21,8 @@ import {
   validateSelection,
   waitForRuntimeReady,
 } from "../benchmarks/daily/execute.mjs";
+import { classifyFixtureDiff, evaluateRun } from "../benchmarks/daily/evaluate.mjs";
+import { atomicWriteFile, loadCheckpoint } from "../benchmarks/daily/checkpoint.mjs";
 import { loadManifest } from "../benchmarks/daily/runner.mjs";
 
 const manifest = loadManifest();
@@ -81,7 +84,8 @@ test("successful read-only run requires an empty fixture diff and writes bounded
   });
   try {
     assert.equal(outcome.result.success, true);
-    assert.deepEqual(outcome.fixtureDiff, { changed: [], added: [], deleted: [], outside_fixture: [] });
+    assert.deepEqual(outcome.fixtureDiff.task_relevant, { changed: [], added: [], deleted: [], outside_fixture: [] });
+    assert.deepEqual(outcome.fixtureDiff.raw, { changed: [], added: [], deleted: [], outside_fixture: [] });
     for (const name of ["metadata", "fixture-before", "fixture-after", "fixture-diff", "result", "telemetry", "gate-evidence", "runtime-summary"]) {
       assert.equal(existsSync(join(outcome.run.evidence_root, `${name}.json`)), true);
     }
@@ -106,10 +110,10 @@ test("read-only task fails when the fixture changes and ignores outside-fixture 
   });
   try {
     assert.equal(outcome.result.success, false);
-    assert.deepEqual(outcome.fixtureDiff.added, []);
-    assert.deepEqual(outcome.fixtureDiff.deleted, []);
-    assert.deepEqual(outcome.fixtureDiff.changed, ["README.md"]);
-    assert.deepEqual(outcome.fixtureDiff.outside_fixture, []);
+    assert.deepEqual(outcome.fixtureDiff.task_relevant.added, []);
+    assert.deepEqual(outcome.fixtureDiff.task_relevant.deleted, []);
+    assert.deepEqual(outcome.fixtureDiff.task_relevant.changed, ["README.md"]);
+    assert.deepEqual(outcome.fixtureDiff.task_relevant.outside_fixture, []);
   } finally {
     rmSync(outcome.run.root, { recursive: true, force: true });
   }
@@ -131,8 +135,8 @@ test("successful mutation run scores fixture after setup baseline", async () => 
   });
   try {
     assert.equal(outcome.result.success, true);
-    assert.deepEqual(outcome.fixtureDiff.changed, ["README.md"]);
-    assert.equal(outcome.fixtureDiff.added.includes("setup-marker.txt"), false);
+    assert.deepEqual(outcome.fixtureDiff.task_relevant.changed, ["README.md"]);
+    assert.equal(outcome.fixtureDiff.task_relevant.added.includes("setup-marker.txt"), false);
   } finally {
     rmSync(outcome.run.root, { recursive: true, force: true });
   }
@@ -187,7 +191,7 @@ test("runtime/auth failure and timeout are reported without broad process cleanu
   }
 });
 
-test("failed shutdown is preserved in runtime summary while keeping result collection", async () => {
+test("failed shutdown becomes INFRA_FAILURE after result collection", async () => {
   const outcome = await executeRun(byTask("safe-helper-refactor", CONTROL_PROFILE), {
     hooks: {
       ...fakeLifecycle,
@@ -196,7 +200,9 @@ test("failed shutdown is preserved in runtime summary while keeping result colle
     },
   });
   try {
-    assert.equal(outcome.result.success, true);
+    assert.equal(outcome.result.success, false);
+    assert.equal(outcome.result.error_code, "INFRA_FAILURE");
+    assert.equal(outcome.runtime.status, "INFRA_FAILURE");
     assert.equal(outcome.runtime.stop_status, "FAILED");
     assert.equal(outcome.runtime.stop_error_code, "STOP_FAILED");
   } finally {
@@ -236,6 +242,9 @@ test("telemetry present includes packet/latency attribution and DAILY pricing; a
     assert.equal(present.result.cached_input_tokens, 30);
     assert.equal(present.result.output_tokens, 35);
     assert.equal(present.result.reasoning_tokens, 10);
+    assert.equal(present.result.provider_reported_cost, null);
+    assert.equal(present.result.estimated_cost, 0.000067);
+    assert.equal(present.result.cost, 0.000067);
     assert.equal(present.result.retry_count, 2);
     assert.equal(present.result.tool_call_count, 4);
     assert.equal(present.result.compaction_count, 1);
@@ -342,5 +351,100 @@ test("waitForRuntimeReady and prompt polling use injected fetch without model ca
     assert.equal(calls.some((call) => call.url.endsWith("/prompt_async") && call.options.method === "POST"), true);
   } finally {
     rmSync(run.root, { recursive: true, force: true });
+  }
+});
+
+test("evaluator returns deterministic PASS, PARTIAL, FAIL and rejects unknown labels", () => {
+  const run = prepareRun(byTask("lookup-routing-contract", TREATMENT_PROFILE));
+  try {
+    const cleanDiff = { raw: { changed: [], added: [], deleted: [], outside_fixture: [] }, task_relevant: { changed: [], added: [], deleted: [], outside_fixture: [] }, ignored_runtime_generated: [] };
+    const pass = evaluateRun({ run, rawResult: { required_checks: { answer_key: true } }, gateEvidence: {}, fixtureDiff: cleanDiff });
+    assert.equal(pass.outcome, "PASS");
+    const partial = evaluateRun({ run, rawResult: { response_text: "openai/gpt-5.6-luna only" }, gateEvidence: {}, fixtureDiff: cleanDiff });
+    assert.equal(partial.outcome, "PARTIAL");
+    const fail = evaluateRun({ run, rawResult: {}, gateEvidence: {}, fixtureDiff: { ...cleanDiff, task_relevant: { changed: ["README.md"], added: [], deleted: [], outside_fixture: [] } } });
+    assert.equal(fail.outcome, "FAIL");
+    assert.throws(() => evaluateRun({ run: { ...run, verification: ["mystery_label"] }, rawResult: {}, gateEvidence: {}, fixtureDiff: cleanDiff }), /unknown_verification_label:mystery_label/);
+  } finally {
+    rmSync(run.root, { recursive: true, force: true });
+  }
+});
+
+test("exact README diff is deterministic and answer-key tasks remain read-only", async () => {
+  const mutation = await executeRun(byTask("one-line-doc-fix", CONTROL_PROFILE), {
+    hooks: {
+      ...fakeLifecycle,
+      executeTask: async (run) => {
+        writeFileSync(join(run.fixture_root, "README.md"), readFileSync(join(run.fixture_root, "README.md"), "utf8").replace("recieve", "receive"));
+        return {};
+      },
+    },
+  });
+  const readOnly = await executeRun(byTask("lookup-routing-contract", CONTROL_PROFILE), {
+    hooks: { ...fakeLifecycle, executeTask: async () => ({ required_checks: { answer_key: true } }) },
+  });
+  try {
+    assert.equal(mutation.result.required_checks.exact_diff, true);
+    assert.equal(mutation.result.required_checks.git_diff_scope, true);
+    assert.equal(mutation.result.success, true);
+    assert.equal(readOnly.result.required_checks.no_files_changed, true);
+    assert.equal(readOnly.result.success, true);
+  } finally {
+    rmSync(mutation.run.root, { recursive: true, force: true });
+    rmSync(readOnly.run.root, { recursive: true, force: true });
+  }
+});
+
+test("runtime continuation JSON is excluded only as exact regular benchmark-generated files", () => {
+  const root = mkdtempSync(join(tmpdir(), "daily-runtime-exclusion-"));
+  try {
+    const continuation = join(root, ".omo/run-continuation");
+    mkdirSync(continuation, { recursive: true });
+    const createdAt = Date.now();
+    writeFileSync(join(continuation, "ses_test.json"), "{}\n");
+    const classified = classifyFixtureDiff({ changed: [], added: [".omo/run-continuation/ses_test.json", ".omo/other.json"], deleted: [], outside_fixture: [] }, root, createdAt);
+    assert.deepEqual(classified.task_relevant.added, [".omo/other.json"]);
+    assert.deepEqual(classified.ignored_runtime_generated, [{ path: ".omo/run-continuation/ses_test.json", classification: "BENCHMARK_RUNTIME_GENERATED" }]);
+    assert.deepEqual(classified.raw.added, [".omo/run-continuation/ses_test.json", ".omo/other.json"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("checkpoint writes atomically and resume skips terminal runs with shared dependencies", async () => {
+  const generationRoot = mkdtempSync(join(tmpdir(), "daily-generation-"));
+  const dependencyRoots = [];
+  const hooks = {
+    ...fakeLifecycle,
+    executeTask: async (run) => {
+      dependencyRoots.push(run.dependency_root);
+      return { required_checks: { answer_key: true } };
+    },
+  };
+  try {
+    const dependencyRoot = join(generationRoot, "dependencies");
+    await executeBenchmark({ manifest, selection, generation: 2, real: true, generationRoot, dependencyRoot, maxRuns: 1, hooks, commit: "test-commit" });
+    await executeBenchmark({ manifest, selection, generation: 2, real: true, resume: true, generationRoot, dependencyRoot, maxRuns: 1, hooks, commit: "test-commit" });
+    const checkpoint = loadCheckpoint(generationRoot);
+    assert.equal(checkpoint.results.length, 2);
+    assert.deepEqual(checkpoint.results.map((row) => row.sequence), [0, 1]);
+    assert.equal(new Set(dependencyRoots).size, 1);
+    assert.equal(dependencyRoots[0], join(generationRoot, "dependencies"));
+    assert.equal(existsSync(join(generationRoot, "generation-state.json")), true);
+    assert.equal(existsSync(join(generationRoot, "results.jsonl")), true);
+    assert.equal(existsSync(join(generationRoot, "paired-results.jsonl")), true);
+  } finally {
+    rmSync(generationRoot, { recursive: true, force: true });
+  }
+});
+
+test("atomic checkpoint writer leaves a complete JSON file", () => {
+  const root = mkdtempSync(join(tmpdir(), "daily-atomic-"));
+  try {
+    const path = join(root, "generation-state.json");
+    atomicWriteFile(path, `${JSON.stringify({ ok: true })}\n`);
+    assert.deepEqual(JSON.parse(readFileSync(path, "utf8")), { ok: true });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
