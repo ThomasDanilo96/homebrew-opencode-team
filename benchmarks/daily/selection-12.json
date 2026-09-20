@@ -1,0 +1,23 @@
+{
+  "schema_version": 1,
+  "suite_version": "daily-baseline-1",
+  "selection_version": "balanced-12-v1",
+  "selection_policy": "fixed before execution; no post-result task substitution",
+  "tasks": [
+    "lookup-routing-contract",
+    "one-line-doc-fix",
+    "two-file-feature",
+    "safe-helper-refactor",
+    "security-policy-audit",
+    "state-machine-fix",
+    "multi-module-bug",
+    "reviewed-policy-change",
+    "architecture-slice-analysis",
+    "tester-reviewer-gated-feature",
+    "critical-authorship-change",
+    "end-to-end-runtime-recovery"
+  ],
+  "tier_counts": {"TRIVIAL": 2, "NORMAL": 3, "COMPLEX": 3, "HEAVY": 2, "EXTREME": 2},
+  "execution_order": "paired task order alternates DAILY->OPENAI and OPENAI->DAILY; task order is manifest order",
+  "variant_mapping": {"control": "OPENAI", "treatment": "DAILY"}
+}
