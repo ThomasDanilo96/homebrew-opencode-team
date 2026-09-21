@@ -578,6 +578,46 @@ export_env() {
   export NATIVE_UI_ONLY_AGENTS="${NATIVE_UI_ONLY_AGENTS:-}"
 }
 
+persist_opencode_runtime_preferences() {
+  node --input-type=module <<'NODE'
+import { chmod, mkdir, open, readFile, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { join } from "node:path";
+
+const stateHome = process.env.XDG_STATE_HOME;
+if (!stateHome) throw new Error("XDG_STATE_HOME must be set for OpenCode runtime preferences");
+const directory = join(stateHome, "opencode");
+const file = join(directory, "kv.json");
+let existing;
+let mode;
+try {
+  existing = JSON.parse(await readFile(file, "utf8"));
+  if (existing === null || typeof existing !== "object" || Array.isArray(existing)) {
+    throw new Error("kv.json must contain a JSON object");
+  }
+  if (existing.animations_enabled === false) process.exit(0);
+  mode = (await stat(file)).mode & 0o777;
+} catch (error) {
+  if (error.code === "ENOENT") existing = {};
+  else throw error;
+}
+
+await mkdir(directory, { recursive: true });
+const temporary = join(directory, `.kv.json.${process.pid}.${randomBytes(12).toString("hex")}.tmp`);
+try {
+  const contents = `${JSON.stringify({ ...existing, animations_enabled: false })}\n`;
+  await writeFile(temporary, contents, { encoding: "utf8", mode: mode ?? 0o644, flag: "wx" });
+  if (mode !== undefined) await chmod(temporary, mode);
+  const handle = await open(temporary, "r+");
+  try { await handle.sync(); } finally { await handle.close(); }
+  await rename(temporary, file);
+} catch (error) {
+  await unlink(temporary).catch(() => {});
+  throw error;
+}
+NODE
+}
+
 check_runtime_quota() {
   local quota_output
   quota_output=$(PACKAGE_ROOT="$(cd "$_CORE_DIR/../.." && pwd)" RUNTIME_ROOT="$RUNTIME_ROOT" DATA_ROOT="$(dirname "$PERSISTENT_DATA_ROOT")" STATE_ROOT="$SANDBOX/state" CACHE_ROOT="$(dirname "$RUNTIME_ROOT")" node "$_CORE_DIR/runtime-lifecycle.mjs" quota 2>/dev/null) || die "Runtime quota or disk-pressure guard refused this run"
@@ -645,6 +685,7 @@ main() {
 
   # Export env
   export_env
+  persist_opencode_runtime_preferences || die "Failed to persist OpenCode runtime preferences"
   source_runtime_env_hook
   check_runtime_quota
   bridge_opencode_auth
