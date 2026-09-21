@@ -19,11 +19,16 @@ path = pathlib.Path(sys.argv[1])
 text = path.read_text()
 anchor = 'var __require = typeof import.meta.require === "function" ? import.meta.require : __omoCreateRequire(import.meta.url);\n'
 marker = '\n// _BEST_TEAM_SANDBOX_OVERRIDE_V1: preserve HOME fallback while isolating candidate state.\nconst _bestTeamSandboxRoot = process.env.BEST_TEAM_SANDBOX || "";\n'
-old = 'const _goSandbox = _path.join(_os.homedir(), ".opencode-best-team");'
-new = 'const _goSandbox = _bestTeamSandboxRoot || _path.join(_os.homedir(), ".opencode-best-team");'
-if text.count(anchor) != 1 or text.count(old) != 4:
-    raise SystemExit(f"REFUSED: anchor={text.count(anchor)} old_sites={text.count(old)}")
-text = text.replace(anchor, anchor + marker, 1).replace(old, new)
+legacy = 'const _goSandbox = _path.join(_os.homedir(), ".opencode-best-team");'
+core_aware = 'const _goSandbox = process.env.SANDBOX || _path.join(_os.homedir(), ".opencode-best-team");'
+canonical = 'const _goSandbox = _bestTeamSandboxRoot || _path.join(_os.homedir(), ".opencode-best-team");'
+legacy_sites = text.count(legacy)
+core_aware_sites = text.count(core_aware)
+if text.count(anchor) != 1:
+    raise SystemExit(f"REFUSED: anchor={text.count(anchor)} legacy_sites={legacy_sites} core_aware_sites={core_aware_sites}")
+if (legacy_sites, core_aware_sites) not in ((4, 0), (0, 4)):
+    raise SystemExit(f"REFUSED: anchor=1 legacy_sites={legacy_sites} core_aware_sites={core_aware_sites}")
+text = text.replace(anchor, anchor + marker, 1).replace(legacy, canonical).replace(core_aware, canonical)
 path.write_text(text)
 PY
 
