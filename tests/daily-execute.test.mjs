@@ -142,6 +142,103 @@ test("successful mutation run scores fixture after setup baseline", async () => 
   }
 });
 
+test("startup-generated Serena files belong to the task baseline, not the task diff", async () => {
+  const outcome = await executeRun(byTask("one-line-doc-fix", CONTROL_PROFILE), {
+    startupSettleIntervalMs: 0,
+    hooks: {
+      ...fakeLifecycle,
+      startProfile: async (run) => {
+        mkdirSync(join(run.fixture_root, ".serena"), { recursive: true });
+        for (const file of [".gitignore", "project.yml", "project.local.yml"]) writeFileSync(join(run.fixture_root, ".serena", file), "startup\n");
+        return { status: "OK" };
+      },
+      executeTask: async (run) => {
+        writeFileSync(join(run.fixture_root, "README.md"), readFileSync(join(run.fixture_root, "README.md"), "utf8").replace("recieve", "receive"));
+        return {};
+      },
+    },
+  });
+  try {
+    assert.equal(outcome.result.success, true);
+    assert.deepEqual(outcome.fixtureDiff.task_relevant, { changed: ["README.md"], added: [], deleted: [], outside_fixture: [] });
+    const baseline = JSON.parse(readFileSync(join(outcome.run.evidence_root, "fixture-before.json"), "utf8"));
+    assert.equal(Object.hasOwn(baseline.files, ".serena/project.yml"), true);
+  } finally {
+    rmSync(outcome.run.root, { recursive: true, force: true });
+  }
+});
+
+test("startup settle waits for asynchronous fixture initialization before the prompt", async () => {
+  const events = [];
+  let startupFixtureRoot;
+  const outcome = await executeRun(byTask("one-line-doc-fix", CONTROL_PROFILE), {
+    startupSettleIntervalMs: 0,
+    hooks: {
+      ...fakeLifecycle,
+      startProfile: async (run) => {
+        startupFixtureRoot = run.fixture_root;
+        return { status: "OK" };
+      },
+      sleep: async (_ms) => {
+        events.push("startup-settle");
+        if (events.length === 1) {
+          mkdirSync(join(startupFixtureRoot, ".serena"), { recursive: true });
+          writeFileSync(join(startupFixtureRoot, ".serena", "project.yml"), "startup\n");
+        }
+      },
+      executeTask: async (run) => {
+        assert.equal(existsSync(join(run.evidence_root, "fixture-before.json")), true);
+        events.push("prompt");
+        return { required_checks: { exact_diff: true, git_diff_scope: true } };
+      },
+    },
+  });
+  try {
+    assert.equal(outcome.result.success, true);
+    assert.deepEqual(outcome.fixtureDiff.task_relevant.added, []);
+    assert.equal(events.at(-1), "prompt");
+    assert.ok(events.indexOf("startup-settle") < events.indexOf("prompt"));
+  } finally {
+    rmSync(outcome.run.root, { recursive: true, force: true });
+  }
+});
+
+test("unstable startup fails before prompt delivery", async () => {
+  const runPlan = byTask("lookup-routing-contract", CONTROL_PROFILE);
+  let tick = 0;
+  let promptCalled = false;
+  let currentRunRoot;
+  const outcome = await executeRun(runPlan, {
+    startupSettleIntervalMs: 0,
+    startupSettleTimeoutMs: 3,
+    hooks: {
+      ...fakeLifecycle,
+      now: () => ++tick,
+      startProfile: async (run) => {
+        currentRunRoot = run.fixture_root;
+        return { status: "OK" };
+      },
+      sleep: async () => {
+        const file = join(".serena", `unstable-${tick}.yml`);
+        mkdirSync(join(currentRunRoot, ".serena"), { recursive: true });
+        writeFileSync(join(currentRunRoot, file), "unstable\n");
+      },
+      executeTask: async () => {
+        promptCalled = true;
+        return { required_checks: { answer_key: true } };
+      },
+    },
+  });
+  try {
+    assert.equal(promptCalled, false);
+    assert.equal(outcome.result.error_code, "INFRA_FAILURE");
+    assert.equal(outcome.runtime.failure_reason, "STARTUP_FIXTURE_NOT_STABLE");
+    assert.equal(outcome.runtime.model_call_started, false);
+  } finally {
+    rmSync(outcome.run.root, { recursive: true, force: true });
+  }
+});
+
 test("partial and failure results normalize to unsuccessful authoritative records", async () => {
   const partial = await executeRun(byTask("two-file-feature", TREATMENT_PROFILE), {
     hooks: { ...fakeLifecycle, executeTask: async () => ({ success: true, partial: true }) },

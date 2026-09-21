@@ -334,7 +334,7 @@ function requiredChecks(run, rawResult, fixtureDiff) {
   }));
 }
 
-export function normalizeExecutionResult({ run, rawResult = {}, telemetry, gateEvidence, fixtureDiff, durationMs, timedOut = false, runtimeError = null }) {
+export function normalizeExecutionResult({ run, rawResult = {}, telemetry, gateEvidence, fixtureDiff, durationMs, taskDurationMs = null, modelCallStarted = false, timedOut = false, runtimeError = null }) {
   let evaluation;
   try {
     evaluation = evaluateRun({ run, rawResult, telemetry, gateEvidence, fixtureDiff });
@@ -350,12 +350,13 @@ export function normalizeExecutionResult({ run, rawResult = {}, telemetry, gateE
   }
   const success = timedOut || runtimeError ? false : evaluation.success;
   const metrics = telemetry?.metrics ?? {};
-  const taskDuration = finite(rawResult.task_duration_ms) ?? finite(rawResult.duration_ms) ?? finite(metrics.duration_ms);
+  const taskDuration = finite(rawResult.task_duration_ms) ?? finite(rawResult.duration_ms) ?? finite(metrics.duration_ms) ?? finite(taskDurationMs);
   const providerCost = finite(rawResult.provider_reported_cost) ?? finite(rawResult.cost) ?? finite(metrics.provider_reported_cost);
   const estimatedCost = finite(rawResult.estimated_cost) ?? finite(metrics.estimated_cost);
   const result = {
     schema_version: 1,
     success,
+    model_call_started: modelCallStarted,
     outcome: evaluation.outcome,
     correctness_score: evaluation.correctness_score,
     required_checks: evaluation.required_checks,
@@ -726,20 +727,51 @@ export function installBenchmarkSignalHandlers(hooks = defaultHooks()) {
   }
 }
 
+export async function settleFixture(run, options = {}) {
+  const sleep = options.sleep ?? ((ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)));
+  const now = options.now ?? (() => Date.now());
+  const intervalMs = options.intervalMs ?? 100;
+  const timeoutMs = options.timeoutMs ?? 30_000;
+  const deadline = now() + timeoutMs;
+  let snapshot = captureFixtureState(run.fixture_root);
+  let stableSnapshots = 1;
+  let previousKey = JSON.stringify(snapshot);
+  while (stableSnapshots < 2) {
+    if (now() > deadline) throw Object.assign(new Error("startup_fixture_not_stable"), { code: "STARTUP_FIXTURE_NOT_STABLE" });
+    await sleep(intervalMs);
+    const next = captureFixtureState(run.fixture_root);
+    const nextKey = JSON.stringify(next);
+    if (nextKey === previousKey) stableSnapshots += 1;
+    else stableSnapshots = 1;
+    snapshot = next;
+    previousKey = nextKey;
+  }
+  return snapshot;
+}
+
 export async function executeRun(runPlan, options = {}) {
   const hooks = { ...defaultHooks(options.deps ?? {}), ...(options.hooks ?? {}) };
   const run = prepareRun(runPlan, options.prepare ?? {});
   const startedAt = hooks.now();
+  let taskStartedAt = null;
+  let modelCallStarted = false;
   let profileHandle = null, rawResult = {}, telemetry = null, gateEvidence = null, fixtureBaseline = null, fixtureAfter = null, fixtureDiff = null;
   const runtime = { schema_version: 1, status: "UNKNOWN", setup_status: "UNKNOWN", start_status: "UNKNOWN", stop_status: "UNKNOWN", timed_out: false, error_code: null };
   try {
     const setup = await hooks.setupProfile(run);
     runtime.setup_status = setup?.status ?? "OK";
-    fixtureBaseline = captureFixtureState(run.fixture_root);
-    writeEvidence(run, "fixture-before", fixtureBaseline);
     profileHandle = await hooks.startProfile(run);
     activeRuntime = { run, handle: profileHandle };
     runtime.start_status = profileHandle?.status ?? "OK";
+    fixtureBaseline = await settleFixture(run, {
+      sleep: hooks.sleep,
+      now: hooks.now,
+      intervalMs: options.startupSettleIntervalMs,
+      timeoutMs: options.startupSettleTimeoutMs,
+    });
+    writeEvidence(run, "fixture-before", fixtureBaseline);
+    taskStartedAt = hooks.now();
+    modelCallStarted = true;
     const completion = await withTimeout(Promise.resolve(hooks.executeTask(run, profileHandle)), options.timeoutMs ?? 30 * 60 * 1000, hooks);
     if (completion.timedOut) {
       runtime.timed_out = true;
@@ -748,7 +780,8 @@ export async function executeRun(runPlan, options = {}) {
       rawResult = completion.value ?? {};
     }
   } catch (error) {
-    runtime.error_code = error?.code ?? "RUNTIME_FAILURE";
+    runtime.error_code = error?.code === "STARTUP_FIXTURE_NOT_STABLE" ? "INFRA_FAILURE" : error?.code ?? "RUNTIME_FAILURE";
+    if (error?.code === "STARTUP_FIXTURE_NOT_STABLE") runtime.failure_reason = error.code;
     rawResult = { success: false, error_code: runtime.error_code };
   } finally {
     activeRuntime = profileHandle ? { run, handle: profileHandle } : null;
@@ -781,7 +814,8 @@ export async function executeRun(runPlan, options = {}) {
   const endedAt = hooks.now();
   runtime.duration_ms = Math.max(0, endedAt - startedAt);
   if (rawResult.response_evidence) runtime.response_evidence = rawResult.response_evidence;
-  const result = normalizeExecutionResult({ run, rawResult, telemetry, gateEvidence, fixtureDiff, durationMs: runtime.duration_ms, timedOut: runtime.timed_out, runtimeError: runtime.error_code ? { code: runtime.error_code } : null });
+  const result = normalizeExecutionResult({ run, rawResult, telemetry, gateEvidence, fixtureDiff, durationMs: runtime.duration_ms, taskDurationMs: taskStartedAt === null ? null : Math.max(0, endedAt - taskStartedAt), modelCallStarted, timedOut: runtime.timed_out, runtimeError: runtime.error_code ? { code: runtime.error_code } : null });
+  runtime.model_call_started = modelCallStarted;
   runtime.status = result.success === true && !runtime.timed_out && !runtime.error_code ? "COMPLETED" : runtime.timed_out ? "TIMEOUT" : runtime.error_code === "AUTH_FAILURE" ? "AUTH_FAILURE" : runtime.error_code === "INFRA_FAILURE" ? "INFRA_FAILURE" : "FAILED";
   const metadata = { ...run, started_at: new Date(startedAt).toISOString(), ended_at: new Date(endedAt).toISOString(), evidence_files: Object.fromEntries(EVIDENCE_FILES.map((name) => [name, join(run.evidence_root, `${name}.json`)])) };
   writeEvidence(run, "metadata", metadata);
