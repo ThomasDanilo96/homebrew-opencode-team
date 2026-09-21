@@ -241,6 +241,41 @@ function sumMetric(records, names) {
   return values.length ? values.reduce((total, value) => total + value, 0) : null;
 }
 
+const MODEL_BUCKETS = Object.freeze(["Luna", "Terra", "Sol", "other"]);
+const MODEL_CORRELATION_FIELDS = Object.freeze(["invocation_id", "request_id", "call_id", "task_call_id", "packet_id", "message_id"]);
+
+function modelBucket(model) {
+  const normalized = String(model ?? "").toLowerCase().replace(/^openai\//, "");
+  if (normalized.includes("luna")) return "Luna";
+  if (normalized.includes("terra")) return "Terra";
+  if (normalized.includes("sol")) return "Sol";
+  return "other";
+}
+
+function modelCorrelationKey(record) {
+  for (const field of MODEL_CORRELATION_FIELDS) {
+    const value = record?.[field];
+    if (value !== undefined && value !== null && String(value).trim()) return `${field}:${value}`;
+  }
+  return null;
+}
+
+function modelMixFromRecords(records) {
+  const counts = Object.fromEntries(MODEL_BUCKETS.map((bucket) => [bucket, 0]));
+  const seen = new Set();
+  const observed = records.filter((record) => record.__source !== "packet" && (record?.executed_model || record?.requested_model || record?.model));
+  const candidates = observed.length ? observed : records;
+  for (const record of candidates) {
+    const model = record?.executed_model || record?.requested_model || record?.model;
+    if (!model) continue;
+    const correlationKey = modelCorrelationKey(record);
+    if (correlationKey && seen.has(correlationKey)) continue;
+    if (correlationKey) seen.add(correlationKey);
+    counts[modelBucket(model)] += 1;
+  }
+  return counts;
+}
+
 export function telemetryStateRoot(run) {
   return run.telemetry_root ?? join(run.root, "home/data", String(run.profile ?? "").toLowerCase(), "state/team");
 }
@@ -296,6 +331,7 @@ export function collectTelemetryFromRoot(run, stateRoot = telemetryStateRoot(run
     latency_count: latency.length,
     related_count: related.length,
     model,
+    model_mix: modelMixFromRecords(related),
     pricing_source: run.profile === TREATMENT_PROFILE ? DAILY_PRICING.source : null,
     metrics: Object.fromEntries(Object.entries(metrics).map(([name, entry]) => [name, entry.value])),
     sources: Object.fromEntries(Object.entries(metrics).map(([name, entry]) => [name, entry.source])),
@@ -363,10 +399,12 @@ export function normalizeExecutionResult({ run, rawResult = {}, telemetry, gateE
     task_duration_ms: taskDuration,
     runtime_total_ms: finite(durationMs),
     duration_ms: taskDuration ?? finite(durationMs),
+    wall_clock_ms: taskDuration,
     uncached_input_tokens: finite(rawResult.uncached_input_tokens) ?? finite(metrics.uncached_input_tokens),
     cached_input_tokens: finite(rawResult.cached_input_tokens) ?? finite(metrics.cached_input_tokens),
     output_tokens: finite(rawResult.output_tokens) ?? finite(metrics.output_tokens),
     reasoning_tokens: finite(rawResult.reasoning_tokens) ?? finite(metrics.reasoning_tokens),
+    model_mix: telemetry?.model_mix,
     provider_reported_cost: providerCost,
     estimated_cost: estimatedCost,
     cost: estimatedCost ?? providerCost,

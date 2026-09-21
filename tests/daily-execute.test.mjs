@@ -15,6 +15,7 @@ import {
   executeRun,
   loadSelection,
   normalizeGateEvidence,
+  normalizeExecutionResult,
   postPromptAndPoll,
   prepareRun,
   renderDryRunPlan,
@@ -327,7 +328,7 @@ test("telemetry present includes packet/latency attribution and DAILY pricing; a
           codex_reasoning_tokens: 7,
           opencode_reasoning_tokens: 3,
         }));
-        writeFileSync(join(run.telemetry_root, "logs", "latency-metrics.jsonl"), `${JSON.stringify({ task_id: run.task_id, duration_ms: 1234, retry_count: 2, tool_call_count: 4, compaction_count: 1, wrapper_round_trips: 3 })}\n`);
+        writeFileSync(join(run.telemetry_root, "logs", "latency-metrics.jsonl"), `${JSON.stringify({ task_id: run.task_id, model: "gpt-5.6-luna", duration_ms: 1234, retry_count: 2, tool_call_count: 4, compaction_count: 1, wrapper_round_trips: 3 })}\n`);
         return { success: true, required_checks: { tests_pass: true, transition_matrix: true, no_race_reported: true } };
       },
     },
@@ -339,6 +340,8 @@ test("telemetry present includes packet/latency attribution and DAILY pricing; a
     assert.equal(present.result.cached_input_tokens, 30);
     assert.equal(present.result.output_tokens, 35);
     assert.equal(present.result.reasoning_tokens, 10);
+    assert.equal(present.result.raw_metrics.wall_clock_ms, 1234);
+    assert.deepEqual(present.result.raw_metrics.model_mix, { Luna: 1, Terra: 0, Sol: 0, other: 0 });
     assert.equal(present.result.provider_reported_cost, null);
     assert.equal(present.result.estimated_cost, 0.000067);
     assert.equal(present.result.cost, 0.000067);
@@ -354,6 +357,50 @@ test("telemetry present includes packet/latency attribution and DAILY pricing; a
   } finally {
     rmSync(present.run.root, { recursive: true, force: true });
   }
+});
+
+test("model mix counts observed models, preserves unknowns, and deduplicates correlated records", () => {
+  const root = mkdtempSync(join(tmpdir(), "daily-model-mix-test-"));
+  const logs = join(root, "logs");
+  mkdirSync(logs, { recursive: true });
+  writeFileSync(join(logs, "latency-metrics.jsonl"), [
+    { model: "openai/gpt-5.6-luna", request_id: "luna-1" },
+    { model: "gpt-5.6-luna", request_id: "luna-1" },
+    { model: "gpt-5.6-terra", request_id: "terra-1" },
+    { model: "gpt-5.6-sol", request_id: "sol-1" },
+    { model: "vendor/future-model", request_id: "unknown-1" },
+  ].map((record) => JSON.stringify(record)).join("\n") + "\n");
+  try {
+    const telemetry = collectTelemetryFromRoot({ task_id: "lookup-routing-contract" }, root);
+    assert.deepEqual(telemetry.model_mix, { Luna: 1, Terra: 1, Sol: 1, other: 1 });
+    const normalized = normalizeExecutionResult({
+      run: byTask("lookup-routing-contract", TREATMENT_PROFILE),
+      rawResult: { success: true },
+      telemetry,
+      gateEvidence: {},
+      fixtureDiff: { changed: [], added: [], deleted: [], outside_fixture: [] },
+      durationMs: 50,
+      taskDurationMs: null,
+      modelCallStarted: true,
+    });
+    assert.deepEqual(normalized.raw_metrics.model_mix, telemetry.model_mix);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("missing authoritative task duration remains null in normalized wall clock", () => {
+  const normalized = normalizeExecutionResult({
+    run: byTask("lookup-routing-contract", CONTROL_PROFILE),
+    rawResult: { success: true },
+    telemetry: { metrics: {}, model_mix: { Luna: 1, Terra: 0, Sol: 0, other: 0 } },
+    gateEvidence: {},
+    fixtureDiff: { changed: [], added: [], deleted: [], outside_fixture: [] },
+    durationMs: null,
+    taskDurationMs: null,
+    modelCallStarted: true,
+  });
+  assert.equal(normalized.raw_metrics.wall_clock_ms, null);
 });
 
 test("gate evidence stays tri-state and skip classifications require explicit evidence", () => {
