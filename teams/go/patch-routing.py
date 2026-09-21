@@ -43,7 +43,19 @@ if all(x == 0 for x in all_native):
     pass
 elif all(x == 1 for x in all_native):
     if fg == 1 and bt == 1:
-        print("ALREADY_PATCHED_FG_ONLY"); sys.exit(0)
+        runtime_root = 'const _goRuntimeRoot = process.env.RUNTIME_ROOT || _path.join(_goSandbox, "state");'
+        old_runs = 'const _runsDir = _path.join(_goSandbox, "state", "runs");'
+        old_runs_count = src.count(old_runs)
+        if old_runs_count in (4, 5):
+            src = src.replace(old_runs, f'{runtime_root}\n      const _runsDir = _path.join(_goRuntimeRoot, "runs");')
+            if src.count(runtime_root) != old_runs_count:
+                print(f"ERROR: runtime root contract count != {old_runs_count} (found {src.count(runtime_root)})", file=sys.stderr); sys.exit(1)
+            with open(filepath, "w") as f:
+                f.write(src)
+            print("MIGRATED")
+        else:
+            print("ALREADY_PATCHED_FG_ONLY")
+        sys.exit(0)
     else:
         print("REFUSED: no_attach present but fg_only/builder_task missing", file=sys.stderr); sys.exit(1)
 else:
@@ -172,9 +184,16 @@ patch(
 # Post-flight
 legacy_sandbox = 'const _goSandbox = _path.join(_os.homedir(), ".opencode-go-team-v2-visible");'
 sandbox_aware = 'const _goSandbox = process.env.SANDBOX || _path.join(_os.homedir(), ".opencode-go-team-v2-visible");'
-if src.count(legacy_sandbox) != 4:
+legacy_sandbox_count = src.count(legacy_sandbox)
+if legacy_sandbox_count not in (0, 4):
     print(f"ERROR: legacy sandbox contract count != 4 (found {src.count(legacy_sandbox)})", file=sys.stderr); sys.exit(1)
-src = src.replace(legacy_sandbox, sandbox_aware)
+if legacy_sandbox_count == 4:
+    src = src.replace(legacy_sandbox, sandbox_aware)
+runtime_root = 'const _goRuntimeRoot = process.env.RUNTIME_ROOT || _path.join(_goSandbox, "state");'
+src = src.replace('const _runsDir = _path.join(_goSandbox, "state", "runs");', f'{runtime_root}\n      const _runsDir = _path.join(_goRuntimeRoot, "runs");')
+runtime_root_count = src.count(runtime_root)
+if runtime_root_count not in (4, 5):
+    print(f"ERROR: runtime root contract count != 4 or 5 (found {runtime_root_count})", file=sys.stderr); sys.exit(1)
 
 for s, n in [("_GO_NATIVE_UI_NO_ATTACH_PATCH_V1", "Native-UI"), ("_GO_TASK_NATIVE_UI_NO_ATTACH_PATCH_V1", "Task"), ("_GO_TASK_BACKGROUND_NATIVE_UI_NO_ATTACH_PATCH_V1", "BG Task"), ("_GO_CALL_OMO_BACKGROUND_NATIVE_UI_NO_ATTACH_PATCH_V1", "BG CallOmo")]:
     if src.count(s) != 1:

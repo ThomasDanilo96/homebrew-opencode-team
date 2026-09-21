@@ -39,7 +39,20 @@ bt = src.count(BUILDER_TASK_SENTINEL)
 
 all_native = [nc, tc, bc, cc]
 if all(x == 1 for x in all_native) and bt == 1:
-    print("ALREADY_PATCHED"); sys.exit(0)
+    legacy_sandbox = 'const _goSandbox = _path.join(_os.homedir(), ".opencode-best-team");'
+    sandbox_aware = 'const _goSandbox = process.env.SANDBOX || _path.join(_os.homedir(), ".opencode-best-team");'
+    runtime_root = 'const _goRuntimeRoot = process.env.RUNTIME_ROOT || _path.join(_goSandbox, "state");'
+    old_runs = 'const _runsDir = _path.join(_goSandbox, "state", "runs");'
+    if src.count(old_runs) == 4:
+        src = src.replace(legacy_sandbox, sandbox_aware).replace(old_runs, f'{runtime_root}\n      const _runsDir = _path.join(_goRuntimeRoot, "runs");')
+        if src.count(runtime_root) != 4:
+            print(f"ERROR: runtime root contract count != 4 (found {src.count(runtime_root)})", file=sys.stderr); sys.exit(1)
+        with open(filepath, "w") as f:
+            f.write(src)
+        print("MIGRATED")
+    else:
+        print("ALREADY_PATCHED")
+    sys.exit(0)
 elif not all(x == 0 for x in all_native):
     print(f"REFUSED: partial native patch state native={nc} task={tc} bg={bc} call_omo_bg={cc}", file=sys.stderr); sys.exit(1)
 
@@ -164,6 +177,15 @@ patch(
 )
 
 # Post-flight
+legacy_sandbox = 'const _goSandbox = _path.join(_os.homedir(), ".opencode-best-team");'
+sandbox_aware = 'const _goSandbox = process.env.SANDBOX || _path.join(_os.homedir(), ".opencode-best-team");'
+if src.count(legacy_sandbox) != 4:
+    print(f"ERROR: legacy sandbox contract count != 4 (found {src.count(legacy_sandbox)})", file=sys.stderr); sys.exit(1)
+src = src.replace(legacy_sandbox, sandbox_aware)
+runtime_root = 'const _goRuntimeRoot = process.env.RUNTIME_ROOT || _path.join(_goSandbox, "state");'
+src = src.replace('const _runsDir = _path.join(_goSandbox, "state", "runs");', f'{runtime_root}\n      const _runsDir = _path.join(_goRuntimeRoot, "runs");')
+if src.count(runtime_root) != 4:
+    print(f"ERROR: runtime root contract count != 4 (found {src.count(runtime_root)})", file=sys.stderr); sys.exit(1)
 for s, n in [("_GO_NATIVE_UI_NO_ATTACH_PATCH_V1", "Native-UI"), ("_GO_TASK_NATIVE_UI_NO_ATTACH_PATCH_V1", "Task"), ("_GO_TASK_BACKGROUND_NATIVE_UI_NO_ATTACH_PATCH_V1", "BG Task"), ("_GO_CALL_OMO_BACKGROUND_NATIVE_UI_NO_ATTACH_PATCH_V1", "BG CallOmo")]:
     if src.count(s) != 1:
         print(f"ERROR: {n} sentinel count != 1", file=sys.stderr); sys.exit(1)
