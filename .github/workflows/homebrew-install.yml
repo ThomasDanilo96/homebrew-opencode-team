@@ -75,8 +75,8 @@ jobs:
           OPENCODE_TEAM_TEST_DEPENDENCY_ROOT="$test_home/setup-smoke-dependencies" bash "$package_root/tests/setup-smoke.sh"
           bash "$package_root/tests/runtime-readiness.test.sh"
           ! rg -n '/Users/|\.opencode-team-staging|go-final-ux-v1|best-shared-v1' "$test_home/config" "$test_home/state" "$test_home/cache/runtime"
-          test "$(shasum -a 256 "$shared_dependencies/best/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "a022deff9202c97e922a4a75c357beab420907f724fe9214267dad53fe72455e"
-          test "$(shasum -a 256 "$shared_dependencies/go/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "cf01dcad9a7a1b09840bf5f92d0dfb11cc724cdd00f32aa4c5a87af227c5b5bc"
+          test "$(shasum -a 256 "$shared_dependencies/best/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "12571389bb227794fd661873538332a473c02977142f21781757a457cbf1bdf3"
+          test "$(shasum -a 256 "$shared_dependencies/go/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "9346d3a1df3dc12f281710f3cf2b2f4a8261c8187f37eb677fad8293a1abb546"
 
       - name: Formula test and audit
         run: |
