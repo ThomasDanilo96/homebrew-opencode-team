@@ -12,10 +12,13 @@ make_stub_bin() {
   for command_name in node npm python3 opencode git jq tmux uv rg curl; do
     ln -s "$(command -v "$command_name")" "$path_bin/$command_name"
   done
+  mkdir -p "$path_bin/bin"
+  ln -s "$path_bin/opencode" "$path_bin/bin/opencode"
   printf '%s\n' '#!/usr/bin/env bash' \
     'if [ "${1:-}" = "--prefix" ]; then' \
     '  if [ -n "${BREW_STUB_PREFIX:-}" ]; then printf "%s\\n" "$BREW_STUB_PREFIX"; exit 0; fi' \
-    '  exit 1' \
+    '  printf "%s\\n" "$BREW_STUB_BIN"' \
+    '  exit 0' \
     'fi' \
     'printf "cleanup=%s args=%s\\n" "${HOMEBREW_NO_INSTALL_CLEANUP:-}" "$*" >> "$BREW_STUB_LOG"' \
     'if [ "${BREW_STUB_FAIL:-0}" = 1 ]; then exit 37; fi' \
@@ -96,6 +99,7 @@ rm -rf "$success_home/config" "$success_home/state/maintenance"
 run_setup "$success_home" "$success_dependencies" "$success_bin" "$TEST_ROOT/recovery.out"
 rg -q 'Setup complete\. No runtime was started\.' "$TEST_ROOT/recovery.out"
 OPENCODE_TEAM_HOME="$success_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$success_dependencies" \
+  BREW_STUB_BIN="$success_bin/path" BREW_STUB_PREFIX="$success_bin/path" \
   PATH="$success_bin/path:/usr/bin:/bin" bash "$ROOT/bin/opencode-team" doctor >"$TEST_ROOT/recovery-doctor.out" || {
     cat "$TEST_ROOT/recovery-doctor.out" >&2
     exit 1
@@ -111,6 +115,7 @@ printf '%s\n' INSTALLED >"$stale_marker"
 rm -f "$stale_plist"
 set +e
 OPENCODE_TEAM_HOME="$success_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$success_dependencies" \
+  BREW_STUB_BIN="$success_bin/path" BREW_STUB_PREFIX="$success_bin/path" \
   PATH="$success_bin/path:/usr/bin:/bin" bash "$ROOT/bin/opencode-team" doctor >"$TEST_ROOT/stale-doctor.out" 2>&1
 stale_rc=$?
 set -e
@@ -131,8 +136,9 @@ make_stub_bin "$broken_bin"
 make_broken_host_python "$broken_bin"
 run_setup "$broken_home" "$broken_dependencies" "$broken_bin" "$TEST_ROOT/broken-python.out"
 test ! -s "$broken_bin/path/broken-python.log"
-rg -q "^OPENCODE_TEAM_PYTHON=$broken_dependencies/python-runtime/bin/python$" "$broken_home/config/best/team-runtime.conf"
+rg -q '^OPENCODE_TEAM_PYTHON=.*/python/cpython-3\.13[^/]*/bin/python3\.13$' "$broken_home/config/best/team-runtime.conf"
 OPENCODE_TEAM_HOME="$broken_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$broken_dependencies" \
+  BREW_STUB_BIN="$broken_bin/path" BREW_STUB_PREFIX="$broken_bin/path" \
   PATH="$broken_bin/path:/usr/bin:/bin" bash "$ROOT/bin/opencode-team" doctor >"$TEST_ROOT/broken-python-doctor.out" 2>&1 || {
     cat "$TEST_ROOT/broken-python-doctor.out" >&2
     exit 1

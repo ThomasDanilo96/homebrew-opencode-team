@@ -14,6 +14,7 @@ PACKAGE_ROOT="$(cd -L "$(dirname "$SOURCE")/.." && pwd -L)"
 VERSION_FILE="$PACKAGE_ROOT/VERSION"
 SERENA_VERSION="1.7.0"
 PYTHON_VERSION="3.13"
+OPENCODE_MIN_VERSION="1.18.30"
 
 usage() {
   printf '%s\n' 'OpenCode Team' '' 'Usage:' \
@@ -100,7 +101,7 @@ validate_profile_config() {
 }
 
 resolve_opencode() {
-  local brew_prefix candidate path_opencode
+  local brew_prefix candidate
   if command -v brew >/dev/null 2>&1; then
     brew_prefix="$(HOMEBREW_NO_INSTALL_CLEANUP=1 brew --prefix opencode 2>/dev/null || true)"
     candidate="$brew_prefix/bin/opencode"
@@ -109,9 +110,44 @@ resolve_opencode() {
       return 0
     fi
   fi
-  path_opencode="$(command -v opencode 2>/dev/null || true)"
-  [ -n "$path_opencode" ] && [ -x "$path_opencode" ] || return 1
-  printf '%s\n' "$path_opencode"
+  return 1
+}
+
+opencode_version_supported() {
+  local version major minor patch min_major min_minor min_patch
+  version="$1"
+  version="${version#v}"
+  IFS=. read -r major minor patch _ <<< "$version"
+  IFS=. read -r min_major min_minor min_patch _ <<< "$OPENCODE_MIN_VERSION"
+  [ "${major:-0}" -gt "$min_major" ] || {
+    [ "${major:-0}" -eq "$min_major" ] && {
+      [ "${minor:-0}" -gt "$min_minor" ] || {
+        [ "${minor:-0}" -eq "$min_minor" ] && [ "${patch:-0}" -ge "$min_patch" ]
+      }
+    }
+  }
+}
+
+validate_opencode() {
+  local executable="$1" version
+  [ -x "$executable" ] || return 1
+  version="$($executable --version 2>/dev/null | awk 'NR == 1 {print $1}')"
+  opencode_version_supported "$version"
+  OPENCODE_VERSION="$version"
+  export OPENCODE_VERSION
+}
+
+ensure_opencode() {
+  OPENCODE_BIN="$(resolve_opencode 2>/dev/null || true)"
+  if [ -z "$OPENCODE_BIN" ] || ! validate_opencode "$OPENCODE_BIN"; then
+    require_command brew >/dev/null || return 1
+    printf '  %-18s missing or unsupported; installing Homebrew core OpenCode\n' "OpenCode"
+    HOMEBREW_NO_INSTALL_CLEANUP=1 brew install opencode || return 1
+    OPENCODE_BIN="$(resolve_opencode 2>/dev/null || true)"
+    [ -n "$OPENCODE_BIN" ] && validate_opencode "$OPENCODE_BIN" || return 1
+  fi
+  export OPENCODE_BIN
+  printf '  %-18s OK (%s, %s)\n' "OpenCode" "$OPENCODE_VERSION" "$OPENCODE_BIN"
 }
 
 validate_generated_surface() {
@@ -237,9 +273,9 @@ doctor() {
     failed=1
   fi
   require_command brew || failed=1
-  if OPENCODE_BIN="$(resolve_opencode)"; then
+  if OPENCODE_BIN="$(resolve_opencode 2>/dev/null || true)" && [ -n "$OPENCODE_BIN" ] && validate_opencode "$OPENCODE_BIN"; then
     export OPENCODE_BIN
-    printf '  %-16s OK (%s)\n' "OpenCode" "$OPENCODE_BIN"
+    printf '  %-16s OK (%s, %s)\n' "OpenCode" "$OPENCODE_VERSION" "$OPENCODE_BIN"
   else
     printf '  %-16s MISSING\n' "OpenCode"
     failed=1
@@ -314,8 +350,8 @@ setup_roots() {
   fi
   RUNTIME_ROOT="$CACHE_ROOT/runtime"
   DEPENDENCY_ROOT="${OPENCODE_TEAM_DEPENDENCY_ROOT:-$DATA_ROOT/dependencies}"
-  PYTHON_RUNTIME_ROOT="$DEPENDENCY_ROOT/python-runtime"
-  PYTHON_BIN="$PYTHON_RUNTIME_ROOT/bin/python"
+  PYTHON_INSTALL_ROOT="$DEPENDENCY_ROOT/python"
+  PYTHON_BIN=""
   if [ -n "${OPENCODE_TEAM_DEPENDENCY_ROOT:-}" ]; then
     SERENA_BIN="$DEPENDENCY_ROOT/bin/serena"
   else
@@ -324,8 +360,17 @@ setup_roots() {
 }
 
 managed_python_healthy() {
+  local candidate
+  if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+    for candidate in "$PYTHON_INSTALL_ROOT"/*/bin/python3.13; do
+      if [ -x "$candidate" ]; then
+        PYTHON_BIN="$candidate"
+        break
+      fi
+    done
+  fi
   [ -x "$PYTHON_BIN" ] || return 1
-  "$PYTHON_BIN" -c 'import pathlib, plistlib, secrets, sqlite3, sys, time, uuid, xml.parsers.expat; assert sys.version_info[:2] == (3, 13)' >/dev/null 2>&1
+  OPENCODE_TEAM_PYTHON_ROOT="$PYTHON_INSTALL_ROOT" "$PYTHON_BIN" -c 'import pathlib, plistlib, secrets, sqlite3, sys, time, uuid, xml.parsers.expat; root = pathlib.Path(__import__("os").environ["OPENCODE_TEAM_PYTHON_ROOT"]).resolve(); assert sys.version_info[:2] == (3, 13); assert pathlib.Path(sys.executable).resolve().is_relative_to(root); assert pathlib.Path(sys.prefix).resolve().is_relative_to(root); assert pathlib.Path(sys.base_prefix).resolve().is_relative_to(root); assert pathlib.Path(getattr(sys, "_base_executable", sys.executable)).resolve().is_relative_to(root)' >/dev/null 2>&1
 }
 
 ensure_python() {
@@ -334,8 +379,9 @@ ensure_python() {
     return 1
   }
   if ! managed_python_healthy; then
-    rm -rf "$PYTHON_RUNTIME_ROOT"
-    uv venv --python "$PYTHON_VERSION" "$PYTHON_RUNTIME_ROOT" || return 1
+    rm -rf "$PYTHON_INSTALL_ROOT"
+    uv python install --managed-python --no-bin --install-dir "$PYTHON_INSTALL_ROOT" "$PYTHON_VERSION" || return 1
+    PYTHON_BIN=""
   fi
   managed_python_healthy || {
     printf 'Managed Python failed health checks: %s\n' "$PYTHON_BIN" >&2
@@ -343,8 +389,9 @@ ensure_python() {
   }
   OPENCODE_TEAM_PYTHON="$PYTHON_BIN"
   export PYTHON_BIN OPENCODE_TEAM_PYTHON
-  python_details="$($PYTHON_BIN -c 'import sys; print(sys.executable); print(sys.version.split()[0])')" || return 1
+  python_details="$($PYTHON_BIN -c 'import sys; print(sys.executable); print(sys.version.split()[0]); print(sys.prefix); print(sys.base_prefix); print(getattr(sys, "_base_executable", None))')" || return 1
   printf '  %-18s OK (%s, %s)\n' "Managed Python" "$(printf '%s\n' "$python_details" | sed -n '2p')" "$(printf '%s\n' "$python_details" | sed -n '1p')"
+  printf '  %-18s prefix=%s base=%s executable=%s\n' "Python ownership" "$(printf '%s\n' "$python_details" | sed -n '3p')" "$(printf '%s\n' "$python_details" | sed -n '4p')" "$(printf '%s\n' "$python_details" | sed -n '5p')"
 }
 
 ensure_profile_roots() {
@@ -734,6 +781,7 @@ PY
 }
 
 stale_generated_package_paths() {
+  [ -n "$PYTHON_BIN" ] || return 0
   OPENCODE_TEAM_CONFIG_ROOT="$CONFIG_ROOT" OPENCODE_TEAM_PACKAGE_ROOT="$PACKAGE_ROOT" "$PYTHON_BIN" <<'PY'
 import os
 import pathlib
@@ -801,6 +849,11 @@ refresh_generated_configs() {
 ensure_generated_config_current() {
   setup_roots
   [ -d "$CONFIG_ROOT" ] || return 0
+  if ! managed_python_healthy; then
+    printf 'Cannot refresh stale package config: managed Python is missing; run setup\n' >&2
+    return 1
+  fi
+  export PYTHON_BIN OPENCODE_TEAM_PYTHON
   local stale config_missing=0 team
   stale="$(stale_generated_package_paths)"
   for team in best go openai daily; do
@@ -837,11 +890,10 @@ setup() {
     require_command "$command_name" >/dev/null || { printf '%s is required for setup\n' "$command_name" >&2; return 1; }
   done
   setup_roots
-  OPENCODE_BIN="$(resolve_opencode)" || {
-    printf 'OpenCode is required for setup\n' >&2
+  ensure_opencode || {
+    printf 'A supported Homebrew OpenCode installation is required for setup\n' >&2
     return 1
   }
-  export OPENCODE_BIN
   export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
   mkdir -p "$CONFIG_ROOT" "$DATA_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$RUNTIME_ROOT" "$DEPENDENCY_ROOT"
   chmod 700 "$CONFIG_ROOT" "$DATA_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$RUNTIME_ROOT" "$DEPENDENCY_ROOT"
