@@ -6,7 +6,13 @@ PACKAGE_ROOT="${PACKAGE_ROOT:?PACKAGE_ROOT is required}"
 DATA_ROOT="${DATA_ROOT:?DATA_ROOT is required}"
 STATE_ROOT="${STATE_ROOT:?STATE_ROOT is required}"
 if [ -z "${OPENCODE_TEAM_PYTHON:-}" ]; then
-  OPENCODE_TEAM_PYTHON="${OPENCODE_TEAM_DEPENDENCY_ROOT:-$DATA_ROOT/dependencies}/python-runtime/bin/python"
+  dependency_root="${OPENCODE_TEAM_DEPENDENCY_ROOT:-$DATA_ROOT/dependencies}"
+  for candidate in "$dependency_root"/python/*/bin/python3.13; do
+    if [ -x "$candidate" ]; then
+      OPENCODE_TEAM_PYTHON="$candidate"
+      break
+    fi
+  done
 fi
 [ -x "$OPENCODE_TEAM_PYTHON" ] || {
   printf 'OPENCODE_TEAM_PYTHON is required: %s\n' "$OPENCODE_TEAM_PYTHON" >&2
