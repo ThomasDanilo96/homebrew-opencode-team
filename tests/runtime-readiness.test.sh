@@ -4,7 +4,27 @@ set -euo pipefail
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/opencode-team-readiness.XXXXXX")"
 RUNTIME_ROOT="$TEST_ROOT/cache/runtime"
-trap 'kill "$launcher_pid" "$server_pid" 2>/dev/null || true; rm -rf "$TEST_ROOT"' EXIT
+
+cleanup() {
+  local rc=$?
+
+  for pid in "${launcher_pid:-}" "${server_pid:-}"; do
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+    fi
+  done
+
+  for pid in "${launcher_pid:-}" "${server_pid:-}"; do
+    if [ -n "$pid" ]; then
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
+
+  rm -rf "$TEST_ROOT"
+  return "$rc"
+}
+
+trap cleanup EXIT
 
 start_fixture_processes() {
   sleep 120 &
@@ -49,6 +69,7 @@ printf '%s\n' "$ready" | jq -e '.ready == true' >/dev/null
 printf '%s\n' 'REAL_RUNTIME_READY = PASS'
 
 kill "$server_pid"
+wait "$server_pid" 2>/dev/null || true
 rm -rf "$RUNTIME_ROOT/best"
 run_dir="$RUNTIME_ROOT/go/runs/abcd1234"
 mkdir -p "$run_dir"
