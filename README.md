@@ -11,7 +11,6 @@ Package the portable OpenCode Team runtime foundation for distribution through H
 - macOS
 - Homebrew
 - Node.js
-- OpenCode
 - Git
 - curl, jq, uv, ripgrep
 - tmux for BEST and GO bridges
@@ -29,8 +28,9 @@ opencode-team best
 
 The install-scoped `HOMEBREW_NO_INSTALL_CLEANUP=1` prevents an unrelated broken
 Homebrew package from aborting this install. It does not change Homebrew's global
-configuration. OpenCode is supplied by Homebrew core, so no third-party tap trust
-step is required.
+configuration. `setup` reuses a compatible OpenCode already installed by Homebrew,
+including an existing v0.1.16-era tap installation, or installs Homebrew-core
+OpenCode when none is available. No third-party tap trust step is required.
 
 Alternative profiles:
 
@@ -81,9 +81,9 @@ Prepare an isolated installation root without starting OpenCode:
 OPENCODE_TEAM_HOME="$(mktemp -d)" bin/opencode-team setup
 ```
 
-`setup` provisions a private Python 3.13 runtime and installs all team dependencies
-under the isolated data root, installs the version-pinned Serena MCP server there,
-and generates the verified BEST and GO OMO
+`setup` provisions a private uv-managed Python 3.13 distribution and installs all
+team dependencies under the isolated data root, installs the version-pinned Serena
+MCP server there, resolves a compatible brewed OpenCode provider, and generates the verified BEST and GO OMO
 bundles. It also schedules package-owned BEST tool-output GC and BEST/OPENAI
 retention jobs when no legacy maintenance agents are detected. It refuses unsupported
 Node versions and does not start a runtime.
@@ -97,6 +97,15 @@ marked `UNCERTAIN` are never reclaimed automatically.
 When legacy maintenance agents are present, setup reports `DEFERRED` and does not
 install duplicate jobs. Disposable setups write and validate LaunchAgent plists under
 the test state root without loading them.
+
+To upgrade an existing v0.1.16 installation, keep its compatible brewed OpenCode
+provider installed and run:
+
+```bash
+HOMEBREW_NO_INSTALL_CLEANUP=1 brew upgrade ThomasDanilo96/opencode-team/opencode-team
+opencode-team setup
+opencode-team doctor
+```
 
 ## Uninstall
 
