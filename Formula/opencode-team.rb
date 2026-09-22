@@ -5,11 +5,10 @@ class OpencodeTeam < Formula
   sha256 "582833300274337bb7f51ef0031aab6c77d62bc1c7855bba3cd2f238e0d4bfc4"
   license "MIT"
 
-  depends_on "anomalyco/tap/opencode"
   depends_on "git"
   depends_on "jq"
   depends_on "node@22"
-  depends_on "python@3.14"
+  depends_on "opencode"
   depends_on "ripgrep"
   depends_on "tmux"
   depends_on "uv"

@@ -13,7 +13,7 @@ Package the portable OpenCode Team runtime foundation for distribution through H
 - Node.js
 - OpenCode
 - Git
-- Python 3, curl, jq, uv, ripgrep
+- curl, jq, uv, ripgrep
 - tmux for BEST and GO bridges
 - Codex and Serena for team integrations; `gh` remains optional
 - Node.js 22.22.2+, Node.js 24.15.0+, or Node.js 26+
@@ -21,11 +21,16 @@ Package the portable OpenCode Team runtime foundation for distribution through H
 ## Usage
 
 ```bash
-brew install ThomasDanilo96/opencode-team/opencode-team
+HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ThomasDanilo96/opencode-team/opencode-team
 opencode-team setup
 opencode-team doctor
 opencode-team best
 ```
+
+The install-scoped `HOMEBREW_NO_INSTALL_CLEANUP=1` prevents an unrelated broken
+Homebrew package from aborting this install. It does not change Homebrew's global
+configuration. OpenCode is supplied by Homebrew core, so no third-party tap trust
+step is required.
 
 Alternative profiles:
 
@@ -76,8 +81,9 @@ Prepare an isolated installation root without starting OpenCode:
 OPENCODE_TEAM_HOME="$(mktemp -d)" bin/opencode-team setup
 ```
 
-`setup` installs all team dependencies under the isolated data root, installs the
-version-pinned Serena MCP server there, and generates the verified BEST and GO OMO
+`setup` provisions a private Python 3.13 runtime and installs all team dependencies
+under the isolated data root, installs the version-pinned Serena MCP server there,
+and generates the verified BEST and GO OMO
 bundles. It also schedules package-owned BEST tool-output GC and BEST/OPENAI
 retention jobs when no legacy maintenance agents are detected. It refuses unsupported
 Node versions and does not start a runtime.
