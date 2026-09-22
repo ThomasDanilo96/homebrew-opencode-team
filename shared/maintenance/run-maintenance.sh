@@ -5,6 +5,14 @@ TASK="${1:-}"
 PACKAGE_ROOT="${PACKAGE_ROOT:?PACKAGE_ROOT is required}"
 DATA_ROOT="${DATA_ROOT:?DATA_ROOT is required}"
 STATE_ROOT="${STATE_ROOT:?STATE_ROOT is required}"
+if [ -z "${OPENCODE_TEAM_PYTHON:-}" ]; then
+  OPENCODE_TEAM_PYTHON="${OPENCODE_TEAM_DEPENDENCY_ROOT:-$DATA_ROOT/dependencies}/python-runtime/bin/python"
+fi
+[ -x "$OPENCODE_TEAM_PYTHON" ] || {
+  printf 'OPENCODE_TEAM_PYTHON is required: %s\n' "$OPENCODE_TEAM_PYTHON" >&2
+  exit 1
+}
+export OPENCODE_TEAM_PYTHON
 
 case "$TASK" in
   best-tool-output-gc|best-retention|openai-retention|runtime-gc) ;;
@@ -129,7 +137,7 @@ cleanup_lock() {
   local expected_owner fenced
   expected_owner="$(cat "$LOCK_DIR/owner" 2>/dev/null || true)"
   if [ -n "${OPENCODE_MAINTENANCE_TEST_CLEANUP_DELAY_MS:-}" ]; then
-    sleep "$(python3 -c 'import os; print(float(os.environ["OPENCODE_MAINTENANCE_TEST_CLEANUP_DELAY_MS"]) / 1000)')"
+    sleep "$($OPENCODE_TEAM_PYTHON -c 'import os; print(float(os.environ["OPENCODE_MAINTENANCE_TEST_CLEANUP_DELAY_MS"]) / 1000)')"
   fi
   fenced="$LOCK_DIR.release.$LOCK_TOKEN"
   maintenance_rename "$LOCK_DIR" "$fenced" || return 0
@@ -143,7 +151,7 @@ cleanup_lock() {
 maintenance_acquire_lock
 trap cleanup_lock EXIT INT TERM HUP
 if [ -n "${OPENCODE_MAINTENANCE_TEST_DELAY_MS:-}" ]; then
-  sleep "$(python3 -c 'import os; print(float(os.environ["OPENCODE_MAINTENANCE_TEST_DELAY_MS"]) / 1000)')"
+  sleep "$($OPENCODE_TEAM_PYTHON -c 'import os; print(float(os.environ["OPENCODE_MAINTENANCE_TEST_DELAY_MS"]) / 1000)')"
 fi
 
 case "$TASK" in
@@ -160,7 +168,7 @@ case "$TASK" in
     OPENCODE_MAINTENANCE_BASE="$DATA_ROOT/opencode" \
       OPENCODE_MAINTENANCE_SANDBOXES="$DATA_ROOT" \
       OPENCODE_MAINTENANCE_LOG_FILE="$STATE_ROOT/maintenance/logs/best-retention.log" \
-      python3 "$PACKAGE_ROOT/shared/maintenance/opencode-cleanup.py" \
+      "$OPENCODE_TEAM_PYTHON" "$PACKAGE_ROOT/shared/maintenance/opencode-cleanup.py" \
         --retention-only --live-retention --team best --max-families 1 --max-session-deletes 3
     ;;
   openai-retention)
@@ -170,7 +178,7 @@ case "$TASK" in
       OPENCODE_MAINTENANCE_BASE="$DATA_ROOT/opencode" \
       OPENCODE_MAINTENANCE_SANDBOXES="$DATA_ROOT" \
       OPENCODE_MAINTENANCE_LOG_FILE="$STATE_ROOT/maintenance/logs/openai-retention.log" \
-      python3 "$PACKAGE_ROOT/shared/maintenance/opencode-cleanup.py" \
+      "$OPENCODE_TEAM_PYTHON" "$PACKAGE_ROOT/shared/maintenance/opencode-cleanup.py" \
         --retention-only --live-retention --team openai --max-families 3 --max-session-deletes 10
     OPENAI_TEAM_STATE_ROOT="$DATA_ROOT/openai/state/team" \
       OPENAI_WORK_PACKET_RETENTION_DAYS="${OPENAI_WORK_PACKET_RETENTION_DAYS:-7}" \
