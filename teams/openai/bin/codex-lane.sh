@@ -29,7 +29,7 @@ requested_model=${OPENAI_CODEX_REQUESTED_MODEL:-$model}
 if [ -n "${OPENAI_CODEX_INVOCATION_ID:-}" ]; then
   invocation_id=$OPENAI_CODEX_INVOCATION_ID
 else
-  invocation_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
+  invocation_id=$("${OPENCODE_TEAM_PYTHON:?OPENCODE_TEAM_PYTHON is required}" -c 'import uuid; print(uuid.uuid4())')
 fi
 fallback_model=${OPENAI_CODEX_FALLBACK_MODEL:-}
 fallback_reason_from_parent=${OPENAI_CODEX_FALLBACK_REASON:-}
