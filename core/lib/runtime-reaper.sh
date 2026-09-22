@@ -12,7 +12,7 @@ process_start_epoch() {
   local pid="$1" raw
   raw=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$raw" ] || return 1
-  printf '%s\n' "$raw" | python3 -c 'import sys,time; print(int(time.mktime(time.strptime(sys.stdin.read().strip(), "%a %b %d %H:%M:%S %Y"))))' 2>/dev/null
+  printf '%s\n' "$raw" | "$OPENCODE_TEAM_PYTHON" -c 'import sys,time; print(int(time.mktime(time.strptime(sys.stdin.read().strip(), "%a %b %d %H:%M:%S %Y"))))' 2>/dev/null
 }
 process_alive() {
   local pid="$1" stat

@@ -26,7 +26,7 @@ process_start_epoch() {
   local pid="$1" raw
   raw=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null) || return 1
   [ -n "$raw" ] || return 1
-  printf '%s\n' "$raw" | python3 -c 'import sys,time; print(int(time.mktime(time.strptime(sys.stdin.read().strip(), "%a %b %d %H:%M:%S %Y"))))' 2>/dev/null
+  printf '%s\n' "$raw" | "$OPENCODE_TEAM_PYTHON" -c 'import sys,time; print(int(time.mktime(time.strptime(sys.stdin.read().strip(), "%a %b %d %H:%M:%S %Y"))))' 2>/dev/null
 }
 
 write_process_identity() {
@@ -108,7 +108,7 @@ ensure_run_id() {
     esac
   else
     # Public invocation: always generate fresh RUN_ID, ignore ambient
-    RUN_ID=$(python3 -c "import secrets; print(secrets.token_hex(4))")
+    RUN_ID=$("$OPENCODE_TEAM_PYTHON" -c "import secrets; print(secrets.token_hex(4))")
   fi
 }
 
@@ -212,7 +212,7 @@ run_pre_server_hook() {
 
 bridge_private_auth_file() {
   local source_path="$1" destination_path="$2" disposable_root="$3" label="$4"
-  python3 - "$source_path" "$destination_path" "$disposable_root" "$label" <<'PY'
+  "$OPENCODE_TEAM_PYTHON" - "$source_path" "$destination_path" "$disposable_root" "$label" <<'PY'
 import os
 import shutil
 import stat
@@ -332,7 +332,7 @@ claim_session() {
 
 # --- Port allocation ---
 allocate_port() {
-  python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
+  "$OPENCODE_TEAM_PYTHON" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
 }
 
 # --- Resume directory resolution ---
@@ -353,7 +353,7 @@ resolve_resume_dir() {
     OMO_PROFILE="$OMO_PROFILE" \
     opencode export "$session_id" > "$exppath" 2>/dev/null
 
-  SESSION_DIRECTORY=$(python3 -c "
+  SESSION_DIRECTORY=$("$OPENCODE_TEAM_PYTHON" -c "
 import json, sys
 try:
     with open('$exppath') as f:
@@ -376,7 +376,7 @@ except: pass
 # --- Server ---
 start_server() {
   cd "$SESSION_DIRECTORY" || die "Cannot cd to $SESSION_DIRECTORY"
-  opencode serve --port "$PORT" --hostname 127.0.0.1 &
+  "$OPENCODE_BIN" serve --port "$PORT" --hostname 127.0.0.1 &
   SERVER_PID=$!
   echo "$SERVER_PID" > "$RUN_STATE_DIR/server.pid"
   write_process_identity server "$SERVER_PID" || die "Failed to record server identity"
@@ -544,7 +544,7 @@ start_attach() {
     tmp="$1/.attach.identity.$$.$RANDOM"
     printf "pid=%s\\nstart_epoch=%s\\npgid=%s\\nsid=%s\\nrole=attach\\nrun_id=%s\\n" "$pid" "$start" "$pgid" "$sid" "$4" > "$tmp" && mv -f "$tmp" "$1/attach.identity"
     printf "%s\\n" "$pid" > "$1/attach.pid"
-    exec opencode attach "$2" --session "$3"
+    exec "$OPENCODE_BIN" attach "$2" --session "$3"
   ' bash "$RUN_STATE_DIR" "http://127.0.0.1:$PORT" "$PARENT_SESSION_ID" "$RUN_ID"
   local oc_exit=$?
   log "TUI exited (code=$oc_exit)"
@@ -553,6 +553,7 @@ start_attach() {
 # --- Export environment ---
 export_env() {
   export OPENCODE_CONFIG="$OPENCODE_CONFIG"
+  export OPENCODE_BIN OPENCODE_TEAM_PYTHON
   export OPENCODE_CONFIG_DIR="$(dirname "$OPENCODE_CONFIG")"
   export OPENCODE_DISABLE_PROJECT_CONFIG=1
   export OPENCODE_DISABLE_CLAUDE_CODE=1
@@ -677,7 +678,7 @@ main() {
   echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$RUN_STATE_DIR/created_at"
   echo "$PPID" > "$RUN_STATE_DIR/parent_pid"
   echo "CREATING" > "$RUN_STATE_DIR/state"
-  echo "$(python3 -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')" > "$RUN_STATE_DIR/real_home"
+  echo "$("$OPENCODE_TEAM_PYTHON" -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')" > "$RUN_STATE_DIR/real_home"
   echo "$session_mode" > "$RUN_STATE_DIR/session_mode"
 
   start_reaper

@@ -75,7 +75,7 @@ fi
 
 parse_team_config "$CONFIG_FILE" || exit 1
 
-RUN_ID=$(python3 -c "import secrets; print(secrets.token_hex(4))")
+RUN_ID=$("$OPENCODE_TEAM_PYTHON" -c "import secrets; print(secrets.token_hex(4))")
 
 if [ -n "${TMUX:-}" ]; then
   export TEAM_RUNTIME_INNER=1

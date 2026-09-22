@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export OPENCODE_TEAM_PYTHON="${OPENCODE_TEAM_PYTHON:-$(command -v python3)}"
 if ! ps -p $$ -o lstart= >/dev/null 2>&1; then
   printf '%s\n' 'runtime reaper: skipped (ps unavailable in sandbox)'
   exit 0
