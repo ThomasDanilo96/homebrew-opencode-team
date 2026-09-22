@@ -1,5 +1,7 @@
 # Portable BEST profile. Values are rendered by opencode-team setup.
 TEAM_NAME=best
+OPENCODE_BIN=@OPENCODE_BIN@
+OPENCODE_TEAM_PYTHON=@PYTHON_BIN@
 SANDBOX=@DATA_ROOT@/best
 RUNTIME_ROOT=@CACHE_ROOT@/runtime/best
 PERSISTENT_DATA_ROOT=@DATA_ROOT@/best/data

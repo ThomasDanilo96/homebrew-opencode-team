@@ -1,5 +1,7 @@
 # Portable GO profile. Values are rendered by opencode-team setup.
 TEAM_NAME=go
+OPENCODE_BIN=@OPENCODE_BIN@
+OPENCODE_TEAM_PYTHON=@PYTHON_BIN@
 SANDBOX=@DATA_ROOT@/go
 RUNTIME_ROOT=@CACHE_ROOT@/runtime/go
 PERSISTENT_DATA_ROOT=@DATA_ROOT@/go/data

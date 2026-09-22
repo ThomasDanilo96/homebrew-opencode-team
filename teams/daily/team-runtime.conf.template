@@ -1,5 +1,7 @@
 # Portable OPENAI DAILY profile. Values are rendered by opencode-team setup.
 TEAM_NAME=opencode-openai-daily
+OPENCODE_BIN=@OPENCODE_BIN@
+OPENCODE_TEAM_PYTHON=@PYTHON_BIN@
 SANDBOX=@DATA_ROOT@/daily
 RUNTIME_ROOT=@CACHE_ROOT@/runtime/daily
 PERSISTENT_DATA_ROOT=@DATA_ROOT@/daily/data

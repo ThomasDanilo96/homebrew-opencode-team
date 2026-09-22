@@ -1,5 +1,7 @@
 # Portable OPENAI profile. Values are rendered by opencode-team setup.
 TEAM_NAME=opencode-openai-team-unified-candidate
+OPENCODE_BIN=@OPENCODE_BIN@
+OPENCODE_TEAM_PYTHON=@PYTHON_BIN@
 SANDBOX=@DATA_ROOT@/openai
 RUNTIME_ROOT=@CACHE_ROOT@/runtime/openai
 PERSISTENT_DATA_ROOT=@DATA_ROOT@/openai/data
