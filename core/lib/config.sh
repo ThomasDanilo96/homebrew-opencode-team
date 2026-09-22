@@ -6,7 +6,7 @@
 _FORBIDDEN_CHARS='$~`(){};|&<>"'"'"''
 
 # All allowed configuration variables (for explicit unset before parsing)
-_ALL_CONFIG_VARS="TEAM_NAME SANDBOX RUNTIME_ROOT PERSISTENT_DATA_ROOT TMUX_PREFIX OMO_PROFILE OPENCODE_CONFIG PRE_SERVER_HOOK RUNTIME_ENV_HOOK XDG_CONFIG_HOME_OVERRIDE CLAUDE_CONFIG_DIR_OVERRIDE NATIVE_UI_ONLY_AGENTS RESUME_ALLOWED_AGENTS BRIDGE_MODE"
+_ALL_CONFIG_VARS="TEAM_NAME OPENCODE_BIN OPENCODE_TEAM_PYTHON SANDBOX RUNTIME_ROOT PERSISTENT_DATA_ROOT TMUX_PREFIX OMO_PROFILE OPENCODE_CONFIG PRE_SERVER_HOOK RUNTIME_ENV_HOOK XDG_CONFIG_HOME_OVERRIDE CLAUDE_CONFIG_DIR_OVERRIDE NATIVE_UI_ONLY_AGENTS RESUME_ALLOWED_AGENTS BRIDGE_MODE"
 
 # Validate TEAM_NAME format
 _validate_team_name() {
@@ -115,18 +115,12 @@ _check_forbidden_chars() {
 # Realpath containment check using Python
 _check_path_containment() {
   local hook="$1" sandbox="$2"
-  python3 -c "
-import os, sys
-hook = os.path.realpath('$hook')
-sandbox = os.path.realpath('$sandbox')
-if not (hook == sandbox or hook.startswith(sandbox + '/')):
-    sys.exit(1)
-" 2>/dev/null
+  node -e 'const path = require("node:path"); const [hook, sandbox] = process.argv.slice(1); const realHook = path.resolve(hook); const realSandbox = path.resolve(sandbox); process.exit(realHook === realSandbox || realHook.startsWith(`${realSandbox}/`) ? 0 : 1);' "$hook" "$sandbox" 2>/dev/null
 }
 
 # Canonicalize path using Python realpath
 _realpath() {
-  python3 -c "import os; print(os.path.realpath('$1'))" 2>/dev/null
+  node -e 'process.stdout.write(require("node:path").resolve(process.argv[1]) + "\\n")' "$1" 2>/dev/null
 }
 
 parse_team_config() {
@@ -148,7 +142,7 @@ parse_team_config() {
     unset "$var"
   done
 
-  local allowed_keys="TEAM_NAME SANDBOX RUNTIME_ROOT PERSISTENT_DATA_ROOT TMUX_PREFIX OMO_PROFILE OPENCODE_CONFIG PRE_SERVER_HOOK RUNTIME_ENV_HOOK XDG_CONFIG_HOME_OVERRIDE CLAUDE_CONFIG_DIR_OVERRIDE NATIVE_UI_ONLY_AGENTS RESUME_ALLOWED_AGENTS BRIDGE_MODE"
+  local allowed_keys="TEAM_NAME OPENCODE_BIN OPENCODE_TEAM_PYTHON SANDBOX RUNTIME_ROOT PERSISTENT_DATA_ROOT TMUX_PREFIX OMO_PROFILE OPENCODE_CONFIG PRE_SERVER_HOOK RUNTIME_ENV_HOOK XDG_CONFIG_HOME_OVERRIDE CLAUDE_CONFIG_DIR_OVERRIDE NATIVE_UI_ONLY_AGENTS RESUME_ALLOWED_AGENTS BRIDGE_MODE"
   local line_num=0
   local seen_keys=""
 
@@ -207,7 +201,7 @@ parse_team_config() {
 
     # Absolute path check for path keys
     case "$key" in
-      SANDBOX|RUNTIME_ROOT|PERSISTENT_DATA_ROOT|OPENCODE_CONFIG|PRE_SERVER_HOOK|RUNTIME_ENV_HOOK|XDG_CONFIG_HOME_OVERRIDE|CLAUDE_CONFIG_DIR_OVERRIDE)
+      OPENCODE_BIN|OPENCODE_TEAM_PYTHON|SANDBOX|RUNTIME_ROOT|PERSISTENT_DATA_ROOT|OPENCODE_CONFIG|PRE_SERVER_HOOK|RUNTIME_ENV_HOOK|XDG_CONFIG_HOME_OVERRIDE|CLAUDE_CONFIG_DIR_OVERRIDE)
         case "$value" in
           /*) ;;
           *)
@@ -234,13 +228,21 @@ parse_team_config() {
   done < "$config_file"
 
   # Validate required keys (using indirect expansion, NO eval)
-  for required in TEAM_NAME SANDBOX RUNTIME_ROOT PERSISTENT_DATA_ROOT TMUX_PREFIX OMO_PROFILE OPENCODE_CONFIG RESUME_ALLOWED_AGENTS BRIDGE_MODE; do
+  for required in TEAM_NAME OPENCODE_BIN OPENCODE_TEAM_PYTHON SANDBOX RUNTIME_ROOT PERSISTENT_DATA_ROOT TMUX_PREFIX OMO_PROFILE OPENCODE_CONFIG RESUME_ALLOWED_AGENTS BRIDGE_MODE; do
     local val="${!required:-}"
     if [ -z "$val" ]; then
       echo "ERROR: Required key $required missing" >&2
       return 1
     fi
   done
+  [ -x "$OPENCODE_BIN" ] || {
+    echo "ERROR: OPENCODE_BIN is not executable: $OPENCODE_BIN" >&2
+    return 1
+  }
+  [ -x "$OPENCODE_TEAM_PYTHON" ] || {
+    echo "ERROR: OPENCODE_TEAM_PYTHON is not executable: $OPENCODE_TEAM_PYTHON" >&2
+    return 1
+  }
 
   # Validate SANDBOX exists and is directory
   if [ ! -d "$SANDBOX" ]; then

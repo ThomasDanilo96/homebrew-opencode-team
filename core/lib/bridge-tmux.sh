@@ -137,7 +137,7 @@ while true; do
     SHORT_TITLE=$(echo "$title" | head -c 40)
     PANE_ID=$(tmux split-window -h -d -P -F "#{pane_id}" \
       -t "$TMUX_SESSION" \
-      "opencode attach '$SERVER_URL' --session '$sess_id'; echo ''; echo '[$AGENT_LABEL] Done'; sleep 3" 2>/dev/null || echo "")
+      "\"$OPENCODE_BIN\" attach '$SERVER_URL' --session '$sess_id'; echo ''; echo '[$AGENT_LABEL] Done'; sleep 3" 2>/dev/null || echo "")
 
     if [ -n "$PANE_ID" ]; then
       echo "$sess_id" >> "$SEEN_FILE"
