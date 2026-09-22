@@ -7,6 +7,6 @@ if [ -z "$OMO" ] && [ -n "${SANDBOX:-}" ]; then
   OMO="$GO_DEPENDENCY_ROOT/go/node_modules/oh-my-openagent/dist/index.js"
 fi
 [ -f "$OMO" ] || { printf 'GO OMO target missing: %s\n' "$OMO" >&2; exit 1; }
-python3 "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patch-worker-done-v2.py" "$OMO"
-python3 "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patch-routing.py" "$OMO"
+"${OPENCODE_TEAM_PYTHON:?OPENCODE_TEAM_PYTHON is required}" "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patch-worker-done-v2.py" "$OMO"
+"${OPENCODE_TEAM_PYTHON:?OPENCODE_TEAM_PYTHON is required}" "$(cd -P "$(dirname "${BASH_SOURCE[0]}")" && pwd)/patch-routing.py" "$OMO"
 node --check "$OMO"
