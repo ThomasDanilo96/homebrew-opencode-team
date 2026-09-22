@@ -27,7 +27,7 @@ jobs:
           sw_vers
           uname -m
           brew --prefix
-          test "$(opencode-team version)" = "OpenCode Team 0.1.14"
+          test "$(opencode-team version)" = "OpenCode Team 0.1.15"
           node --version
           opencode --version
           python3 --version
@@ -37,7 +37,7 @@ jobs:
           rg --version
           package_root="$(brew --prefix opencode-team)/libexec"
           test -x "$package_root/bin/opencode-team"
-          test "$(opencode-team version)" = "OpenCode Team 0.1.14"
+          test "$(opencode-team version)" = "OpenCode Team 0.1.15"
 
       - name: Clean-room setup and doctor
         run: |
@@ -83,11 +83,11 @@ jobs:
           brew test ThomasDanilo96/opencode-team/opencode-team
           brew audit --strict --formula ThomasDanilo96/opencode-team/opencode-team
 
-      - name: Installed v0.1.14 maintenance regression
+      - name: Installed v0.1.15 maintenance regression
         run: |
           export PATH="$(brew --prefix node@22)/bin:$PATH"
           package_root="$(brew --prefix opencode-team)/libexec"
-          test "$(opencode-team version)" = "OpenCode Team 0.1.14"
+          test "$(opencode-team version)" = "OpenCode Team 0.1.15"
           test -f "$package_root/shared/maintenance/run-maintenance.sh"
           test -f "$package_root/shared/maintenance/opencode-cleanup.py"
           test -f "$package_root/shared/maintenance/openai-state-retention.mjs"
