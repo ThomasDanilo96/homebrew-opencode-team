@@ -23,7 +23,7 @@ if rg -q "$PATCHED_SIGNATURE" "$OMO"; then
 fi
 rg -q "$UNPATCHED_SIGNATURE" "$OMO" || { log "REFUSED: unpatched signature missing" >&2; exit 1; }
 
-python3 - "$OMO" <<'PY'
+"${OPENCODE_TEAM_PYTHON:?OPENCODE_TEAM_PYTHON is required}" - "$OMO" <<'PY'
 import pathlib
 import sys
 

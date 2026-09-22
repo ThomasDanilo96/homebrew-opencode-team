@@ -11,7 +11,7 @@ if [ "$count" -eq 1 ]; then
 fi
 [ "$count" -eq 0 ] || { printf 'REFUSED: sentinel count=%s\n' "$count" >&2; exit 1; }
 
-python3 - "$TARGET" <<'PY'
+"${OPENCODE_TEAM_PYTHON:?OPENCODE_TEAM_PYTHON is required}" - "$TARGET" <<'PY'
 import pathlib
 import sys
 
