@@ -13,6 +13,7 @@ done
 PACKAGE_ROOT="$(cd -L "$(dirname "$SOURCE")/.." && pwd -L)"
 VERSION_FILE="$PACKAGE_ROOT/VERSION"
 SERENA_VERSION="1.7.0"
+PYTHON_VERSION="3.13"
 
 usage() {
   printf '%s\n' 'OpenCode Team' '' 'Usage:' \
@@ -88,7 +89,7 @@ validate_profile_config() {
     XDG_DATA_HOME="$DATA_ROOT/$team/data" \
     XDG_CACHE_HOME="$CACHE_ROOT/$team" \
     XDG_STATE_HOME="$STATE_ROOT/$team" \
-    opencode debug config >/dev/null 2>&1; then
+    "$OPENCODE_BIN" debug config >/dev/null 2>&1; then
     printf '  %-16s INVALID (OpenCode rejected generated config)\n' "$team profile"
     return 1
   fi
@@ -96,6 +97,21 @@ validate_profile_config() {
     validate_omo_config "$team" || return 1
   fi
   printf '  %-16s CONFIGURED\n' "$team profile"
+}
+
+resolve_opencode() {
+  local brew_prefix candidate path_opencode
+  if command -v brew >/dev/null 2>&1; then
+    brew_prefix="$(HOMEBREW_NO_INSTALL_CLEANUP=1 brew --prefix opencode 2>/dev/null || true)"
+    candidate="$brew_prefix/bin/opencode"
+    if [ -x "$candidate" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+  path_opencode="$(command -v opencode 2>/dev/null || true)"
+  [ -n "$path_opencode" ] && [ -x "$path_opencode" ] || return 1
+  printf '%s\n' "$path_opencode"
 }
 
 validate_generated_surface() {
@@ -189,7 +205,7 @@ ensure_serena() {
   fi
   printf '  %-18s installing %s\n' "Serena" "$SERENA_VERSION"
   UV_TOOL_DIR="$tool_root" UV_TOOL_BIN_DIR="$tool_bin" UV_CACHE_DIR="$uv_cache" \
-    uv tool install --force --python python3 "serena-agent==$SERENA_VERSION" || return 1
+    uv tool install --force --python "$PYTHON_BIN" "serena-agent==$SERENA_VERSION" || return 1
   [ -x "$serena_bin" ] || { printf 'Serena install did not create %s\n' "$serena_bin" >&2; return 1; }
   version="$($serena_bin --version 2>/dev/null || true)"
   serena_version_ok "$version" || { printf 'Unsupported Serena version: %s\n' "$version" >&2; return 1; }
@@ -204,7 +220,7 @@ ensure_codex() {
   fi
   printf '  %-18s missing; attempting Homebrew cask install\n' "Codex"
   require_command brew >/dev/null || return 1
-  brew install --cask codex || return 1
+  HOMEBREW_NO_INSTALL_CLEANUP=1 brew install --cask codex || return 1
   command -v codex >/dev/null 2>&1 || { printf 'Codex install did not provide codex\n' >&2; return 1; }
   printf '  %-18s OK (%s)\n' "Codex" "$(command -v codex)"
 }
@@ -221,22 +237,37 @@ doctor() {
     failed=1
   fi
   require_command brew || failed=1
-  require_command opencode || failed=1
+  if OPENCODE_BIN="$(resolve_opencode)"; then
+    export OPENCODE_BIN
+    printf '  %-16s OK (%s)\n' "OpenCode" "$OPENCODE_BIN"
+  else
+    printf '  %-16s MISSING\n' "OpenCode"
+    failed=1
+  fi
   check_node || failed=1
   require_command git || failed=1
-  require_command python3 || failed=1
   require_command jq || failed=1
   require_command tmux || failed=1
   require_command curl || failed=1
   require_command uv || failed=1
   require_command rg || failed=1
   setup_roots
+  if managed_python_healthy; then
+    OPENCODE_TEAM_PYTHON="$PYTHON_BIN"
+    export PYTHON_BIN OPENCODE_TEAM_PYTHON
+  fi
   ensure_generated_config_current || failed=1
   local time_machine_report
   if time_machine_report="$(time_machine_status 2>/dev/null)"; then
     printf '  %-16s %s\n' "Time Machine" "$time_machine_report"
   else
     printf '  %-16s FAILED (%s)\n' "Time Machine" "$time_machine_report"
+    failed=1
+  fi
+  if managed_python_healthy; then
+    printf '  %-16s OK (%s, %s)\n' "Managed Python" "$PYTHON_VERSION" "$PYTHON_BIN"
+  else
+    printf '  %-16s NOT CONFIGURED\n' "Managed Python"
     failed=1
   fi
   if [ -n "${SERENA_BIN:-}" ] && [ -x "$SERENA_BIN" ] && serena_version_ok "$($SERENA_BIN --version 2>/dev/null || true)"; then
@@ -265,7 +296,7 @@ doctor() {
     fi
   done
   printf 'Maintenance\n'
-  maintenance_status
+  maintenance_status || failed=1
   return "$failed"
 }
 
@@ -283,11 +314,37 @@ setup_roots() {
   fi
   RUNTIME_ROOT="$CACHE_ROOT/runtime"
   DEPENDENCY_ROOT="${OPENCODE_TEAM_DEPENDENCY_ROOT:-$DATA_ROOT/dependencies}"
+  PYTHON_RUNTIME_ROOT="$DEPENDENCY_ROOT/python-runtime"
+  PYTHON_BIN="$PYTHON_RUNTIME_ROOT/bin/python"
   if [ -n "${OPENCODE_TEAM_DEPENDENCY_ROOT:-}" ]; then
     SERENA_BIN="$DEPENDENCY_ROOT/bin/serena"
   else
     SERENA_BIN="$DATA_ROOT/bin/serena"
   fi
+}
+
+managed_python_healthy() {
+  [ -x "$PYTHON_BIN" ] || return 1
+  "$PYTHON_BIN" -c 'import pathlib, plistlib, secrets, sqlite3, sys, time, uuid, xml.parsers.expat; assert sys.version_info[:2] == (3, 13)' >/dev/null 2>&1
+}
+
+ensure_python() {
+  command -v uv >/dev/null 2>&1 || {
+    printf 'uv is required to provision managed Python\n' >&2
+    return 1
+  }
+  if ! managed_python_healthy; then
+    rm -rf "$PYTHON_RUNTIME_ROOT"
+    uv venv --python "$PYTHON_VERSION" "$PYTHON_RUNTIME_ROOT" || return 1
+  fi
+  managed_python_healthy || {
+    printf 'Managed Python failed health checks: %s\n' "$PYTHON_BIN" >&2
+    return 1
+  }
+  OPENCODE_TEAM_PYTHON="$PYTHON_BIN"
+  export PYTHON_BIN OPENCODE_TEAM_PYTHON
+  python_details="$($PYTHON_BIN -c 'import sys; print(sys.executable); print(sys.version.split()[0])')" || return 1
+  printf '  %-18s OK (%s, %s)\n' "Managed Python" "$(printf '%s\n' "$python_details" | sed -n '2p')" "$(printf '%s\n' "$python_details" | sed -n '1p')"
 }
 
 ensure_profile_roots() {
@@ -371,7 +428,7 @@ legacy_task_package_owned() {
       [ -f "$plist" ] || return 1
       executable="$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null || true)"
       [ "$executable" = "$HOME/.local/bin/opencode-cleanup" ] && [ -f "$executable" ] || return 1
-      python3 - "$plist" "$task" "$executable" <<'PY'
+  "$PYTHON_BIN" - "$plist" "$task" "$executable" <<'PY'
 import plistlib
 import sys
 
@@ -419,7 +476,7 @@ legacy_cleanup_package_owned() {
   [ -f "$plist" ] || return 1
   executable="$(plutil -extract ProgramArguments.0 raw -o - "$plist" 2>/dev/null || true)"
   [ "$executable" = "$HOME/.local/bin/opencode-cleanup" ] && [ -f "$executable" ] || return 1
-  python3 - "$plist" "$executable" <<'PY'
+  "$PYTHON_BIN" - "$plist" "$executable" <<'PY'
 import plistlib
 import sys
 
@@ -442,7 +499,7 @@ migrate_legacy_cleanup() {
 }
 
 maintenance_status() {
-  local task marker status
+  local task marker status failed=0
   for task in $(maintenance_tasks); do
     marker="$STATE_ROOT/maintenance/status/$task"
     if [ -f "$marker" ]; then
@@ -452,6 +509,10 @@ maintenance_status() {
     else
       status=MISSING
     fi
+    if [ "$status" = INSTALLED ] && ! maintenance_task_healthy "$task"; then
+      status=BROKEN
+      failed=1
+    fi
     case "$task" in
       best-tool-output-gc) printf '  BEST tool-output GC  %s\n' "$status" ;;
       best-retention) printf '  BEST retention       %s\n' "$status" ;;
@@ -459,6 +520,23 @@ maintenance_status() {
       runtime-gc) printf '  Runtime GC           %s\n' "$status" ;;
     esac
   done
+  return "$failed"
+}
+
+maintenance_task_healthy() {
+  local task="$1" label plist agent_dir
+  label="$(maintenance_label "$task")" || return 1
+  if [ -n "${OPENCODE_TEAM_HOME:-}" ]; then
+    agent_dir="$STATE_ROOT/maintenance/launchagents"
+  else
+    agent_dir="$HOME/Library/LaunchAgents"
+  fi
+  plist="$agent_dir/$label.plist"
+  [ -f "$plist" ] || return 1
+  plutil -lint "$plist" >/dev/null 2>&1 || return 1
+  if [ -z "${OPENCODE_TEAM_HOME:-}" ]; then
+    launchctl print "gui/${UID:-$(id -u)}/$label" >/dev/null 2>&1 || return 1
+  fi
 }
 
 write_maintenance_plist() {
@@ -467,13 +545,17 @@ write_maintenance_plist() {
   executable="${OPENCODE_TEAM_EXECUTABLE:-$(command -v opencode-team || printf '%s/bin/opencode-team' "$PACKAGE_ROOT")}"
   log_path="$STATE_ROOT/maintenance/logs/$task.launchd.log"
   temporary="${destination}.tmp.$$"
-  python3 - "$temporary" "$label" "$executable" "$task" "$log_path" "${OPENCODE_TEAM_HOME:-}" <<'PY'
+  "$PYTHON_BIN" - "$temporary" "$label" "$executable" "$task" "$log_path" "${OPENCODE_TEAM_HOME:-}" <<'PY'
+import os
 import pathlib
 import plistlib
 import sys
 
 destination, label, executable, task, log_path, team_home = sys.argv[1:]
-environment = {"PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"}
+environment = {
+    "PATH": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+    "OPENCODE_TEAM_PYTHON": os.environ["OPENCODE_TEAM_PYTHON"],
+}
 if team_home:
     environment["OPENCODE_TEAM_HOME"] = team_home
 hour, minute = {
@@ -498,8 +580,12 @@ PY
   if [ -f "$destination" ] && cmp -s "$temporary" "$destination"; then
     rm -f "$temporary"
   else
-    mv "$temporary" "$destination"
+    mv "$temporary" "$destination" || {
+      rm -f "$temporary"
+      return 1
+    }
   fi
+  plutil -lint "$destination" >/dev/null 2>&1 || return 1
 }
 
 install_maintenance() {
@@ -524,23 +610,32 @@ install_maintenance() {
     fi
     label="$(maintenance_label "$task")"
     plist="$agent_dir/$label.plist"
-    write_maintenance_plist "$task" "$plist"
+    write_maintenance_plist "$task" "$plist" || return 1
     if [ -n "${OPENCODE_TEAM_HOME:-}" ]; then
       status=INSTALLED
-    elif launchctl print "gui/${UID:-$(id -u)}/$label" >/dev/null 2>&1; then
-      status=INSTALLED
     else
-      launchctl bootstrap "gui/${UID:-$(id -u)}" "$plist"
-      launchctl enable "gui/${UID:-$(id -u)}/$label"
-      status=INSTALLED
+      if launchctl print "gui/${UID:-$(id -u)}/$label" >/dev/null 2>&1; then
+        status=INSTALLED
+      else
+        launchctl bootstrap "gui/${UID:-$(id -u)}" "$plist" || return 1
+        launchctl enable "gui/${UID:-$(id -u)}/$label" || return 1
+        launchctl print "gui/${UID:-$(id -u)}/$label" >/dev/null 2>&1 || return 1
+        status=INSTALLED
+      fi
     fi
-    printf '%s\n' "$status" > "$STATE_ROOT/maintenance/status/$task"
+    maintenance_task_healthy "$task" || return 1
+    printf '%s\n' "$status" > "$STATE_ROOT/maintenance/status/$task" || return 1
     printf '  %-18s OK (%s)\n' "$task" "$status"
   done
 }
 
 maintenance_command() {
   setup_roots
+  if ! OPENCODE_BIN="$(resolve_opencode)"; then
+    printf 'OpenCode is required for setup\n' >&2
+    return 1
+  fi
+  export OPENCODE_BIN
   export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
   if [ "${1:-}" = status ]; then
     [ "$#" -eq 1 ] || { usage >&2; return 2; }
@@ -591,7 +686,7 @@ verify_best_omo() {
   local target="$DEPENDENCY_ROOT/best/node_modules/oh-my-openagent/dist/index.js"
   [ -f "$target" ] || { printf 'BEST OMO package missing\n' >&2; return 1; }
   "$PACKAGE_ROOT/teams/best/patch-omo-hook-timeout.sh" "$target"
-  python3 "$PACKAGE_ROOT/teams/best/patch-omo-core.py" "$target"
+  "$PYTHON_BIN" "$PACKAGE_ROOT/teams/best/patch-omo-core.py" "$target"
   "$PACKAGE_ROOT/teams/best/patch-omo-isolation.sh" "$target"
   "$PACKAGE_ROOT/teams/best/verify-omo.sh" "$target"
   printf '  %-18s OK (patched and verified)\n' "best OMO"
@@ -600,8 +695,8 @@ verify_best_omo() {
 verify_go_omo() {
   local target="$DEPENDENCY_ROOT/go/node_modules/oh-my-openagent/dist/index.js"
   [ -f "$target" ] || { printf 'GO OMO package missing\n' >&2; return 1; }
-  python3 "$PACKAGE_ROOT/teams/go/patch-worker-done-v2.py" "$target"
-  python3 "$PACKAGE_ROOT/teams/go/patch-routing.py" "$target"
+  "$PYTHON_BIN" "$PACKAGE_ROOT/teams/go/patch-worker-done-v2.py" "$target"
+  "$PYTHON_BIN" "$PACKAGE_ROOT/teams/go/patch-routing.py" "$target"
   "$PACKAGE_ROOT/teams/go/verify-omo.sh" "$target"
   printf '  %-18s OK (patched and verified)\n' "go OMO"
 }
@@ -609,7 +704,7 @@ verify_go_omo() {
 render_template() {
   local template="$1" destination="$2"
   local temporary="${destination}.tmp.$$"
-  python3 - "$template" "$temporary" <<'PY'
+  "$PYTHON_BIN" - "$template" "$temporary" <<'PY'
 import os
 import pathlib
 import sys
@@ -617,6 +712,8 @@ import sys
 template = pathlib.Path(sys.argv[1]).read_text()
 values = {
     "@PACKAGE_ROOT@": os.environ["PACKAGE_ROOT"],
+    "@OPENCODE_BIN@": os.environ["OPENCODE_BIN"],
+    "@PYTHON_BIN@": os.environ["PYTHON_BIN"],
     "@CONFIG_ROOT@": os.environ["CONFIG_ROOT"],
     "@DATA_ROOT@": os.environ["DATA_ROOT"],
     "@STATE_ROOT@": os.environ["STATE_ROOT"],
@@ -637,7 +734,7 @@ PY
 }
 
 stale_generated_package_paths() {
-  OPENCODE_TEAM_CONFIG_ROOT="$CONFIG_ROOT" OPENCODE_TEAM_PACKAGE_ROOT="$PACKAGE_ROOT" python3 <<'PY'
+  OPENCODE_TEAM_CONFIG_ROOT="$CONFIG_ROOT" OPENCODE_TEAM_PACKAGE_ROOT="$PACKAGE_ROOT" "$PYTHON_BIN" <<'PY'
 import os
 import pathlib
 import re
@@ -708,6 +805,7 @@ ensure_generated_config_current() {
   stale="$(stale_generated_package_paths)"
   for team in best go openai daily; do
     [ -f "$CONFIG_ROOT/$team/team-runtime.conf" ] || continue
+    grep -q '^OPENCODE_TEAM_PYTHON=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
     grep -q '^RUNTIME_ROOT=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
     grep -q '^PERSISTENT_DATA_ROOT=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
   done
@@ -733,13 +831,17 @@ install_time_machine_exclusions() {
 }
 
 setup() {
-  require_command python3 >/dev/null || { printf 'python3 is required for setup\n' >&2; return 1; }
   require_command npm >/dev/null || { printf 'npm is required for setup\n' >&2; return 1; }
   check_node >/dev/null || { printf 'A compatible Node.js runtime is required for setup\n' >&2; return 1; }
-  for command_name in opencode git jq tmux uv rg curl; do
+  for command_name in git jq tmux uv rg curl; do
     require_command "$command_name" >/dev/null || { printf '%s is required for setup\n' "$command_name" >&2; return 1; }
   done
   setup_roots
+  OPENCODE_BIN="$(resolve_opencode)" || {
+    printf 'OpenCode is required for setup\n' >&2
+    return 1
+  }
+  export OPENCODE_BIN
   export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
   mkdir -p "$CONFIG_ROOT" "$DATA_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$RUNTIME_ROOT" "$DEPENDENCY_ROOT"
   chmod 700 "$CONFIG_ROOT" "$DATA_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$RUNTIME_ROOT" "$DEPENDENCY_ROOT"
@@ -751,6 +853,7 @@ setup() {
   printf '  runtime root      %s\n' "$RUNTIME_ROOT"
   printf '  dependency root   %s\n' "$DEPENDENCY_ROOT"
   install_time_machine_exclusions
+  ensure_python || return 1
   ensure_serena || return 1
   ensure_codex || return 1
   for team in best go openai daily; do
@@ -880,7 +983,7 @@ start_team() {
   if [ "${TEAM_RUNTIME_HEADLESS:-}" = 1 ]; then
     exec env \
       TEAM_RUNTIME_INNER=1 \
-      RUN_ID="$(python3 -c "import secrets; print(secrets.token_hex(4))")" \
+      RUN_ID="$("$PYTHON_BIN" -c "import secrets; print(secrets.token_hex(4))")" \
       SESSION_MODE=new \
       RESUME_SESSION_ID="" \
       "$PACKAGE_ROOT/core/bin/team-runtime" --config "$config_file" "$@"
