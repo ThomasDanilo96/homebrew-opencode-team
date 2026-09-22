@@ -8,7 +8,6 @@ class OpencodeTeam < Formula
   depends_on "git"
   depends_on "jq"
   depends_on "node@22"
-  depends_on "opencode"
   depends_on "ripgrep"
   depends_on "tmux"
   depends_on "uv"
