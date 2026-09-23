@@ -39,10 +39,18 @@ function hasPartRecord(source, messageID) {
   return Boolean(source && Object.prototype.hasOwnProperty.call(source, messageID));
 }
 
+function isInjectedSystemUser(parts) {
+  return parts.some((part) => {
+    if (part?.type !== "text" || typeof part.text !== "string") return false;
+    return /<system-reminder>|<!--\s*OMO_INTERNAL_(?:INITIATOR|NOREPLY)\s*-->|<BEST_ROUTER_ROUTE>/.test(part.text);
+  });
+}
+
 function isLogicalTurnUser(message, partsSource) {
   if (message?.role !== "user") return false;
   const parts = partsOf(partsSource, idOf(message));
   if (!parts.length) return true;
+  if (isInjectedSystemUser(parts)) return false;
   return parts.some((part) => part?.type === "text" && !part.synthetic && !part.ignored);
 }
 

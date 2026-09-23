@@ -2,10 +2,18 @@ function responseData(response) {
   return response?.data;
 }
 
+function isInjectedSystemUser(parts) {
+  return parts.some((part) => {
+    if (part?.type !== "text" || typeof part.text !== "string") return false;
+    return /<system-reminder>|<!--\s*OMO_INTERNAL_(?:INITIATOR|NOREPLY)\s*-->|<BEST_ROUTER_ROUTE>/.test(part.text);
+  });
+}
+
 function isLogicalTurnUser(message, parts) {
   if (message?.role !== "user") return false;
   const messageParts = parts.get(message.id) ?? [];
   if (!messageParts.length) return true;
+  if (isInjectedSystemUser(messageParts)) return false;
   return messageParts.some((part) => part?.type === "text" && !part.synthetic && !part.ignored);
 }
 

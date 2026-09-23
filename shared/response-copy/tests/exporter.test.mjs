@@ -60,6 +60,31 @@ test("keeps the complete logical response across compaction", () => {
   assert.doesNotMatch(result.text, /synthetic summary|reasoning|parentSessionId/);
 });
 
+test("keeps the response together across an injected system reminder", () => {
+  const first = assistant("first");
+  const final = assistant("final", "reminder");
+  const child = { id: "child", parentID: "p", agent: "explore", model: { providerID: "test", id: "child" } };
+  const task = { id: "task", messageID: "first", sessionID: "p", type: "tool", tool: "task", state: { status: "completed", metadata: { sessionId: "child", parentSessionId: "p" } } };
+  const result = exportLatestResponse({
+    parentSession: parent,
+    messages: {
+      p: [user("u"), first, { id: "reminder", role: "user", sessionID: "p", time: { created: 3 } }, final],
+      child: [user("child-user"), assistant("child-answer", "child-user")],
+    },
+    parts: {
+      first: [task, text("before", "first", "PARENT_BEFORE_REMINDER")],
+      reminder: [{ type: "text", text: "<system-reminder>background task completed</system-reminder>" }],
+      final: [text("after", "final", "PARENT_AFTER_REMINDER")],
+      "child-answer": [text("child-text", "child-answer", "CHILD_RESULT")],
+    },
+    sessions: new Map([["child", child]]),
+    statuses: new Map(),
+  });
+  assert.equal(result.status, "ready");
+  for (const marker of ["PARENT_BEFORE_REMINDER", "CHILD_RESULT", "PARENT_AFTER_REMINDER"]) assert.match(result.text, new RegExp(marker));
+  assert.doesNotMatch(result.text, /system-reminder/);
+});
+
 test("includes a current child and excludes an old or unrelated child", () => {
   const a = assistant("a");
   const child = { id: "c", parentID: "p", agent: "explore", model: { providerID: "test", id: "child" } };
