@@ -170,10 +170,13 @@ export default async function bestRouterPlugin(input) {
     }
     ,
     "tool.execute.before": async (toolInput, output) => {
+      const tool = String(toolInput.tool ?? "").toLowerCase();
+      if (tool === "call_omo_agent") {
+        throw new Error('BEST ROUTING POLICY: call_omo_agent is disabled. Use native task(subagent_type="...", run_in_background=true).');
+      }
       guardToolExecution({ team: "best", input: toolInput, output });
       const state = ROUTE_STATE.get(toolInput.sessionID);
       if (!state) return;
-      const tool = toolInput.tool.toLowerCase();
       if (tool === "task") {
         const subagent = typeof output.args?.subagent_type === "string" ? output.args.subagent_type : "";
         const background = output.args?.run_in_background;
@@ -194,7 +197,7 @@ export default async function bestRouterPlugin(input) {
           log({ event: "task_rejected_duplicate", ...details, gate_action: "reject" });
           throw new Error(buildGateMessage(state));
         }
-        if (background !== undefined && background !== true) {
+        if (background !== true) {
           throw new Error(GATE_MESSAGE);
         }
         state.pending_agents.push(subagent);

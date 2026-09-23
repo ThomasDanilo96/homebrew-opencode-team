@@ -174,7 +174,7 @@ test("BEST primary failure makes no alternate model attempts", () => {
 test("BEST safe root inspection allows bounded diagnosis and denies broad or mutating tools", async () => {
   const routeDir = mkdtempSync(join(tmpdir(), "best-router-route-"));
   const routeScript = join(routeDir, "route.sh");
-  writeFileSync(routeScript, 'input=$(cat); if printf "%s" "$input" | grep -q both; then printf "%s\\n" "<BEST_ROUTER_ROUTE>BOTH</BEST_ROUTER_ROUTE>"; elif printf "%s" "$input" | grep -q official; then printf "%s\\n" "<BEST_ROUTER_ROUTE>LIBRARIAN</BEST_ROUTER_ROUTE>"; else printf "%s\\n" "<BEST_ROUTER_ROUTE>EXPLORE</BEST_ROUTER_ROUTE>"; fi\n');
+  writeFileSync(routeScript, 'input=$(cat); if printf "%s" "$input" | grep -q direct; then printf "%s\\n" "DIRECT"; elif printf "%s" "$input" | grep -q both; then printf "%s\\n" "<BEST_ROUTER_ROUTE>BOTH</BEST_ROUTER_ROUTE>"; elif printf "%s" "$input" | grep -q official; then printf "%s\\n" "<BEST_ROUTER_ROUTE>LIBRARIAN</BEST_ROUTER_ROUTE>"; else printf "%s\\n" "<BEST_ROUTER_ROUTE>EXPLORE</BEST_ROUTER_ROUTE>"; fi\n');
   process.env.BEST_ROUTER_PATH = routeScript;
   process.env.BEST_ROUTER_LOG = join(routeDir, "router.log");
   const { default: bestRouterPlugin, isSafeRootInspection } = await import("../teams/best/best-router-plugin.js");
@@ -193,7 +193,13 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
     return { hooks, output, before, after };
   };
 
+  const direct = await routeSession("ses-direct", "direct request");
+  await assert.rejects(() => direct.before("call_omo_agent", { subagent_type: "explore", run_in_background: false }), /BEST ROUTING POLICY: call_omo_agent is disabled/);
+
   const explore = await routeSession("ses-explore", "Inspect repository implementation");
+  for (const background of [false, true]) {
+    await assert.rejects(() => explore.before("call_omo_agent", { subagent_type: "explore", run_in_background: background }), /BEST ROUTING POLICY: call_omo_agent is disabled/);
+  }
   for (const [tool, args] of [["bash", { command: "git status" }], ["bash", { command: "git diff --check" }], ["read", { filePath: "teams/best/patch-omo-core.py" }], ["grep", { pattern: "fallbackChain", path: "teams/best" }], ["glob", { pattern: "*.js", path: "teams/best" }]]) await explore.before(tool, args);
   for (const [tool, args] of [["glob", { pattern: "**/*", path: "." }], ["grep", { pattern: "x", path: "." }], ["serena_find_symbol", {}], ["task", { subagent_type: "librarian", run_in_background: true }], ["task", { subagent_type: "explore", run_in_background: false }]]) await assert.rejects(() => explore.before(tool, args), /BEST ROUTING GATE/);
   await assert.rejects(() => explore.before("bash", { command: "git add ." }), /BEST ROUTING GATE/);
@@ -203,7 +209,11 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   await explore.before("bash", { command: "git status" });
 
   const librarian = await routeSession("ses-librarian", "Find official documentation");
+  for (const background of [false, true]) {
+    await assert.rejects(() => librarian.before("call_omo_agent", { subagent_type: "librarian", run_in_background: background }), /BEST ROUTING POLICY: call_omo_agent is disabled/);
+  }
   await assert.rejects(() => librarian.before("webfetch", { url: "https://example.com" }), /BEST ROUTING GATE/);
+  await assert.rejects(() => librarian.before("task", { subagent_type: "librarian", run_in_background: false }), /BEST ROUTING GATE/);
   await librarian.before("task", { subagent_type: "librarian", run_in_background: true }, "librarian-task");
   await librarian.after("librarian-task");
   await librarian.before("webfetch", { url: "https://example.com" });
