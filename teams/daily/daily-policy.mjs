@@ -2,12 +2,44 @@ const tier = (model, input, cached, output) => ({ model, input_per_million: inpu
 
 export const TRIVIAL = 0;
 export const NORMAL = 1;
-export const COMPLEX = 3;
-export const HEAVY = 6;
-export const EXTREME = 10;
+export const COMPLEX = 2;
+export const HEAVY = 3;
+export const EXTREME = 3;
 
 export const DAILY_FANOUT = Object.freeze({ TRIVIAL, NORMAL, COMPLEX, HEAVY, EXTREME });
 export const DAILY_COMPLEXITY_TO_GUARDRAIL = Object.freeze({ TRIVIAL: "quick", NORMAL: "normal", COMPLEX: "complex", HEAVY: "long", EXTREME: "long" });
+
+export const DAILY_INVESTIGATION_LIMITS = Object.freeze({
+  TRIVIAL: Object.freeze({ minutes: 3, toolCalls: 5 }),
+  NORMAL: Object.freeze({ minutes: 8, toolCalls: 12 }),
+  COMPLEX: Object.freeze({ minutes: 20, toolCalls: 20 }),
+  HEAVY: Object.freeze({ minutes: 35, toolCalls: 30 }),
+  EXTREME: Object.freeze({ minutes: 45, toolCalls: 40 }),
+});
+
+const textArg = (args = {}) => [args.pattern, args.query, args.command, args.cmd, args.path, args.directory, args.cwd]
+  .filter((value) => typeof value === "string")
+  .join(" ")
+  .trim();
+
+export const dailySearchDecision = ({ tool = "", args = {}, seen = new Set() } = {}) => {
+  const name = String(tool).toLowerCase();
+  const text = textArg(args);
+  const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
+  const scope = String(args.path || args.directory || args.cwd || "").trim();
+  const signature = `${name}:${normalized}`;
+  if (seen.has(signature)) return { allowed: false, reason: "DUPLICATE_SEARCH" };
+  if (name === "glob" && /(?:^|[/ ])\*\*\/?(?:\*|$)/.test(normalized) && (!scope || [".", "./", "/"].includes(scope))) return { allowed: false, reason: "ROOT_GLOB_STARSTAR" };
+  if ((name === "grep" || name === "rg") && (!scope || [".", "./", "/"].includes(scope))) return { allowed: false, reason: "UNTARGETED_REPOSITORY_SEARCH" };
+  if (/package-lock\.json/.test(normalized) && !/package-lock\.json$/.test(String(args.path || "").toLowerCase())) return { allowed: false, reason: "PACKAGE_LOCK_NOISE" };
+  if (name === "bash" && /(?:^|[;&|\s])strings\s+[^;&|\n]*\b(?:bin|opencode|\.dylib|\.so)\b/i.test(text)) return { allowed: false, reason: "BINARY_STRINGS_SCAN" };
+  return { allowed: true, signature };
+};
+
+export const dailyInvestigationLimits = (complexity = "NORMAL") => DAILY_INVESTIGATION_LIMITS[String(complexity).toUpperCase()] ?? DAILY_INVESTIGATION_LIMITS.NORMAL;
+
+export const shouldStopDaily = ({ answerSupported = false, materialContradiction = false, remainingEvidence = "unknown" } = {}) =>
+  answerSupported === true && materialContradiction !== true && remainingEvidence === "confirmatory";
 
 export const DAILY_AGENT_MODELS = Object.freeze({
   openai_orchestrator: "openai/gpt-5.6-luna",

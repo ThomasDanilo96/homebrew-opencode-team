@@ -28,7 +28,7 @@ const withoutNegatedMutations = (text) => text.replace(NEGATED_MUTATION, " ");
 const complexityFor = (text) => /\b(?:multi[- ]service|rollback|cross[- ](?:service|repository)|end[- ]to[- ]end)\b/i.test(text) ? "EXTREME"
   : /\b(?:shared\s+runtime|concurren(?:cy|t)|cleanup|multi(?:ple)?\s+(?:module|service))\b/i.test(text) ? "HEAVY"
   : /\b(?:refactor|migration|schema|architecture|external\s+documentation|security|correctness|audit)\b/i.test(text) ? "COMPLEX"
-  : /\b(?:one\s+)?(?:typo|rename)\b/i.test(text) || /^test\b/i.test(text) ? "TRIVIAL" : "NORMAL";
+  : /\b(?:one\s+)?(?:typo|rename)\b/i.test(text) || /^test\b/i.test(text) || /^\s*(?:what\s+model|what\s+is\s+the\s+(?:default|current)\s+\w+|show\s+\S+\.(?:md|json|jsonc|sh|js|mjs|ts))\b/i.test(text) ? "TRIVIAL" : "NORMAL";
 
 export const analyzeObjective = (objective) => {
   const text = String(objective || "").trim();
