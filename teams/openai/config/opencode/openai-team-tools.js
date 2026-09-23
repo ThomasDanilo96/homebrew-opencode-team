@@ -21,7 +21,7 @@ import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
 import { gateTerminalPacketPatch, lifecycleCleanupOptions } from "./gate-state.js";
 import { GuardrailPolicyError, admitDelegation, admitToolCall, allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision, writeStopLatch } from "./openai-guardrails.js";
 import { guardToolExecution } from "../../../../shared/tool-output-guard.js";
-import { dailySearchDecision } from "../../../daily/daily-policy.mjs";
+import { assertDailyProviderModel, dailySearchDecision } from "../../../daily/daily-policy.mjs";
 import { appendTaskPacketMarker, extractTaskPacketMarker, objectiveBeforeMarker } from "./correlation-marker.js";
 import {
   CODEX_REQUIRED,
@@ -70,6 +70,7 @@ export const retainParentCallReservation = (reservationMap, reservation, outcome
 const PREMIUM_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-sol", openai_explore: "openai/gpt-5.6-luna-fast", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-terra", reviewer: "openai/gpt-5.6-sol", reviewer_critical: "openai/gpt-6-astra", specialist: "openai/gpt-6-astra", codex_executor: "openai/gpt-5.6-luna-fast" };
 const DAILY_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-luna", openai_explore: "openai/gpt-5.6-luna", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-luna", reviewer: "openai/gpt-5.6-terra", reviewer_critical: "openai/gpt-5.6-sol", specialist: "openai/gpt-5.6-terra", codex_executor: "openai/gpt-5.6-luna" };
 export const DEFAULT_AGENT_MODELS = process.env.OPENAI_DAILY_PROFILE === "1" ? DAILY_AGENT_MODELS : PREMIUM_AGENT_MODELS;
+const DAILY_AGENT_LABELS = Object.freeze({ openai_explore: "Explore", openai_librarian: "Librarian", openai_ops: "Ops", tester: "Tester", reviewer: "Reviewer", reviewer_critical: "Critical Reviewer", specialist: "Specialist", codex_executor: "Codex" });
 export const latestUserObjective = (messages = []) => {
   const entries = Array.isArray(messages) ? messages : Array.isArray(messages?.messages) ? messages.messages : [];
   const latest = [...entries].reverse().find((message) => message?.info?.role === "user");
@@ -2140,15 +2141,25 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
            guardrails.set(rootParent, { ...gateRoot, pendingTesterActive: true });
          }
      }
-    const resolvedModel = String(output.args?.model || "");
-    if (resolvedModel && !resolvedModel.startsWith("openai/")) {
-      throw new Error(`OPENAI-ONLY POLICY: rejected non-OpenAI model '${resolvedModel}' in task dispatch.`);
-    }
-    const configuredModel = DEFAULT_AGENT_MODELS[agent];
-    if (resolvedModel && configuredModel && resolvedModel !== configuredModel) {
-      throw new Error(`OPENAI MODEL MATRIX: model override '${resolvedModel}' is not permitted for ${agent}; required '${configuredModel}'.`);
-    }
-    const weights = { openai_explore: 1, openai_librarian: 1, openai_ops: 1, tester: 2, reviewer: 3, reviewer_critical: 3, specialist: 3, codex_executor: 2 };
+     const resolvedModel = String(output.args?.model || "");
+     const requestedProvider = String(output.args?.provider || output.args?.providerID || "").trim();
+     if (process.env.OPENAI_DAILY_PROFILE === "1" && requestedProvider && requestedProvider !== "openai") {
+       const error = new Error(`OPENAI_DAILY_PROVIDER_FORBIDDEN: ${requestedProvider}`);
+       error.code = "OPENAI_DAILY_PROVIDER_FORBIDDEN";
+       throw error;
+     }
+     const configuredModel = DEFAULT_AGENT_MODELS[agent];
+     if (resolvedModel && configuredModel && resolvedModel !== configuredModel) {
+       throw new Error(`OPENAI MODEL MATRIX: model override '${resolvedModel}' is not permitted for ${agent}; required '${configuredModel}'.`);
+     }
+     const selectedModel = configuredModel || DEFAULT_AGENT_MODELS[agent] || "openai/default";
+     if (process.env.OPENAI_DAILY_PROFILE === "1") {
+       assertDailyProviderModel({ model: selectedModel });
+       output.args.model = selectedModel;
+       output.metadata = { ...(output.metadata || {}), daily_agent: agent, daily_provider: "openai", daily_model: selectedModel.slice("openai/".length) };
+       output.title = `Launching ${DAILY_AGENT_LABELS[agent] || agent} — OpenAI ${selectedModel.slice("openai/".length).replace("gpt-5.6-", "")}`;
+     }
+     const weights = { openai_explore: 1, openai_librarian: 1, openai_ops: 1, tester: 2, reviewer: 3, reviewer_critical: 3, specialist: 3, codex_executor: 2 };
     const weight = weights[agent] || 1;
      const discoveryGroupID = analysis.discovery_agents.length ? objectiveHash(`${rootParent}\n${objectiveHash(currentTaskObjective)}`) : null;
        testTaskID = agent === "tester" ? (mandatoryTesterTargetID || (currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i) || [])[1]?.toLowerCase()) : null;
@@ -2171,7 +2182,6 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         if (!gateTarget) throw new Error("TEST_TARGET_DENIED");
       }
     }
-    const selectedModel = configuredModel || DEFAULT_AGENT_MODELS[agent] || "openai/default";
     const routeContext = taskRouteAdmissionContext(route, exactMandatoryTesterGate, remoteReadOnly);
     const localReadOnly = routeContext.localReadOnly;
     const workspace = localReadOnly

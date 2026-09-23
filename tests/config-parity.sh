@@ -63,8 +63,8 @@ same(daily.enabled_providers, ["openai"], "OPENAI DAILY enabled providers");
 same(daily.compaction, { auto: true, prune: true, reserved: 24000 }, "OPENAI DAILY compaction");
 assert(daily.mcp?.serena?.enabled === true, "OPENAI DAILY Serena MCP missing");
 assert(path.isAbsolute(daily.mcp.serena.command[0]) && (daily.mcp.serena.command[0].startsWith(path.join(home, "data")) || daily.mcp.serena.command[0].startsWith(dependencyRoot)), "OPENAI DAILY Serena path invalid");
-assert(daily.plugin.length === 3 && daily.plugin.every(path.isAbsolute), "OPENAI DAILY plugin paths invalid");
-assert(daily.plugin[1].endsWith("/teams/openai/config/opencode/openai-team-tools.js"), "OPENAI DAILY shared tools path invalid");
+assert(daily.plugin.length === 2 && daily.plugin.every(path.isAbsolute), "OPENAI DAILY plugin paths invalid");
+assert(daily.plugin[0].endsWith("/teams/openai/config/opencode/openai-team-tools.js"), "OPENAI DAILY shared tools path invalid");
 
 const serenaMutationPatterns = ["serena_replace_*", "serena_insert_*", "serena_rename_*", "serena_delete_*", "serena_write_*", "serena_safe_delete_*", "serena_edit_*"];
 const serenaReadTools = ["serena_get_symbols_overview", "serena_find_symbol", "serena_find_declaration", "serena_find_implementations", "serena_find_referencing_symbols", "serena_get_diagnostics_for_file", "serena_search_for_pattern", "serena_read_memory", "serena_get_current_config", "serena_activate_project"];

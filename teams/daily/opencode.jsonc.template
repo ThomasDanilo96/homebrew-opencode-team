@@ -15,7 +15,6 @@
   "autoupdate": "notify",
   "compaction": { "auto": true, "prune": true, "reserved": 24000 },
   "plugin": [
-    "@OMO_PLUGIN@",
     "@PACKAGE_ROOT@/teams/openai/config/opencode/openai-team-tools.js",
     "@PACKAGE_ROOT@/teams/openai/config/opencode/openai-authorship-guard.js"
   ],

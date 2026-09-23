@@ -3,12 +3,13 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dailyCost, dailyFanout, dailySearchDecision, dailyInvestigationLimits, DAILY_AGENT_MODELS, DAILY_PRICING, shouldStopDaily } from "../teams/daily/daily-policy.mjs";
+import { assertDailyProviderModel, dailyCost, dailyFanout, dailyModelIdentity, dailySearchDecision, dailyInvestigationLimits, DAILY_AGENT_MODELS, DAILY_PRICING, shouldStopDaily } from "../teams/daily/daily-policy.mjs";
 import { allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, isStopText, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
 import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
 import { latestUserObjective, OpenAITeamTools, resolveInitialObjectiveFromClient } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { resolveCodexModels } from "../teams/openai/config/opencode/codex-models.js";
 
 test("Daily shell policy is bounded by the genuine objective", () => {
   const env = { OPENAI_DAILY_PROFILE: "1" };
@@ -63,6 +64,38 @@ test("Daily uses OpenAI-only model tiers", () => {
   assert.equal(DAILY_AGENT_MODELS.reviewer, "openai/gpt-5.6-terra");
   assert.equal(DAILY_AGENT_MODELS.reviewer_critical, "openai/gpt-5.6-sol");
   assert.ok(Object.values(DAILY_AGENT_MODELS).every((model) => model.startsWith("openai/")));
+});
+
+test("Daily provider boundary accepts only the frozen OpenAI model matrix", () => {
+  assert.deepEqual(dailyModelIdentity("openai/gpt-5.6-luna"), { provider: "openai", model: "gpt-5.6-luna" });
+  for (const model of ["openai/gpt-5.6-luna", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol"]) {
+    assert.doesNotThrow(() => assertDailyProviderModel({ model }));
+  }
+  for (const model of ["opencode-go/minimax-m3", "opencode-go/minimax-m2.7", "openai/minimax-m3", "openai/gpt-6-astra"]) {
+    assert.throws(() => assertDailyProviderModel({ model }), /OPENAI_DAILY_(?:PROVIDER|MODEL)_FORBIDDEN/);
+  }
+  assert.throws(() => assertDailyProviderModel({ provider: "opencode-go", model: "gpt-5.6-luna" }), (error) => error.code === "OPENAI_DAILY_PROVIDER_FORBIDDEN");
+});
+
+test("Daily Codex fallback remains OpenAI-only and fails closed on forbidden models", () => {
+  assert.deepEqual(resolveCodexModels("quick", {
+    OPENAI_DAILY_PROFILE: "1",
+    OPENAI_CODEX_QUICK_PRIMARY: "gpt-5.6-luna",
+    OPENAI_CODEX_QUICK_FALLBACK: "gpt-5.6-terra",
+  }), { profile: "quick", requested_model: "gpt-5.6-luna", fallback_model: "gpt-5.6-terra" });
+  for (const forbidden of ["minimax-m3", "minimax-m2.7"]) {
+    assert.throws(() => resolveCodexModels("quick", {
+      OPENAI_DAILY_PROFILE: "1",
+      OPENAI_CODEX_QUICK_PRIMARY: "gpt-5.6-luna",
+      OPENAI_CODEX_QUICK_FALLBACK: forbidden,
+    }), /OPENAI_DAILY_MODEL_FORBIDDEN/);
+  }
+});
+
+test("Daily config removes OMO routing from the child dispatch path", async () => {
+  const template = await readFile(new URL("../teams/daily/opencode.jsonc.template", import.meta.url), "utf8");
+  assert.doesNotMatch(template, /@OMO_PLUGIN@/);
+  assert.match(template, /enabled_providers": \["openai"\]/);
 });
 
 test("Daily fanout is bounded and complexity-aware", () => {

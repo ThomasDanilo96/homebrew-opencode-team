@@ -53,6 +53,34 @@ export const DAILY_AGENT_MODELS = Object.freeze({
   codex_executor: "openai/gpt-5.6-luna",
 });
 
+export const DAILY_ALLOWED_PROVIDER = "openai";
+export const DAILY_ALLOWED_MODELS = Object.freeze([
+  "gpt-5.6-luna",
+  "gpt-5.6-terra",
+  "gpt-5.6-sol",
+]);
+
+export const dailyModelIdentity = (model = "") => {
+  const value = String(model || "").trim();
+  const separator = value.indexOf("/");
+  return separator < 1 ? { provider: "", model: value } : { provider: value.slice(0, separator), model: value.slice(separator + 1) };
+};
+
+export const assertDailyProviderModel = ({ provider = "", model = "" } = {}) => {
+  const identity = provider ? { provider: String(provider), model: String(model) } : dailyModelIdentity(model);
+  if (identity.provider !== DAILY_ALLOWED_PROVIDER) {
+    const error = new Error(`OPENAI_DAILY_PROVIDER_FORBIDDEN: ${identity.provider || "(missing)"}`);
+    error.code = "OPENAI_DAILY_PROVIDER_FORBIDDEN";
+    throw error;
+  }
+  if (!DAILY_ALLOWED_MODELS.includes(identity.model)) {
+    const error = new Error(`OPENAI_DAILY_MODEL_FORBIDDEN: ${identity.model || "(missing)"}`);
+    error.code = "OPENAI_DAILY_MODEL_FORBIDDEN";
+    throw error;
+  }
+  return Object.freeze(identity);
+};
+
 export const DAILY_PRICING = Object.freeze({
   effective_date: "2026-09-16",
   source: "https://platform.openai.com/docs/pricing",
