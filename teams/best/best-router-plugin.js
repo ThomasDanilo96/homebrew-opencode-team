@@ -39,6 +39,47 @@ use the appropriate normal tools.
 </BEST_SEMANTIC_TOOL_GUIDANCE>`
 };
 
+const KNOWN_READ_FILES = new Set([
+  "teams/best/patch-omo-core.py",
+  "teams/best/best-router-plugin.js",
+  "teams/best/router-classify.sh",
+  "teams/best/opencode.jsonc.template",
+  "tests/config-parity.sh"
+]);
+
+function safeGitCommand(command) {
+  return /^(?:git (?:status(?: --short)?|diff(?: (?:--check|--stat))?|rev-parse [^\s]+|branch --show-current|log(?: [^\n]*)?)|test --?[^;&|]+|command -v [^;&|]+|printf [^;&|]+)$/i.test(command)
+    && !/[;&|<>`$()]/.test(command);
+}
+
+function mutatesRepository(command) {
+  return /\b(?:git\s+(?:add|commit|checkout|reset|restore|clean|push)|rm|mv|cp|sed\s+-i|perl\s+-pi|patch)\b/i.test(command)
+    || /[;&|<>`$()]/.test(command);
+}
+
+function safeKnownRead(args) {
+  const candidate = args?.filePath ?? args?.path;
+  if (typeof candidate !== "string" || candidate.includes("*") || candidate.includes("..")) return false;
+  return KNOWN_READ_FILES.has(candidate.replace(/^\.\//, ""));
+}
+
+function safeTargetedSearch(args, kind) {
+  const pattern = args?.pattern;
+  const scope = args?.path ?? args?.directory;
+  if (typeof pattern !== "string" || !pattern.trim() || typeof scope !== "string") return false;
+  if (scope === "." || scope === "" || scope === "/" || scope.includes("..") || /[*?]/.test(scope)) return false;
+  if (kind === "glob") return pattern !== "**/*" && pattern !== "**" && pattern.length <= 160;
+  return pattern.length <= 240;
+}
+
+export function isSafeRootInspection(tool, args = {}) {
+  const name = String(tool || "").toLowerCase();
+  if (name === "bash") return safeGitCommand(args.command ?? args.cmd ?? "");
+  if (name === "read") return safeKnownRead(args);
+  if (name === "grep" || name === "glob") return safeTargetedSearch(args, name);
+  return false;
+}
+
 function appendSemanticGuidance(agent, output) {
   const guidance = SEMANTIC_GUIDANCE[agent];
   if (!guidance || output.parts.some((part) => part.type === "text" && part.text?.includes(SEMANTIC_GUIDANCE_MARKER))) return;
@@ -161,7 +202,13 @@ export default async function bestRouterPlugin(input) {
         log({ event: "task_pending", ...details, pending_agents: state.pending_agents, gate_action: "allow" });
         return;
       }
-      if (BLOCKED_TOOLS.has(tool) || tool.startsWith("serena_")) {
+      if (tool === "bash" && mutatesRepository(output.args?.command ?? output.args?.cmd ?? "")) {
+        throw new Error(GATE_MESSAGE);
+      }
+      if (tool.startsWith("serena_")) {
+        throw new Error(buildGateMessage(state));
+      }
+      if (BLOCKED_TOOLS.has(tool) && !isSafeRootInspection(tool, output.args)) {
         const covered = state.required_agents.every((agent) =>
           state.pending_agents.includes(agent) || state.launched_agents.includes(agent)
         );

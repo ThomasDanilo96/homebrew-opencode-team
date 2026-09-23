@@ -14,6 +14,9 @@ OLD_V1_SENTINEL = "_GO_FOREGROUND_WORKER_DONE_PATCH_V1"
 BG_V2_SENTINEL = "_GO_WORKER_DONE_COMPLETION_PATCH_V2"
 FG_ONLY_SENTINEL = "_GO_CALL_OMO_FG_ONLY_V1"
 BUILDER_TASK_SENTINEL = "_GO_BUILDER_TASK_ALLOW_V1"
+MODEL_ROUTE_SENTINEL = "const _BEST_CONFIGURED_AGENT_NO_FALLBACK_V1 = true;"
+DELEGATE_SENTINEL = "const _BEST_DELEGATE_NO_FALLBACK_V1 = true;"
+CONTROLLER_SENTINEL = "const _BEST_MODEL_FALLBACK_CONTROLLER_GUARD_V1 = true;"
 
 BEST_SANDBOX = os.path.realpath(os.path.expanduser("~/.opencode-best-team"))
 
@@ -27,9 +30,111 @@ if filepath.startswith(os.path.abspath(BEST_SANDBOX)):
 with open(filepath, "r") as f:
     src = f.read()
 
+_FALLBACK_ENTRIES = '''      { providers: ["openai"], model: "gpt-5.6-luna-fast", variant: "low" },
+      { providers: ["deepseek"], model: "deepseek-v4-flash", variant: "max" },
+      { providers: ["opencode-go", "bailian-coding-plan"], model: "qwen3.7-plus" },
+      { providers: ["vercel"], model: "minimax-m2.7-highspeed" },
+      { providers: ["opencode-go", "vercel"], model: "minimax-m3" },
+      { providers: ["minimax-coding-plan", "minimax-cn-coding-plan"], model: "MiniMax-M3" },
+      { providers: ["opencode-go", "vercel"], model: "minimax-m2.7" },
+      { providers: ["anthropic", "github-copilot", "vercel"], model: "claude-haiku-4-5" },
+      { providers: ["openai", "vercel"], model: "gpt-5.4-nano" }'''
+def requirement_block(agent, empty=False):
+    chain = "[]" if empty else f"[\n{_FALLBACK_ENTRIES}\n    ]"
+    return f'''  {agent}: {{
+    fallbackChain: {chain}
+  }},'''
+
+def patch_model_routes():
+    global src
+    changed = False
+    # Layer 1: exact OMO 4.19.4 object-literal source shape.
+    old_explore, old_librarian = requirement_block("explore"), requirement_block("librarian")
+    empty_explore, empty_librarian = requirement_block("explore", True), requirement_block("librarian", True)
+    sentinel_count = src.count(MODEL_ROUTE_SENTINEL)
+    old_counts = (src.count(old_explore), src.count(old_librarian))
+    empty_counts = (src.count(empty_explore), src.count(empty_librarian))
+    if sentinel_count == 1:
+        if old_counts != (0, 0) or empty_counts != (1, 1):
+            print("REFUSED: contradictory BEST agent-requirement protection state", file=sys.stderr); sys.exit(1)
+    elif sentinel_count == 0 and old_counts == (1, 1) and empty_counts == (0, 0):
+        anchor = "var AGENT_MODEL_REQUIREMENTS = {"
+        if src.count(anchor) != 1:
+            print("REFUSED: AGENT_MODEL_REQUIREMENTS anchor count != 1", file=sys.stderr); sys.exit(1)
+        src = src.replace(old_explore, empty_explore, 1).replace(old_librarian, empty_librarian, 1)
+        src = src.replace(anchor, f"{MODEL_ROUTE_SENTINEL}\n{anchor}", 1)
+        changed = True
+    elif sentinel_count == 0 and old_counts == (0, 0) and empty_counts == (1, 1):
+        # Deterministically complete the known manual BEST hotfix by adding its missing sentinel.
+        anchor = "var AGENT_MODEL_REQUIREMENTS = {"
+        if src.count(anchor) != 1:
+            print("REFUSED: AGENT_MODEL_REQUIREMENTS anchor count != 1", file=sys.stderr); sys.exit(1)
+        src = src.replace(anchor, f"{MODEL_ROUTE_SENTINEL}\n{anchor}", 1)
+        changed = True
+    else:
+        print(f"REFUSED: unexpected BEST agent-requirement source state old={old_counts} empty={empty_counts}", file=sys.stderr); sys.exit(1)
+
+    # Layer 2: configured delegate fallback_models and final execution chain.
+    delegate_before = '''async function resolveSubagentModel(agentToUse, matchedAgent, executorCtx) {
+  let categoryModel = undefined;
+  let fallbackChain = undefined;
+  const agentConfigKey = getAgentConfigKey(agentToUse);
+  const agentOverride = findAgentOverride2(executorCtx.agentOverrides, agentConfigKey);'''
+    delegate_after = '''async function resolveSubagentModel(agentToUse, matchedAgent, executorCtx) {
+  let categoryModel = undefined;
+  let fallbackChain = undefined;
+  const agentConfigKey = getAgentConfigKey(agentToUse);
+  const _bestNoDelegateFallback = agentConfigKey === "explore" || agentConfigKey === "librarian";
+  const agentOverride = findAgentOverride2(executorCtx.agentOverrides, agentConfigKey);'''
+    delegate_anchor = "async function resolveSubagentModel(agentToUse, matchedAgent, executorCtx) {"
+    delegate_sentinel_count = src.count(DELEGATE_SENTINEL)
+    normalized_before = "  const normalizedAgentFallbackModels = normalizeFallbackModels(agentOverride?.fallback_models ?? agentCategoryConfig?.fallback_models);"
+    normalized_after = "  const normalizedAgentFallbackModels = _bestNoDelegateFallback ? [] : normalizeFallbackModels(agentOverride?.fallback_models ?? agentCategoryConfig?.fallback_models);"
+    chain_before = '''    const configuredFallbackChain = buildFallbackChainFromModels(normalizedAgentFallbackModels, defaultProviderID);
+    fallbackChain = configuredFallbackChain ?? (resolutionSkipped || hasExplicitUserModel ? undefined : agentRequirement?.fallbackChain);'''
+    chain_after = '''    const configuredFallbackChain = buildFallbackChainFromModels(normalizedAgentFallbackModels, defaultProviderID);
+    fallbackChain = _bestNoDelegateFallback ? [] : (configuredFallbackChain ?? (resolutionSkipped || hasExplicitUserModel ? undefined : agentRequirement?.fallbackChain));'''
+    if delegate_sentinel_count == 0:
+        if src.count(delegate_before) != 1 or src.count(delegate_after) != 0 or src.count(normalized_before) != 1 or src.count(normalized_after) != 0 or src.count(chain_before) != 1 or src.count(chain_after) != 0:
+            print("REFUSED: unexpected BEST delegate fallback source state", file=sys.stderr); sys.exit(1)
+        src = src.replace(delegate_before, delegate_after, 1)
+        src = src.replace(normalized_before, normalized_after, 1)
+        src = src.replace(chain_before, chain_after, 1)
+        if src.count(delegate_anchor) != 1:
+            print("REFUSED: BEST delegate anchor count != 1", file=sys.stderr); sys.exit(1)
+        src = src.replace(delegate_anchor, f"{DELEGATE_SENTINEL}\n{delegate_anchor}", 1)
+        changed = True
+    elif delegate_sentinel_count != 1 or src.count(delegate_before) or src.count(normalized_before) or src.count(chain_before) or src.count(delegate_after) != 1 or src.count(normalized_after) != 1 or src.count(chain_after) != 1:
+        print("REFUSED: contradictory BEST delegate fallback protection state", file=sys.stderr); sys.exit(1)
+
+    # Layer 3: the final model-fallback controller boundary.
+    controller_before = '''  function setPendingModelFallback(sessionID, agentName, currentProviderID, currentModelID) {
+    const agentKey = getAgentConfigKey(agentName);
+    const requirements = AGENT_MODEL_REQUIREMENTS[agentKey];'''
+    controller_after = '''  function setPendingModelFallback(sessionID, agentName, currentProviderID, currentModelID) {
+    const agentKey = getAgentConfigKey(agentName);
+    if (agentKey === "explore" || agentKey === "librarian") {
+      log2(`[model-fallback] BEST fail-closed: no authorized fallback for agent: ${agentName} (key: ${agentKey})`);
+      return false;
+    }
+    const requirements = AGENT_MODEL_REQUIREMENTS[agentKey];'''
+    controller_anchor = "  function setPendingModelFallback(sessionID, agentName, currentProviderID, currentModelID) {"
+    cc = src.count(CONTROLLER_SENTINEL)
+    if cc == 0:
+        if src.count(controller_before) != 1 or src.count(controller_after) != 0 or src.count(controller_anchor) != 1:
+            print("REFUSED: unexpected BEST fallback-controller source state", file=sys.stderr); sys.exit(1)
+        src = src.replace(controller_before, controller_after, 1)
+        src = src.replace(controller_anchor, f"{CONTROLLER_SENTINEL}\n{controller_anchor}", 1)
+        changed = True
+    elif cc != 1 or src.count(controller_before) or src.count(controller_after) != 1:
+        print("REFUSED: contradictory BEST fallback-controller protection state", file=sys.stderr); sys.exit(1)
+    return changed
+
 v1_count = src.count(OLD_V1_SENTINEL)
 if v1_count != 0:
     print("REFUSED: old foreground V1 sentinel present", file=sys.stderr); sys.exit(1)
+
+model_routes_changed = patch_model_routes()
 
 nc = src.count(NATIVE_SENTINEL)
 tc = src.count(TASK_SENTINEL)
@@ -51,6 +156,9 @@ if all(x == 1 for x in all_native) and bt == 1:
             f.write(src)
         print("MIGRATED")
     else:
+        if model_routes_changed:
+            with open(filepath, "w") as f:
+                f.write(src)
         print("ALREADY_PATCHED")
     sys.exit(0)
 elif not all(x == 0 for x in all_native):
