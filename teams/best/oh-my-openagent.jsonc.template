@@ -1,0 +1,20 @@
+{
+  "$schema": "https://opencode.ai/oh-my-openagent.schema.json",
+  "sisyphus_agent": {
+    "default_builder_enabled": true
+  },
+  "agents": {
+    "OpenCode-Builder": {
+      "mode": "primary",
+      "permission": {
+        "task": "allow",
+        "call_omo_agent": "deny",
+        "serena_initial_instructions": "allow",
+        "serena_get_current_config": "allow"
+      },
+      "tools": {
+        "call_omo_agent": false
+      }
+    }
+  }
+}

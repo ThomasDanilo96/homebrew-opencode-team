@@ -834,6 +834,10 @@ refresh_generated_configs() {
     fi
     render_template "$PACKAGE_ROOT/teams/$team/team-runtime.conf.template" "$CONFIG_ROOT/$team/team-runtime.conf" || return 1
     render_template "$PACKAGE_ROOT/teams/$team/opencode.jsonc.template" "$CONFIG_ROOT/$team/opencode.jsonc" || return 1
+    if [ -f "$PACKAGE_ROOT/teams/$team/oh-my-openagent.jsonc.template" ]; then
+      render_template "$PACKAGE_ROOT/teams/$team/oh-my-openagent.jsonc.template" "$CONFIG_ROOT/$team/xdg-config/opencode/oh-my-openagent.jsonc" || return 1
+      chmod 600 "$CONFIG_ROOT/$team/xdg-config/opencode/oh-my-openagent.jsonc"
+    fi
     if [ -f "$PACKAGE_ROOT/teams/$team/tui.json.template" ]; then
       render_template "$PACKAGE_ROOT/teams/$team/tui.json.template" "$CONFIG_ROOT/$team/xdg-config/opencode/tui.json" || return 1
       chmod 600 "$CONFIG_ROOT/$team/xdg-config/opencode/tui.json"
@@ -930,6 +934,11 @@ setup() {
     fi
     render_template "$PACKAGE_ROOT/teams/$team/team-runtime.conf.template" "$CONFIG_ROOT/$team/team-runtime.conf"
     render_template "$PACKAGE_ROOT/teams/$team/opencode.jsonc.template" "$CONFIG_ROOT/$team/opencode.jsonc"
+    if [ -f "$PACKAGE_ROOT/teams/$team/oh-my-openagent.jsonc.template" ]; then
+      mkdir -p "$CONFIG_ROOT/$team/xdg-config/opencode"
+      render_template "$PACKAGE_ROOT/teams/$team/oh-my-openagent.jsonc.template" "$CONFIG_ROOT/$team/xdg-config/opencode/oh-my-openagent.jsonc"
+      chmod 600 "$CONFIG_ROOT/$team/xdg-config/opencode/oh-my-openagent.jsonc"
+    fi
     if [ -f "$PACKAGE_ROOT/teams/$team/tui.json.template" ]; then
       mkdir -p "$CONFIG_ROOT/$team/xdg-config/opencode"
       render_template "$PACKAGE_ROOT/teams/$team/tui.json.template" "$CONFIG_ROOT/$team/xdg-config/opencode/tui.json"
