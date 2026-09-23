@@ -194,14 +194,20 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   };
 
   const direct = await routeSession("ses-direct", "direct request");
+  await direct.before("serena_initial_instructions", {});
+  await direct.before("serena_get_current_config", {});
   await assert.rejects(() => direct.before("call_omo_agent", { subagent_type: "explore", run_in_background: false }), /BEST ROUTING POLICY: call_omo_agent is disabled/);
 
   const explore = await routeSession("ses-explore", "Inspect repository implementation");
+  assert.match(explore.output.parts.at(-1).text, /FIRST route-satisfying action: native task\(subagent_type="explore", run_in_background=true\)/);
+  assert.match(explore.output.parts.at(-1).text, /Do not attempt call_omo_agent/);
+  await explore.before("serena_initial_instructions", {});
+  await explore.before("serena_get_current_config", {});
   for (const background of [false, true]) {
     await assert.rejects(() => explore.before("call_omo_agent", { subagent_type: "explore", run_in_background: background }), /BEST ROUTING POLICY: call_omo_agent is disabled/);
   }
   for (const [tool, args] of [["bash", { command: "git status" }], ["bash", { command: "git diff --check" }], ["read", { filePath: "teams/best/patch-omo-core.py" }], ["grep", { pattern: "fallbackChain", path: "teams/best" }], ["glob", { pattern: "*.js", path: "teams/best" }]]) await explore.before(tool, args);
-  for (const [tool, args] of [["glob", { pattern: "**/*", path: "." }], ["grep", { pattern: "x", path: "." }], ["serena_find_symbol", {}], ["task", { subagent_type: "librarian", run_in_background: true }], ["task", { subagent_type: "explore", run_in_background: false }]]) await assert.rejects(() => explore.before(tool, args), /BEST ROUTING GATE/);
+  for (const [tool, args] of [["glob", { pattern: "**/*", path: "." }], ["grep", { pattern: "x", path: "." }], ["serena_find_symbol", {}], ["serena_search_for_pattern", {}], ["task", { subagent_type: "librarian", run_in_background: true }], ["task", { subagent_type: "explore", run_in_background: false }]]) await assert.rejects(() => explore.before(tool, args), /BEST ROUTING GATE/);
   await assert.rejects(() => explore.before("bash", { command: "git add ." }), /BEST ROUTING GATE/);
   await explore.before("task", { subagent_type: "explore", run_in_background: true }, "explore-task");
   await assert.rejects(() => explore.before("task", { subagent_type: "explore", run_in_background: true }, "explore-duplicate"), /BEST ROUTING GATE/);
@@ -209,6 +215,9 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   await explore.before("bash", { command: "git status" });
 
   const librarian = await routeSession("ses-librarian", "Find official documentation");
+  assert.match(librarian.output.parts.at(-1).text, /FIRST route-satisfying action: native task\(subagent_type="librarian", run_in_background=true\)/);
+  await librarian.before("serena_initial_instructions", {});
+  await librarian.before("serena_get_current_config", {});
   for (const background of [false, true]) {
     await assert.rejects(() => librarian.before("call_omo_agent", { subagent_type: "librarian", run_in_background: background }), /BEST ROUTING POLICY: call_omo_agent is disabled/);
   }
@@ -219,6 +228,7 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   await librarian.before("webfetch", { url: "https://example.com" });
 
   const both = await routeSession("ses-both", "both code analysis and official documentation");
+  assert.match(both.output.parts.at(-1).text, /native task\(subagent_type="explore", run_in_background=true\).*native task\(subagent_type="librarian", run_in_background=true\)/s);
   await both.before("task", { subagent_type: "explore", run_in_background: true }, "both-explore");
   await both.after("both-explore");
   await both.before("bash", { command: "git status" });
@@ -229,4 +239,15 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   await both.before("serena_find_symbol", {});
 
   rmSync(routeDir, { recursive: true, force: true });
+});
+
+test("BEST source config enables the primary Builder through OMO and denies legacy delegation", () => {
+  const template = readFileSync(join(root, "teams/best/oh-my-openagent.jsonc.template"), "utf8");
+  assert.match(template, /"default_builder_enabled": true/);
+  assert.match(template, /"OpenCode-Builder": \{[\s\S]*"mode": "primary"/);
+  assert.match(template, /"call_omo_agent": "deny"/);
+  assert.match(template, /"tools": \{[\s\S]*"call_omo_agent": false/);
+  const opencodeTemplate = readFileSync(join(root, "teams/best/opencode.jsonc.template"), "utf8");
+  assert.match(opencodeTemplate, /"tools": \{\s*"call_omo_agent": false\s*\}/);
+  assert.match(opencodeTemplate, /"OpenCode-Builder": \{[\s\S]*"tools": \{[\s\S]*"call_omo_agent": false/);
 });

@@ -17,6 +17,7 @@ const ROUTES = new Set([
 const ROUTE_STATE = new Map();
 const PENDING_TASKS = new Map();
 const BLOCKED_TOOLS = new Set(["bash", "glob", "grep", "read", "webfetch"]);
+const SERENA_BOOTSTRAP_TOOLS = new Set(["serena_initial_instructions", "serena_get_current_config"]);
 const GATE_MESSAGE = "BEST ROUTING GATE: complete the required native task delegation before direct repository or research tools may be used.";
 const SEMANTIC_GUIDANCE_MARKER = "<BEST_SEMANTIC_TOOL_GUIDANCE>";
 const SEMANTIC_GUIDANCE = {
@@ -37,6 +38,11 @@ implementations, structure, or diagnostics are relevant.
 For documentation, README/config content, exact text, and file paths,
 use the appropriate normal tools.
 </BEST_SEMANTIC_TOOL_GUIDANCE>`
+};
+const ROUTE_GUIDANCE = {
+  EXPLORE: "BEST ROUTE EXPLORE: FIRST route-satisfying action: native task(subagent_type=\"explore\", run_in_background=true). Do not attempt semantic repository tools first. Do not attempt call_omo_agent.",
+  LIBRARIAN: "BEST ROUTE LIBRARIAN: FIRST route-satisfying action: native task(subagent_type=\"librarian\", run_in_background=true). Do not attempt documentation tools first. Do not attempt call_omo_agent.",
+  BOTH: "BEST ROUTE BOTH: FIRST route-satisfying actions: native task(subagent_type=\"explore\", run_in_background=true) and native task(subagent_type=\"librarian\", run_in_background=true). Do not attempt repository or documentation tools first. Do not attempt call_omo_agent."
 };
 
 const KNOWN_READ_FILES = new Set([
@@ -160,7 +166,7 @@ export default async function bestRouterPlugin(input) {
         ...source,
         id: `${source.id}:best-router`,
         type: "text",
-        text: route,
+         text: `${ROUTE_GUIDANCE[classification]}\n${route}`,
         synthetic: true
       });
       const required_agents = classification === "BOTH" ? ["explore", "librarian"] : [classification.toLowerCase()];
@@ -175,6 +181,7 @@ export default async function bestRouterPlugin(input) {
         throw new Error('BEST ROUTING POLICY: call_omo_agent is disabled. Use native task(subagent_type="...", run_in_background=true).');
       }
       guardToolExecution({ team: "best", input: toolInput, output });
+      if (SERENA_BOOTSTRAP_TOOLS.has(tool)) return;
       const state = ROUTE_STATE.get(toolInput.sessionID);
       if (!state) return;
       if (tool === "task") {

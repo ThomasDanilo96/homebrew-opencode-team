@@ -8,16 +8,26 @@
   "small_model": "opencode-go/mimo-v2.5",
   "default_agent": "OpenCode-Builder",
   "subagent_depth": 1,
+  "tools": {
+    "call_omo_agent": false
+  },
   "agent": {
     "OpenCode-Builder": {
       "permission": {
         "task": "allow",
-        "call_omo_agent": "deny"
+        "call_omo_agent": "deny",
+        "serena_initial_instructions": "allow",
+        "serena_get_current_config": "allow"
+      },
+      "tools": {
+        "call_omo_agent": false
       }
     },
     "explore": {
       "model": "opencode-go/qwen3.7-plus",
       "permission": {
+        "serena_initial_instructions": "allow",
+        "serena_get_current_config": "allow",
         "serena_get_symbols_overview": "allow",
         "serena_find_symbol": "allow",
         "serena_find_declaration": "allow",
@@ -41,6 +51,8 @@
     "librarian": {
       "model": "opencode-go/qwen3.7-plus",
       "permission": {
+        "serena_initial_instructions": "allow",
+        "serena_get_current_config": "allow",
         "serena_get_symbols_overview": "allow",
         "serena_find_symbol": "allow",
         "serena_find_declaration": "allow",
