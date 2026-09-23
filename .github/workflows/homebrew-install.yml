@@ -15,12 +15,10 @@ jobs:
       - name: Tap and trust formula
         run: |
           brew tap ThomasDanilo96/opencode-team
-          brew tap anomalyco/tap
           brew trust --formula ThomasDanilo96/opencode-team/opencode-team
-          brew trust --formula anomalyco/tap/opencode
 
       - name: Install from tap
-        run: brew install ThomasDanilo96/opencode-team/opencode-team
+        run: HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ThomasDanilo96/opencode-team/opencode-team
 
       - name: Verify toolchain
         run: |
@@ -29,12 +27,12 @@ jobs:
           brew --prefix
           test "$(opencode-team version)" = "OpenCode Team 0.1.16"
           node --version
-          opencode --version
-          python3 --version
+          git --version
           jq --version
           tmux -V
           uv --version
           rg --version
+          curl --version
           package_root="$(brew --prefix opencode-team)/libexec"
           test -x "$package_root/bin/opencode-team"
           test "$(opencode-team version)" = "OpenCode Team 0.1.16"
@@ -46,6 +44,34 @@ jobs:
           shared_dependencies="$test_home/shared-dependencies"
           OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup
           OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team doctor
+
+          opencode --version
+          opencode_prefix="$(brew --prefix opencode)"
+          test -x "$opencode_prefix/bin/opencode"
+
+          managed_python="$(awk -F= '$1 == "OPENCODE_TEAM_PYTHON" { print substr($0, index($0, "=") + 1) }' "$test_home/config/best/team-runtime.conf")"
+          test -x "$managed_python"
+          case "$managed_python" in
+            "$shared_dependencies/python/"*) ;;
+            *) echo "managed Python escaped dependency root: $managed_python" >&2; exit 1 ;;
+          esac
+          MANAGED_PYTHON_ROOT="$shared_dependencies/python" "$managed_python" - <<'PY'
+          import pathlib
+          import plistlib
+          import sqlite3
+          import sys
+          import xml.parsers.expat
+
+          root = pathlib.Path(__import__("os").environ["MANAGED_PYTHON_ROOT"]).resolve()
+          paths = [sys.executable, sys.prefix, sys.base_prefix, getattr(sys, "_base_executable", None)]
+          assert sys.version_info[:2] == (3, 13), sys.version
+          for value in paths:
+              assert value is not None
+              assert pathlib.Path(value).resolve().is_relative_to(root), (value, root)
+          plistlib.dumps({"managed": True})
+          sqlite3.connect(":memory:").close()
+          xml.parsers.expat.ParserCreate()
+          PY
 
           test -x "$shared_dependencies/bin/serena"
           for team in best go openai daily; do
@@ -74,7 +100,9 @@ jobs:
           OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" bash "$GITHUB_WORKSPACE/tests/config-parity.sh"
           OPENCODE_TEAM_TEST_DEPENDENCY_ROOT="$test_home/setup-smoke-dependencies" bash "$package_root/tests/setup-smoke.sh"
           bash "$package_root/tests/runtime-readiness.test.sh"
-          ! rg -n '/Users/|\.opencode-team-staging|go-final-ux-v1|best-shared-v1' "$test_home/config" "$test_home/state" "$test_home/cache/runtime"
+          if rg -n '/Users/|\.opencode-team-staging|go-final-ux-v1|best-shared-v1' "$test_home/config" "$test_home/state" "$test_home/cache/runtime"; then
+            exit 1
+          fi
           test "$(shasum -a 256 "$shared_dependencies/best/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "12571389bb227794fd661873538332a473c02977142f21781757a457cbf1bdf3"
           test "$(shasum -a 256 "$shared_dependencies/go/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "9346d3a1df3dc12f281710f3cf2b2f4a8261c8187f37eb677fad8293a1abb546"
 
@@ -85,7 +113,8 @@ jobs:
 
       - name: Installed v0.1.16 maintenance regression
         run: |
-          export PATH="$(brew --prefix node@22)/bin:$PATH"
+          node_prefix="$(brew --prefix node@22)"
+          export PATH="$node_prefix/bin:$PATH"
           package_root="$(brew --prefix opencode-team)/libexec"
           test "$(opencode-team version)" = "OpenCode Team 0.1.16"
           test -f "$package_root/shared/maintenance/run-maintenance.sh"
@@ -123,7 +152,9 @@ jobs:
               if ! ps -axo pid=,command= | rg "$test_home" | rg -v 'rg ' >/dev/null; then break; fi
               sleep 1
             done
-            ! ps -axo pid=,command= | rg "$test_home" | rg -v 'rg '
+            if ps -axo pid=,command= | rg "$test_home" | rg -v 'rg '; then
+              exit 1
+            fi
             test "$(find "$test_home/cache/runtime/$team/runs" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | wc -l | tr -d ' ')" = 0
             rm -rf "$run_dir"
           done
