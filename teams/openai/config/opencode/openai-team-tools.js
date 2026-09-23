@@ -21,6 +21,7 @@ import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
 import { gateTerminalPacketPatch, lifecycleCleanupOptions } from "./gate-state.js";
 import { GuardrailPolicyError, admitDelegation, admitToolCall, allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision, writeStopLatch } from "./openai-guardrails.js";
 import { guardToolExecution } from "../../../../shared/tool-output-guard.js";
+import { dailySearchDecision } from "../../../daily/daily-policy.mjs";
 import { appendTaskPacketMarker, extractTaskPacketMarker, objectiveBeforeMarker } from "./correlation-marker.js";
 import {
   CODEX_REQUIRED,
@@ -45,6 +46,22 @@ const ADMIT = join(TEAM_ROOT, "bin", "openai-admit.sh");
 const RELEASE = join(TEAM_ROOT, "bin", "openai-release.sh");
 const BIND = join(TEAM_ROOT, "bin", "openai-bind.sh");
 const reservations = new Map();
+const dailySearchesBySession = new Map();
+const DAILY_SEARCH_TOOLS = new Set(["glob", "grep", "rg", "bash"]);
+const enforceDailySearchPolicy = (input, output) => {
+  if (process.env.OPENAI_DAILY_PROFILE !== "1" || !DAILY_SEARCH_TOOLS.has(String(input.tool || "").toLowerCase())) return;
+  const tool = String(input.tool || "").toLowerCase();
+  const args = output.args || {};
+  const command = String(args.command || args.cmd || "");
+  if (tool === "bash" && !/\bstrings\b/i.test(command) && !/package-lock\.json/i.test(command)) return;
+  const seen = dailySearchesBySession.get(input.sessionID) || new Set();
+  const decision = dailySearchDecision({ tool, args, seen });
+  if (!decision.allowed) throw new GuardrailPolicyError(decision.reason, { terminal: false });
+  if (decision.signature) {
+    seen.add(decision.signature);
+    dailySearchesBySession.set(input.sessionID, seen);
+  }
+};
 export const retainParentCallReservation = (reservationMap, reservation, outcome, gatesPending) => {
   if (!(reservationMap instanceof Map) || outcome !== "success" || gatesPending !== true || !reservation?.task_call_id) return false;
   reservationMap.set(reservation.task_call_id, { ...reservation, token: null });
@@ -1913,6 +1930,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
   "tool.execute.before": async (input, output) => {
     try {
       guardToolExecution({ team: "openai", input, output });
+      enforceDailySearchPolicy(input, output);
       const toolName = String(input.tool || "").toLowerCase();
      let guard = await guardrailFor(input.sessionID);
      if (toolName === "task" && guard && !guard.authoritativeObjective) {

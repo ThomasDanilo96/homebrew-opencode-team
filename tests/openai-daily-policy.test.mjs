@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { dailyCost, dailyFanout, DAILY_AGENT_MODELS, DAILY_PRICING } from "../teams/daily/daily-policy.mjs";
+import { dailyCost, dailyFanout, dailySearchDecision, dailyInvestigationLimits, DAILY_AGENT_MODELS, DAILY_PRICING, shouldStopDaily } from "../teams/daily/daily-policy.mjs";
 import { allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, isStopText, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
 import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
@@ -66,7 +66,33 @@ test("Daily uses OpenAI-only model tiers", () => {
 });
 
 test("Daily fanout is bounded and complexity-aware", () => {
-  assert.deepEqual([dailyFanout("TRIVIAL"), dailyFanout("NORMAL"), dailyFanout("COMPLEX"), dailyFanout("HEAVY"), dailyFanout("EXTREME")], [0, 1, 3, 6, 10]);
+  assert.deepEqual([dailyFanout("TRIVIAL"), dailyFanout("NORMAL"), dailyFanout("COMPLEX"), dailyFanout("HEAVY"), dailyFanout("EXTREME")], [0, 1, 2, 3, 3]);
+  assert.deepEqual(dailyInvestigationLimits("NORMAL"), { minutes: 8, toolCalls: 12 });
+});
+
+test("Daily search policy rejects noisy discovery and duplicate evidence", () => {
+  const seen = new Set();
+  assert.equal(dailySearchDecision({ tool: "glob", args: { pattern: "**/*" }, seen }).reason, "ROOT_GLOB_STARSTAR");
+  assert.equal(dailySearchDecision({ tool: "glob", args: { pattern: "**/*", path: "." }, seen }).reason, "ROOT_GLOB_STARSTAR");
+  assert.equal(dailySearchDecision({ tool: "grep", args: { pattern: "animation", path: "core/lib" }, seen }).allowed, true);
+  const repeated = dailySearchDecision({ tool: "grep", args: { pattern: "animation", path: "core/lib" }, seen: new Set(["grep:animation core/lib"]) });
+  assert.equal(repeated.reason, "DUPLICATE_SEARCH");
+  assert.equal(dailySearchDecision({ tool: "grep", args: { pattern: "version", path: "." }, seen }).reason, "UNTARGETED_REPOSITORY_SEARCH");
+  assert.equal(dailySearchDecision({ tool: "grep", args: { pattern: "package-lock.json", path: "teams" }, seen }).reason, "PACKAGE_LOCK_NOISE");
+  assert.equal(dailySearchDecision({ tool: "bash", args: { command: "strings /opt/homebrew/opt/opencode/bin/opencode" }, seen }).reason, "BINARY_STRINGS_SCAN");
+});
+
+test("Daily stop policy ends confirmatory research once evidence is sufficient", () => {
+  assert.equal(shouldStopDaily({ answerSupported: true, remainingEvidence: "confirmatory" }), true);
+  assert.equal(shouldStopDaily({ answerSupported: true, materialContradiction: true, remainingEvidence: "confirmatory" }), false);
+  assert.equal(shouldStopDaily({ answerSupported: false, remainingEvidence: "confirmatory" }), false);
+});
+
+test("Daily trivial lookups stay direct and bounded", () => {
+  const state = beginRequestCycle(undefined, "What model does DAILY use by default?", 0, { OPENAI_DAILY_PROFILE: "1" });
+  assert.equal(analyzeObjective("What model does DAILY use by default?").complexity, "TRIVIAL");
+  assert.equal(state.limits.delegations, 0);
+  assert.equal(state.limits.toolCalls, 5);
 });
 
 test("Daily pricing is optional observability math", () => {
@@ -434,13 +460,16 @@ test("OpenCode path plugins expose ids on their default objects", async () => {
 });
 
 test("Daily guardrails allow bounded concurrent delegation", () => {
-  const objective = "authorize cross-service long-running repository task";
+  const objective = "implement an architecture change";
   let state = beginRequestCycle(undefined, objective, 0, { OPENAI_DAILY_PROFILE: "1" });
-  assert.equal(state.limits.delegations, 10);
+  assert.equal(state.limits.delegations, 2);
   state = admitDelegation(state, `${objective}; slice architecture`);
+  const duplicateState = beginRequestCycle(undefined, objective, 0, { OPENAI_DAILY_PROFILE: "1" });
+  const duplicateOnce = admitDelegation(duplicateState, `${objective}; slice architecture`);
+  assert.throws(() => admitDelegation(duplicateOnce, `${objective}; slice architecture`), (error) => error instanceof GuardrailPolicyError && error.code === "OPENAI_GUARDRAIL_DUPLICATE_DELEGATION_SCOPE");
   state = admitDelegation(state, `${objective}; slice tests`);
   assert.equal(state.activeDelegations, 2);
-  assert.throws(() => admitDelegation(state, `${objective}; slice tests`), (error) => error instanceof GuardrailPolicyError && error.code === "OPENAI_GUARDRAIL_DUPLICATE_DELEGATION_SCOPE");
+  assert.throws(() => admitDelegation(state, `${objective}; slice tests`), (error) => error instanceof GuardrailPolicyError && error.code === "OPENAI_GUARDRAIL_DELEGATION_LIMIT");
   state = finishDelegation(state);
   assert.equal(state.activeDelegations, 1);
   state = finishDelegation(state);
@@ -464,9 +493,9 @@ test("Daily runtime maps every complexity to its policy fanout", () => {
   const cases = [
     ["rename one typo", 0],
     ["implement a small feature", 1],
-    ["implement an architecture change", 3],
-    ["implement a shared runtime change", 6],
-    ["implement a cross-service change", 10],
+    ["implement an architecture change", 2],
+    ["implement a shared runtime change", 3],
+    ["implement a cross-service change", 3],
   ];
   for (const [objective, expected] of cases) {
     const state = beginRequestCycle(undefined, objective, 0, { OPENAI_DAILY_PROFILE: "1" });
@@ -475,12 +504,12 @@ test("Daily runtime maps every complexity to its policy fanout", () => {
   }
 });
 
-test("Recovered Daily HEAVY root objective admits six delegations", () => {
+test("Recovered Daily HEAVY root objective admits three delegations", () => {
   let state = recoverRootRequestState(createGuardrailState({}, 0), "implement a shared runtime change", 0, { OPENAI_DAILY_PROFILE: "1" });
   state = admitToolCall(state, "task", 1);
-  assert.equal(state.limits.delegations, 6);
-  for (let index = 0; index < 6; index += 1) state = admitDelegation(state, `implement a shared runtime change; slice-${index}`);
-  assert.equal(state.delegations, 6);
+  assert.equal(state.limits.delegations, 3);
+  for (let index = 0; index < 3; index += 1) state = admitDelegation(state, `implement a shared runtime change; slice-${index}`);
+  assert.equal(state.delegations, 3);
 });
 
 test("Late root recovery preserves consumed and terminal state", () => {
@@ -492,7 +521,7 @@ test("Late root recovery preserves consumed and terminal state", () => {
   assert.equal(state.activeDelegations, 2);
   assert.equal(state.activeDelegation, true);
   assert.deepEqual(state.delegationScopes, ["existing"]);
-  assert.equal(state.limits.delegations, 6);
+  assert.equal(state.limits.delegations, 3);
   assert.equal(state.stopped, true);
   assert.equal(state.budgetTerminal, true);
   assert.equal(state.verificationTerminal, true);
@@ -521,14 +550,14 @@ test("Recovered root objective leaves premium limits unchanged", () => {
   assert.equal(state.limits.toolCalls, 50);
 });
 
-test("Daily admission stress keeps 1, 2, 4, 6, and 10 siblings bounded", () => {
-  const objective = "authorize cross-service long-running repository task";
-  for (const target of [1, 2, 4, 6, 10]) {
+test("Daily admission stress keeps 1, 2, and 3 siblings bounded", () => {
+  const objective = "implement a cross-service change";
+  for (const target of [1, 2, 3]) {
     let state = beginRequestCycle(undefined, objective, 0, { OPENAI_DAILY_PROFILE: "1" });
     for (let index = 0; index < target; index += 1) state = admitDelegation(state, `${objective}; slice-${index}`);
     assert.equal(state.activeDelegations, target);
     assert.equal(state.delegations, target);
-    if (target === 10) assert.throws(() => admitDelegation(state, `${objective}; slice-over-limit`), (error) => error instanceof GuardrailPolicyError && error.code === "OPENAI_GUARDRAIL_DELEGATION_LIMIT");
+    if (target === 3) assert.throws(() => admitDelegation(state, `${objective}; slice-over-limit`), (error) => error instanceof GuardrailPolicyError && error.code === "OPENAI_GUARDRAIL_DELEGATION_LIMIT");
     for (let index = 0; index < target + 2; index += 1) state = finishDelegation(state);
     assert.equal(state.activeDelegations, 0);
     assert.equal(state.delegationScopes.length, 0);
