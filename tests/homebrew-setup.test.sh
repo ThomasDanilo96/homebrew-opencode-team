@@ -16,14 +16,35 @@ make_stub_bin() {
   ln -s "$path_bin/opencode" "$path_bin/bin/opencode"
   printf '%s\n' '#!/usr/bin/env bash' \
     'if [ "${1:-}" = "--prefix" ]; then' \
+    '  if [ "${2:-}" = opencode ]; then' \
+    '    opencode_prefix="${BREW_STUB_OPENCODE_PREFIX:-${BREW_STUB_PREFIX:-$BREW_STUB_BIN}}"' \
+    '    [ -x "$opencode_prefix/bin/opencode" ] || exit 1' \
+    '    printf "%s\\n" "$opencode_prefix"' \
+    '    exit 0' \
+    '  fi' \
     '  if [ -n "${BREW_STUB_PREFIX:-}" ]; then printf "%s\\n" "$BREW_STUB_PREFIX"; exit 0; fi' \
     '  printf "%s\\n" "$BREW_STUB_BIN"' \
     '  exit 0' \
     'fi' \
     'printf "cleanup=%s args=%s\\n" "${HOMEBREW_NO_INSTALL_CLEANUP:-}" "$*" >> "$BREW_STUB_LOG"' \
     'if [ "${BREW_STUB_FAIL:-0}" = 1 ]; then exit 37; fi' \
-    'printf "%s\\n" "#!/usr/bin/env bash" "exit 0" > "$BREW_STUB_BIN/codex"' \
-    'chmod 755 "$BREW_STUB_BIN/codex"' \
+    'if [ "$*" = "install opencode" ]; then' \
+    '  if [ "${BREW_STUB_FAIL_INSTALL_OPENCODE:-0}" = 1 ]; then exit 38; fi' \
+    '  opencode_prefix="${BREW_STUB_OPENCODE_PREFIX:-$BREW_STUB_BIN}"' \
+    '  mkdir -p "$opencode_prefix/bin"' \
+    '  cat > "$opencode_prefix/bin/opencode" <<'\''OPENCODE'\''' \
+    '#!/usr/bin/env bash' \
+    'if [ "${1:-}" = "--version" ]; then printf "%s\\n" "1.18.30"; exit 0; fi' \
+    'if [ "${1:-}" = debug ] && [ "${2:-}" = config ]; then exit 0; fi' \
+    'exit 0' \
+    'OPENCODE' \
+    '  chmod 755 "$opencode_prefix/bin/opencode"' \
+    '  exit 0' \
+    'fi' \
+    'if [ "$*" = "install --cask codex" ]; then' \
+    '  printf "%s\\n" "#!/usr/bin/env bash" "exit 0" > "$BREW_STUB_BIN/codex"' \
+    '  chmod 755 "$BREW_STUB_BIN/codex"' \
+    'fi' \
     >"$path_bin/brew"
   chmod 755 "$path_bin/brew"
   printf '%s\n' '#!/usr/bin/env bash' 'if [ "${1:-}" = isexcluded ]; then printf "%s\n" "[Excluded]"; fi' 'exit 0' >"$path_bin/tmutil"
@@ -31,13 +52,14 @@ make_stub_bin() {
 }
 
 run_setup() {
-  local home="$1" dependency_root="$2" stub_bin="$3" output="$4" brew_prefix="${5:-}"
+  local home="$1" dependency_root="$2" stub_bin="$3" output="$4" brew_prefix="${5:-}" opencode_prefix="${6:-}"
   local rc
   set +e
   PATH="$stub_bin/path:/usr/bin:/bin" \
     BREW_STUB_BIN="$stub_bin/path" \
     BREW_STUB_LOG="$stub_bin/path/brew.log" \
     BREW_STUB_PREFIX="$brew_prefix" \
+    BREW_STUB_OPENCODE_PREFIX="$opencode_prefix" \
     BROKEN_PYTHON_LOG="$stub_bin/path/broken-python.log" \
     OPENCODE_TEAM_HOME="$home" \
     OPENCODE_TEAM_DEPENDENCY_ROOT="$dependency_root" \
@@ -170,7 +192,70 @@ SHADOW_OPENCODE_LOG="$shadow_bin/path/shadow-opencode.log" \
     cat "$TEST_ROOT/shadow-doctor.out" >&2
     exit 1
   }
-rg -q "OpenCode[[:space:]]+OK \($core_opencode_prefix/bin/opencode\)" "$TEST_ROOT/shadow-doctor.out"
+rg -q "OpenCode[[:space:]]+OK \([^,]+, $core_opencode_prefix/bin/opencode\)" "$TEST_ROOT/shadow-doctor.out"
+
+fresh_opencode_home="$TEST_ROOT/fresh-opencode-home"
+fresh_opencode_dependencies="$TEST_ROOT/fresh-opencode-dependencies"
+fresh_opencode_bin="$TEST_ROOT/fresh-opencode-bin"
+fresh_core_prefix="$TEST_ROOT/fresh-core-opencode"
+mkdir -p "$fresh_opencode_dependencies"
+for dependency_name in best go openai bin uv-cache; do
+  if [ -e "$success_dependencies/$dependency_name" ]; then
+    ln -s "$success_dependencies/$dependency_name" "$fresh_opencode_dependencies/$dependency_name"
+  fi
+done
+make_stub_bin "$fresh_opencode_bin"
+rm -f "$fresh_opencode_bin/path/opencode"
+set +e
+BREW_STUB_BIN="$fresh_opencode_bin/path" \
+  BREW_STUB_OPENCODE_PREFIX="$fresh_core_prefix" \
+  PATH="$fresh_opencode_bin/path:/usr/bin:/bin" \
+  brew --prefix opencode >/dev/null
+fresh_prefix_rc=$?
+set -e
+test "$fresh_prefix_rc" -ne 0
+test ! -e "$fresh_opencode_bin/path/opencode"
+test ! -e "$fresh_core_prefix/bin/opencode"
+run_setup "$fresh_opencode_home" "$fresh_opencode_dependencies" "$fresh_opencode_bin" "$TEST_ROOT/fresh-opencode.out" "" "$fresh_core_prefix"
+test "$(rg -c '^cleanup=1 args=install opencode$' "$fresh_opencode_bin/path/brew.log")" -eq 1
+test -x "$fresh_core_prefix/bin/opencode"
+rg -q 'Setup complete\. No runtime was started\.' "$TEST_ROOT/fresh-opencode.out"
+rg -q 'OpenCode[[:space:]]+OK \(1\.18\.30,' "$TEST_ROOT/fresh-opencode.out"
+rg -q "^OPENCODE_BIN=$fresh_core_prefix/bin/opencode$" "$fresh_opencode_home/config/best/team-runtime.conf"
+OPENCODE_TEAM_HOME="$fresh_opencode_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$fresh_opencode_dependencies" \
+  BREW_STUB_BIN="$fresh_opencode_bin/path" BREW_STUB_OPENCODE_PREFIX="$fresh_core_prefix" \
+  PATH="$fresh_opencode_bin/path:/usr/bin:/bin" bash "$ROOT/bin/opencode-team" doctor >"$TEST_ROOT/fresh-opencode-doctor.out" 2>&1 || {
+    cat "$TEST_ROOT/fresh-opencode-doctor.out" >&2
+    exit 1
+  }
+rg -q "OpenCode[[:space:]]+OK \([^,]+, $fresh_core_prefix/bin/opencode\)" "$TEST_ROOT/fresh-opencode-doctor.out"
+rg -q 'OpenCode[[:space:]]+OK \(1\.18\.30,' "$TEST_ROOT/fresh-opencode-doctor.out"
+for team in best go openai daily; do
+  rg -q "$team profile[[:space:]]+CONFIGURED" "$TEST_ROOT/fresh-opencode-doctor.out"
+done
+
+fresh_opencode_failure_home="$TEST_ROOT/fresh-opencode-failure-home"
+fresh_opencode_failure_bin="$TEST_ROOT/fresh-opencode-failure-bin"
+fresh_opencode_failure_prefix="$TEST_ROOT/fresh-opencode-failure-prefix"
+make_stub_bin "$fresh_opencode_failure_bin"
+rm -f "$fresh_opencode_failure_bin/path/opencode"
+test ! -e "$fresh_opencode_failure_bin/path/opencode"
+set +e
+BREW_STUB_BIN="$fresh_opencode_failure_bin/path" \
+  BREW_STUB_LOG="$fresh_opencode_failure_bin/path/brew.log" \
+  BREW_STUB_OPENCODE_PREFIX="$fresh_opencode_failure_prefix" \
+  BREW_STUB_FAIL_INSTALL_OPENCODE=1 \
+  OPENCODE_TEAM_HOME="$fresh_opencode_failure_home" \
+  OPENCODE_TEAM_DEPENDENCY_ROOT="$success_dependencies" \
+  PATH="$fresh_opencode_failure_bin/path:/usr/bin:/bin" \
+  bash "$ROOT/bin/opencode-team" setup >"$TEST_ROOT/fresh-opencode-failure.out" 2>&1
+fresh_opencode_failure_rc=$?
+set -e
+test "$fresh_opencode_failure_rc" -eq 1
+test "$(rg -c '^cleanup=1 args=install opencode$' "$fresh_opencode_failure_bin/path/brew.log")" -eq 1
+! rg -q '^cleanup=1 args=install --cask codex$' "$fresh_opencode_failure_bin/path/brew.log"
+test ! -f "$fresh_opencode_failure_home/config/best/team-runtime.conf"
+! rg -q 'Setup complete\. No runtime was started\.' "$TEST_ROOT/fresh-opencode-failure.out"
 
 for launchctl_mode in bootstrap-fail verify-fail; do
   launchctl_home="$TEST_ROOT/launchctl-$launchctl_mode-home"
