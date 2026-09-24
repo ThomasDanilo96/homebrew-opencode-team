@@ -40,10 +40,9 @@ function hasPartRecord(source, messageID) {
 }
 
 function isInjectedSystemUser(parts) {
-  return parts.some((part) => {
-    if (part?.type !== "text" || typeof part.text !== "string") return false;
-    return /<system-reminder>|<!--\s*OMO_INTERNAL_(?:INITIATOR|NOREPLY)\s*-->|<BEST_ROUTER_ROUTE>/.test(part.text);
-  });
+  const marker = /<system-reminder>|<!--\s*OMO_INTERNAL_(?:INITIATOR|NOREPLY)\s*-->|<BEST_ROUTER_ROUTE>/;
+  const textParts = parts.filter((part) => part?.type === "text" && typeof part.text === "string");
+  return textParts.some((part) => marker.test(part.text)) && !textParts.some((part) => !part.synthetic && !part.ignored && !marker.test(part.text));
 }
 
 function isLogicalTurnUser(message, partsSource) {

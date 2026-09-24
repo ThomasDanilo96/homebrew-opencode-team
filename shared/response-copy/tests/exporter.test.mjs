@@ -85,6 +85,30 @@ test("keeps the response together across an injected system reminder", () => {
   assert.doesNotMatch(result.text, /system-reminder/);
 });
 
+test("keeps a real user turn when BEST route metadata is synthetic", () => {
+  const old = assistant("old", "old-user");
+  const current = { ...assistant("current", "current-user"), time: { created: 4 } };
+  const result = exportLatestResponse({
+    parentSession: parent,
+    messages: {
+      p: [user("old-user"), old, { ...user("current-user"), time: { created: 3 } }, current],
+    },
+    parts: {
+      old: [text("old-text", "old", "OLD_RESPONSE")],
+      "current-user": [
+        { type: "text", text: "Inspect the repository read-only." },
+        { type: "text", synthetic: true, text: "BEST ROUTE EXPLORE <BEST_ROUTER_ROUTE>EXPLORE</BEST_ROUTER_ROUTE>" },
+      ],
+      current: [text("current-text", "current", "CURRENT_RESPONSE")],
+    },
+    sessions: new Map(),
+    statuses: new Map(),
+  });
+  assert.equal(result.status, "ready");
+  assert.match(result.text, /CURRENT_RESPONSE/);
+  assert.doesNotMatch(result.text, /OLD_RESPONSE|Inspect the repository|BEST_ROUTER_ROUTE/);
+});
+
 test("includes a current child and excludes an old or unrelated child", () => {
   const a = assistant("a");
   const child = { id: "c", parentID: "p", agent: "explore", model: { providerID: "test", id: "child" } };
