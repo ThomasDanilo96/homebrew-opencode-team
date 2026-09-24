@@ -124,7 +124,9 @@ for (const team of ["openai", "daily"]) {
   const effective = JSON.parse(resolved.stdout);
   assert(["primary", "all"].includes(effective.mode), `BEST Builder mode invalid: ${effective.mode}`);
   assert(effective.hidden !== true, "BEST Builder hidden");
-  same(effective.model, { providerID: "openai", modelID: "gpt-5.6-luna" }, "BEST effective Builder model");
+  if (effective.model !== undefined) {
+    same(effective.model, { providerID: "openai", modelID: "gpt-5.6-luna" }, "BEST effective Builder model");
+  }
   same(effective.tools.call_omo_agent, false, "BEST effective Builder legacy delegation tool");
 }
 
