@@ -81,11 +81,10 @@ jobs:
         run: |
           test_home="$(mktemp -d)"
           trap 'rm -rf "$test_home"' EXIT
-          shared_dependencies="$test_home/shared-dependencies"
-          OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup
-          OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team doctor
+           shared_dependencies="$test_home/shared-dependencies"
+           OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup
 
-          opencode --version
+           opencode --version
           opencode_prefix="$(brew --prefix opencode)"
           test -x "$opencode_prefix/bin/opencode"
 
@@ -136,10 +135,11 @@ jobs:
             "$package_root/core/lib/runtime-reaper.sh"; do
             test -f "$required_file"
           done
-          test -f "$test_home/state/maintenance/launchagents/it.danilodantoni.opencode-team.runtime-gc.plist"
-          node --test "$package_root/shared/response-copy/tests/"*.test.mjs
-          OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" bash "$GITHUB_WORKSPACE/tests/config-parity.sh"
-          OPENCODE_TEAM_TEST_DEPENDENCY_ROOT="$test_home/setup-smoke-dependencies" bash "$package_root/tests/setup-smoke.sh"
+           test -f "$test_home/state/maintenance/launchagents/it.danilodantoni.opencode-team.runtime-gc.plist"
+           node --test "$package_root/shared/response-copy/tests/"*.test.mjs
+           OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" bash "$GITHUB_WORKSPACE/tests/config-parity.sh"
+           OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team doctor
+           OPENCODE_TEAM_TEST_DEPENDENCY_ROOT="$test_home/setup-smoke-dependencies" bash "$package_root/tests/setup-smoke.sh"
           bash "$package_root/tests/runtime-readiness.test.sh"
           if rg -n '/Users/|\.opencode-team-staging|go-final-ux-v1|best-shared-v1' "$test_home/config" "$test_home/state" "$test_home/cache/runtime"; then
             exit 1
