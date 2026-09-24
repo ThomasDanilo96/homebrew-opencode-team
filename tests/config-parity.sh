@@ -12,7 +12,7 @@ const path = require("node:path");
 const [home, root, dependencyRoot] = process.argv.slice(2);
 const read = (team) => JSON.parse(fs.readFileSync(path.join(home, "config", team, "opencode.jsonc"), "utf8"));
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
-const same = (actual, expected, label) => assert(JSON.stringify(actual) === JSON.stringify(expected), `${label} mismatch`);
+const same = (actual, expected, label) => assert(JSON.stringify(actual) === JSON.stringify(expected), `${label} mismatch: actual=${JSON.stringify(actual)} expected=${JSON.stringify(expected)}`);
 const tuiTeams = fs.readdirSync(path.join(root, "teams"), { withFileTypes: true })
   .filter((entry) => entry.isDirectory())
   .map((entry) => entry.name)
