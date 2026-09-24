@@ -51,6 +51,9 @@ jobs:
       - name: Checkout development code
         uses: actions/checkout@v4
 
+      - name: Update Homebrew metadata
+        run: brew update
+
       - name: Tap and trust formula
         run: |
           brew tap ThomasDanilo96/opencode-team
