@@ -477,7 +477,7 @@ test("waitForRuntimeReady and prompt polling use injected fetch without model ca
     const fetch = async (url, options = {}) => {
       calls.push({ url, options });
       if (url === "http://127.0.0.1:5678/") return { ok: true, json: async () => ({}) };
-      if (url.endsWith("/message")) return { ok: true, json: async () => posted ? [{ info: { role: "assistant" }, parts: [{ type: "text", text: "done" }] }] : [] };
+      if (url.endsWith("/message")) return { ok: true, json: async () => posted ? [{ info: { role: "assistant", finish: "stop" }, parts: [{ type: "text", text: "done" }] }] : [] };
       if (url.endsWith("/prompt_async")) {
         posted = true;
         const body = JSON.parse(options.body);
@@ -511,7 +511,7 @@ test("prompt polling skips empty intermediate assistant messages", async () => {
             ? []
             : messageCalls === 2
             ? [{ info: { role: "assistant" }, parts: [] }]
-            : [{ info: { role: "assistant" }, parts: [{ type: "text", text: "final answer" }] }],
+            : [{ info: { role: "assistant", finish: "stop" }, parts: [{ type: "text", text: "final answer" }] }],
         };
       }
       if (url.endsWith("/prompt_async")) return { ok: true, json: async () => ({ accepted: true }) };
@@ -522,6 +522,50 @@ test("prompt polling skips empty intermediate assistant messages", async () => {
     assert.equal(response.assistant.parts[0].text, "final answer");
   } finally {
     rmSync(run.root, { recursive: true, force: true });
+  }
+});
+
+test("prompt polling waits past assistant tool-call text until a terminal response", async () => {
+  const run = prepareRun(byTask("lookup-routing-contract", CONTROL_PROFILE));
+  let messageCalls = 0;
+  try {
+    const fetch = async (url) => {
+      if (url.endsWith("/message")) {
+        messageCalls += 1;
+        return {
+          ok: true,
+          json: async () => messageCalls === 1
+            ? []
+            : messageCalls === 2
+            ? [{ info: { role: "assistant", finish: "tool-calls" }, parts: [{ type: "text", text: "Planning version file reading" }] }]
+            : [{ info: { role: "assistant", finish: "stop" }, parts: [{ type: "text", text: "0.1.22" }] }],
+        };
+      }
+      if (url.endsWith("/prompt_async")) return { ok: true, status: 204, json: async () => null };
+      if (url.endsWith("/session/status")) return { ok: true, json: async () => ({ ses_parent: { type: "unknown" } }) };
+      throw new Error(`unexpected url: ${url}`);
+    };
+    const response = await postPromptAndPoll({ baseUrl: "http://127.0.0.1:5678", parent_session_id: "ses_parent" }, "Read VERSION", { fetch, sleep: async () => {} });
+    assert.equal(response.assistant.parts[0].text, "0.1.22");
+  } finally {
+    rmSync(run.root, { recursive: true, force: true });
+  }
+});
+
+test("failed prompt execution does not claim model activity", async () => {
+  const outcome = await executeRun(byTask("lookup-routing-contract", TREATMENT_PROFILE), {
+    hooks: {
+      ...fakeLifecycle,
+      executeTask: async () => ({ success: false, error_code: "PROMPT_POLL_TIMEOUT" }),
+      collectTelemetry: async () => ({ metrics: {}, model: null, model_mix: { Luna: 0, Terra: 0, Sol: 0, other: 0 } }),
+    },
+  });
+  try {
+    assert.equal(outcome.result.success, false);
+    assert.equal(outcome.result.model_call_started, false);
+    assert.equal(outcome.runtime.model_call_started, false);
+  } finally {
+    rmSync(outcome.run.root, { recursive: true, force: true });
   }
 });
 

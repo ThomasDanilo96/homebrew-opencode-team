@@ -609,6 +609,12 @@ function assistantText(message) {
     .trim();
 }
 
+function assistantIsTerminal(message, sessionStatus) {
+  const finish = message?.info?.finish ?? message?.finish;
+  if (["stop", "length", "content-filter"].includes(finish)) return true;
+  return finish === undefined && sessionStatus === "idle" && Number.isFinite(message?.info?.time?.completed);
+}
+
 export async function postPromptAndPoll(runtime, prompt, options = {}) {
   const fetchImpl = options.fetch ?? globalThis.fetch;
   if (typeof fetchImpl !== "function") throw Object.assign(new Error("fetch_unavailable"), { code: "FETCH_UNAVAILABLE" });
@@ -630,7 +636,7 @@ export async function postPromptAndPoll(runtime, prompt, options = {}) {
     latestStatus = statuses?.[runtime.parent_session_id]?.type ?? "unknown";
     latest = await fetchJson(fetchImpl, `${sessionUrl}/message`);
     const assistant = lastAssistant(latest);
-    if (!["busy", "retry"].includes(latestStatus) && assistantCount(latest) > beforeAssistantCount && assistantText(assistant)) {
+    if (assistantCount(latest) > beforeAssistantCount && assistantText(assistant) && assistantIsTerminal(assistant, latestStatus)) {
       return { status: "OK", session_status: latestStatus, before_count: Array.isArray(before) ? before.length : null, after_count: Array.isArray(latest) ? latest.length : null, assistant, messages: latest };
     }
     await sleep(options.intervalMs ?? 1000);
@@ -649,7 +655,9 @@ async function defaultExecuteTask(run, profileHandle, deps = {}) {
       session_status: response.session_status,
       before_count: response.before_count,
       after_count: response.after_count,
-      assistant_excerpt: responseText,
+       assistant_excerpt: responseText,
+       assistant_finish: response.assistant?.info?.finish ?? response.assistant?.finish ?? null,
+       assistant_completed_at: response.assistant?.info?.time?.completed ?? null,
     },
   };
 }
@@ -809,7 +817,6 @@ export async function executeRun(runPlan, options = {}) {
     });
     writeEvidence(run, "fixture-before", fixtureBaseline);
     taskStartedAt = hooks.now();
-    modelCallStarted = true;
     const completion = await withTimeout(Promise.resolve(hooks.executeTask(run, profileHandle)), options.timeoutMs ?? 30 * 60 * 1000, hooks);
     if (completion.timedOut) {
       runtime.timed_out = true;
@@ -830,6 +837,7 @@ export async function executeRun(runPlan, options = {}) {
     }
     try {
       telemetry = await hooks.collectTelemetry(run, profileHandle);
+      modelCallStarted = Boolean(telemetry?.model || Object.values(telemetry?.model_mix ?? {}).some((count) => Number.isFinite(count) && count > 0));
     } catch (error) {
       telemetry = { schema_version: 1, metrics: {}, sources: {}, collection_error: error?.code ?? "TELEMETRY_COLLECTION_FAILURE" };
     }

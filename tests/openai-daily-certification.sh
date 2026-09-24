@@ -172,7 +172,7 @@ post_session_message() {
     count="$(curl -fsS --max-time 10 "http://127.0.0.1:$port/session/$parent_session/message" | jq 'length')" || return 1
     if [ "$count" -gt "$before_count" ] && [ "$status" != busy ] && [ "$status" != retry ]; then
       curl -fsS --max-time 10 "http://127.0.0.1:$port/session/$parent_session/message" >"$output"
-      if jq -e 'any(.[]; .info.role == "assistant")' "$output" >/dev/null 2>&1; then
+      if jq -e 'any(.[]; (.info.role == "assistant" or .role == "assistant") and ((.info.finish // .finish) == "stop" or (.info.finish // .finish) == "length" or (.info.finish // .finish) == "content-filter") and ([.parts[]?.text // empty] | join("\n") | length > 0))' "$output" >/dev/null 2>&1; then
         return 0
       fi
     fi
