@@ -6,7 +6,46 @@ on:
   workflow_dispatch:
 
 jobs:
+  source-validation:
+    runs-on: macos-14
+    steps:
+      - name: Checkout development code
+        uses: actions/checkout@v4
+
+      - name: Validate source workflow contracts
+        run: |
+          expected_version="$(tr -d '[:space:]' < VERSION)"
+          [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          bash tests/homebrew-workflow.test.sh
+          ruby -c Formula/opencode-team.rb
+          node --check shared/response-copy/exporter.js
+          node --check shared/response-copy/runtime-source.js
+
+  release_state:
+    runs-on: ubuntu-latest
+    outputs:
+      published: ${{ steps.release_state.outputs.published }}
+    steps:
+      - name: Checkout development code
+        uses: actions/checkout@v4
+
+      - name: Check target release publication
+        id: release_state
+        run: |
+          expected_version="$(tr -d '[:space:]' < VERSION)"
+          [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          tag="v$expected_version"
+          if git ls-remote --exit-code origin "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "Target tag $tag is published; running clean-room tap installation."
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Target tag $tag is not published yet; skipping tap installation until a later push."
+          fi
+
   clean-install:
+    needs: release_state
+    if: needs.release_state.outputs.published == 'true'
     runs-on: macos-14
     steps:
       - name: Checkout development code
@@ -25,7 +64,8 @@ jobs:
           sw_vers
           uname -m
           brew --prefix
-          test "$(opencode-team version)" = "OpenCode Team 0.1.17"
+          expected_version="$(tr -d '[:space:]' < VERSION)"
+          test "$(opencode-team version)" = "OpenCode Team $expected_version"
           node --version
           git --version
           jq --version
@@ -35,7 +75,7 @@ jobs:
           curl --version
           package_root="$(brew --prefix opencode-team)/libexec"
           test -x "$package_root/bin/opencode-team"
-          test "$(opencode-team version)" = "OpenCode Team 0.1.17"
+          test "$(opencode-team version)" = "OpenCode Team $expected_version"
 
       - name: Clean-room setup and doctor
         run: |
@@ -103,20 +143,21 @@ jobs:
           if rg -n '/Users/|\.opencode-team-staging|go-final-ux-v1|best-shared-v1' "$test_home/config" "$test_home/state" "$test_home/cache/runtime"; then
             exit 1
           fi
-          test "$(shasum -a 256 "$shared_dependencies/best/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "12571389bb227794fd661873538332a473c02977142f21781757a457cbf1bdf3"
-          test "$(shasum -a 256 "$shared_dependencies/go/node_modules/oh-my-openagent/dist/index.js" | cut -d' ' -f1)" = "9346d3a1df3dc12f281710f3cf2b2f4a8261c8187f37eb677fad8293a1abb546"
+          bash "$package_root/teams/best/verify-omo.sh" "$shared_dependencies/best/node_modules/oh-my-openagent/dist/index.js"
+          bash "$package_root/teams/go/verify-omo.sh" "$shared_dependencies/go/node_modules/oh-my-openagent/dist/index.js"
 
       - name: Formula test and audit
         run: |
           brew test ThomasDanilo96/opencode-team/opencode-team
           brew audit --strict --formula ThomasDanilo96/opencode-team/opencode-team
 
-      - name: Installed v0.1.17 maintenance regression
+      - name: Installed maintenance regression
         run: |
           node_prefix="$(brew --prefix node@22)"
           export PATH="$node_prefix/bin:$PATH"
           package_root="$(brew --prefix opencode-team)/libexec"
-          test "$(opencode-team version)" = "OpenCode Team 0.1.17"
+          expected_version="$(tr -d '[:space:]' < VERSION)"
+          test "$(opencode-team version)" = "OpenCode Team $expected_version"
           test -f "$package_root/shared/maintenance/run-maintenance.sh"
           test -f "$package_root/shared/maintenance/opencode-cleanup.py"
           test -f "$package_root/shared/maintenance/openai-state-retention.mjs"
