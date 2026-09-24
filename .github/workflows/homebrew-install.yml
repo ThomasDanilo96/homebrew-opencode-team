@@ -127,8 +127,9 @@ jobs:
             "$package_root/shared/response-copy/exporter.js" \
             "$package_root/shared/response-copy/formatter.js" \
             "$package_root/shared/response-copy/response-copy-plugin.js" \
-            "$package_root/teams/best/tui.json.template" \
-            "$package_root/teams/go/tui.json.template" \
+             "$package_root/teams/best/tui.json.template" \
+             "$package_root/teams/best/oh-my-openagent.jsonc.template" \
+             "$package_root/teams/go/tui.json.template" \
             "$package_root/teams/openai/tui.json.template" \
             "$package_root/core/lib/runtime-manifest.mjs" \
             "$package_root/core/lib/runtime-lifecycle.mjs" \
