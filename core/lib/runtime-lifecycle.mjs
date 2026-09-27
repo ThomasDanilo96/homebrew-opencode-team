@@ -122,6 +122,9 @@ const descendantsForPids = (pids) => {
 };
 
 const locksPresent = (manifest) => {
+  const sessionID = String(manifest.parent_session_id || "");
+  const runID = String(manifest.run_id || "");
+  if (!sessionID || !runID) return false;
   const profile = basename(dirname(dirname(manifest.__run_dir || "")));
   const teamRoot = profile || String(manifest.team || "");
   const roots = [
@@ -132,11 +135,11 @@ const locksPresent = (manifest) => {
   ];
   for (const root of roots) {
     if (!existsSync(root)) continue;
-    try {
-      if (readdirSync(root).some((name) => lstatSync(join(root, name)).isDirectory())) return true;
-    } catch {
-      return true;
-    }
+    const lock = join(root, sessionID);
+    if (!existsSync(lock) || !lstatSync(lock).isDirectory()) continue;
+    if (readText(join(lock, "run_id")) !== runID) continue;
+    const pid = Number(readText(join(lock, "pid")));
+    if (Number.isInteger(pid) && pid > 0 && pidAlive(pid)) return true;
   }
   return false;
 };
@@ -166,21 +169,22 @@ const evaluateRun = (runDir) => {
   manifest.__run_dir = runDir;
   const runID = String(manifest.run_id);
   const identity = Object.fromEntries(roles.map((role) => [role, identityState(runDir, role, runID)]));
-  if (Object.values(identity).includes("alive")) return { run: relative(runtimeRoot, runDir), path: runDir, decision: "keep", reason: "live_process", state: manifest.state, identity };
-  if (Object.values(identity).includes("mismatch")) return { run: relative(runtimeRoot, runDir), path: runDir, decision: "uncertain", reason: "process_identity_mismatch", state: manifest.state, identity };
+  const lifecycle = { status: manifest.status || null, stage: manifest.stage || null, parent_session_id: manifest.parent_session_id || null, active_child_session_id: manifest.active_child_session_id || null, active_child_agent: manifest.active_child_agent || null, provider: manifest.provider || null, model: manifest.model || null, elapsed_seconds: Number.isFinite(manifest.elapsed_seconds) ? manifest.elapsed_seconds : null, failure_reason: manifest.failure_reason || null, timeout_reason: manifest.timeout_reason || null, status_source: manifest.status_source || "runtime-state" };
+  if (Object.values(identity).includes("alive")) return { run: relative(runtimeRoot, runDir), path: runDir, decision: "keep", reason: "live_process", state: manifest.state, ...lifecycle, identity };
+  if (Object.values(identity).includes("mismatch")) return { run: relative(runtimeRoot, runDir), path: runDir, decision: "uncertain", reason: "process_identity_mismatch", state: manifest.state, ...lifecycle, identity };
   for (const role of ["launcher", "server", "bridge", "reaper"]) {
-    if (identity[role] === "missing") return { run: relative(runtimeRoot, runDir), path: runDir, decision: "uncertain", reason: `missing_${role}_identity`, state: manifest.state, identity };
+    if (identity[role] === "missing") return { run: relative(runtimeRoot, runDir), path: runDir, decision: "uncertain", reason: `missing_${role}_identity`, state: manifest.state, ...lifecycle, identity };
   }
   const livePids = roles.map((role) => readIdentity(runDir, role)?.pid).filter((pid) => pid && pidAlive(pid));
   const descendants = descendantsForPids(livePids);
-  if (descendants === null) return { run: relative(runtimeRoot, runDir), path: runDir, decision: "uncertain", reason: "descendant_check_error", state: manifest.state, identity };
-  if (descendants.length > 0) return { run: relative(runtimeRoot, runDir), path: runDir, decision: "keep", reason: "live_descendant", state: manifest.state, identity };
-  if (locksPresent(manifest)) return { run: relative(runtimeRoot, runDir), path: runDir, decision: "keep", reason: "session_lock", state: manifest.state, identity };
+  if (descendants === null) return { run: relative(runtimeRoot, runDir), path: runDir, decision: "uncertain", reason: "descendant_check_error", state: manifest.state, ...lifecycle, identity };
+  if (descendants.length > 0) return { run: relative(runtimeRoot, runDir), path: runDir, decision: "keep", reason: "live_descendant", state: manifest.state, ...lifecycle, identity };
+  if (locksPresent(manifest)) return { run: relative(runtimeRoot, runDir), path: runDir, decision: "keep", reason: "session_lock", state: manifest.state, ...lifecycle, identity };
   const open = pathHasOpenFiles(runDir);
-  if (open.state === "error") return { run: relative(runtimeRoot, runDir), path: runDir, decision: "uncertain", reason: "lsof_error", state: manifest.state, identity };
-  if (open.state === "open") return { run: relative(runtimeRoot, runDir), path: runDir, decision: "keep", reason: "open_file", open_files: open.count, state: manifest.state, identity };
-  if (manifest.state !== "RECLAIMABLE") return { run: relative(runtimeRoot, runDir), path: runDir, decision: "keep", reason: "not_reclaimable", state: manifest.state, identity };
-  return { run: relative(runtimeRoot, runDir), path: runDir, decision: "delete", reason: "proven_inactive", state: manifest.state, identity };
+  if (open.state === "error") return { run: relative(runtimeRoot, runDir), path: runDir, decision: "uncertain", reason: "lsof_error", state: manifest.state, ...lifecycle, identity };
+  if (open.state === "open") return { run: relative(runtimeRoot, runDir), path: runDir, decision: "keep", reason: "open_file", open_files: open.count, state: manifest.state, ...lifecycle, identity };
+  if (!["ACTIVE", "RECLAIMABLE"].includes(String(manifest.state))) return { run: relative(runtimeRoot, runDir), path: runDir, decision: "keep", reason: "not_reclaimable", state: manifest.state, ...lifecycle, identity };
+  return { run: relative(runtimeRoot, runDir), path: runDir, decision: "delete", reason: "proven_inactive", state: manifest.state, ...lifecycle, identity };
 };
 
 const readinessForRun = (runDir) => {
@@ -189,13 +193,23 @@ const readinessForRun = (runDir) => {
   if (schema !== "ok") return { run: relative(runtimeRoot, runDir), ready: false, reason: schema };
   const runID = String(manifest.run_id);
   const identity = Object.fromEntries(["launcher", "server"].map((role) => [role, identityState(runDir, role, runID)]));
-  const ready = manifest.state === "ACTIVE" && Boolean(String(manifest.parent_session_id || "").trim()) && Object.values(identity).every((state) => state === "alive");
+  const ready = manifest.state === "ACTIVE" && !["FAILED", "STOPPED", "failed", "stopped"].includes(String(manifest.status || manifest.stage || "")) && Boolean(String(manifest.parent_session_id || "").trim()) && Object.values(identity).every((state) => state === "alive");
   return {
     run: relative(runtimeRoot, runDir),
     ready,
     reason: ready ? "active_server" : "incomplete_initialization",
     state: manifest.state,
-    parent_session_id: String(manifest.parent_session_id || ""),
+    status: manifest.status || null,
+    stage: manifest.stage || null,
+    parent_session_id: manifest.parent_session_id || null,
+    active_child_session_id: manifest.active_child_session_id || null,
+    active_child_agent: manifest.active_child_agent || null,
+    provider: manifest.provider || null,
+    model: manifest.model || null,
+    elapsed_seconds: Number.isFinite(manifest.elapsed_seconds) ? manifest.elapsed_seconds : null,
+    failure_reason: manifest.failure_reason || null,
+    timeout_reason: manifest.timeout_reason || null,
+    status_source: manifest.status_source || "runtime-state",
     identity,
   };
 };
@@ -216,6 +230,19 @@ const runDirs = () => {
     }
   }
   return found.sort();
+};
+
+const terminalHistory = () => {
+  const records = [];
+  for (const root of [join(runtimeRoot, "terminal-status"), ...teams.map((team) => join(runtimeRoot, team, "terminal-status"))]) {
+    if (!existsSync(root)) continue;
+    for (const entry of readdirSync(root, { withFileTypes: true })) {
+      if (!entry.isFile() || !/^[0-9a-f]{8}\.json$/i.test(entry.name)) continue;
+      const value = readJson(join(root, entry.name));
+      if (value) records.push(value);
+    }
+  }
+  return records.sort((left, right) => String(right.ended_at || "").localeCompare(String(left.ended_at || "")));
 };
 
 const sizeOf = (root, limit = 50_000) => {
@@ -477,6 +504,8 @@ if (command === "gc") {
   print({ runs: decisions, storage: storageAccounting() });
 } else if (command === "readiness") {
   print({ ready: runDirs().some((runDir) => readinessForRun(runDir).ready), runs: runDirs().map(readinessForRun) });
+} else if (command === "history") {
+  print({ records: terminalHistory() });
 } else if (command === "accounting") {
   print(storageAccounting());
 } else if (command === "quota") {

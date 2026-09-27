@@ -28,6 +28,7 @@ usage() {
     '  opencode-team daily-report [--markdown]' \
     '  opencode-team daily-benchmark <list|validate|prepare|report|execute> [options]' \
     '  opencode-team runtime-status' \
+    '  opencode-team runtime-history' \
     '  opencode-team runtime-readiness' \
     '  opencode-team runtime-gc [--apply]' \
     '  opencode-team storage-accounting' \
@@ -971,6 +972,12 @@ runtime_readiness() {
   node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" readiness
 }
 
+runtime_history() {
+  setup_roots
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" history
+}
+
 runtime_gc() {
   setup_roots
   local apply=0
@@ -1045,8 +1052,6 @@ start_team() {
     exec env \
       TEAM_RUNTIME_INNER=1 \
       RUN_ID="$("$PYTHON_BIN" -c "import secrets; print(secrets.token_hex(4))")" \
-      SESSION_MODE=new \
-      RESUME_SESSION_ID="" \
       "$PACKAGE_ROOT/core/bin/team-runtime" --config "$config_file" "$@"
   fi
   exec env \
@@ -1085,6 +1090,10 @@ case "${1:-}" in
   runtime-readiness)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
     runtime_readiness
+    ;;
+  runtime-history)
+    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+    runtime_history
     ;;
   runtime-gc)
     shift

@@ -25,6 +25,9 @@ fi
 runtime_root="$OPENCODE_TEAM_HOME/cache/runtime"
 runs_root="$runtime_root/best/runs"
 mkdir -p "$runs_root" "$OPENCODE_TEAM_HOME/data/best/data/opencode"
+mkdir -p "$OPENCODE_TEAM_HOME/data/best/data/state/session-locks/stale-session"
+printf '%s\n' aaaaaaaa >"$OPENCODE_TEAM_HOME/data/best/data/state/session-locks/stale-session/run_id"
+printf '%s\n' 99999999 >"$OPENCODE_TEAM_HOME/data/best/data/state/session-locks/stale-session/pid"
 
 start_epoch() {
   local pid="$1" raw
@@ -60,6 +63,9 @@ make_run() {
 }
 
 stale_dir="$(make_run aaaaaaaa RECLAIMABLE)"
+printf '%s\n' stale-session >"$stale_dir/parent_session_id"
+node "$ROOT/core/lib/runtime-manifest.mjs" "$stale_dir" state RECLAIMABLE >/dev/null
+stale_active_dir="$(make_run 11111111 ACTIVE)"
 open_dir="$(make_run bbbbbbbb RECLAIMABLE)"
 mismatch_dir="$(make_run cccccccc RECLAIMABLE)"
 active_dir="$(make_run dddddddd RECLAIMABLE)"
@@ -116,6 +122,7 @@ jq -e '.parent_pid == 4242 and .launcher_pid != .parent_pid' "$manifest_dir/mani
 
 "$ROOT/bin/opencode-team" runtime-gc >"$TEST_ROOT/gc-dry-run.out"
 rg -q 'GC DELETE best/runs/aaaaaaaa reason=proven_inactive' "$TEST_ROOT/gc-dry-run.out"
+rg -q 'GC DELETE best/runs/11111111 reason=proven_inactive' "$TEST_ROOT/gc-dry-run.out"
 if [ "$LSOF_OPEN_AVAILABLE" = 1 ]; then
   rg -q 'GC KEEP best/runs/bbbbbbbb reason=open_file' "$TEST_ROOT/gc-dry-run.out"
 fi
@@ -127,6 +134,7 @@ rg -q 'GC UNCERTAIN best/runs/ffffffff reason=malformed' "$TEST_ROOT/gc-dry-run.
 
 "$ROOT/bin/opencode-team" runtime-gc --apply >"$TEST_ROOT/gc-apply.out"
 test ! -d "$stale_dir"
+test ! -d "$stale_active_dir"
 if [ "$LSOF_OPEN_AVAILABLE" = 1 ]; then
   test -d "$open_dir"
 fi

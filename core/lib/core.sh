@@ -20,7 +20,15 @@ LAUNCHER_PID=""
 CLEANED=0
 
 log() { echo "[$(date '+%H:%M:%S')] [core] $*" >&2; }
-die() { echo "ERROR: $*" >&2; exit 1; }
+die() {
+  local message="$*"
+  echo "ERROR: $message" >&2
+  if [ -n "${RUN_STATE_DIR:-}" ] && [ -d "${RUN_STATE_DIR:-}" ]; then
+    printf 'UNCERTAIN\n' > "$RUN_STATE_DIR/state" 2>/dev/null || true
+    set_runtime_status failed "" "$message" || true
+  fi
+  exit 1
+}
 
 process_start_epoch() {
   local pid="$1" raw
@@ -127,8 +135,29 @@ publish_manifest() {
   node "$_CORE_DIR/runtime-manifest.mjs" "$RUN_STATE_DIR" publish >/dev/null 2>&1 || true
 }
 
+set_runtime_status() {
+  local stage="$1" child="${2:-}" failure="${3:-}"
+  node "$_CORE_DIR/runtime-manifest.mjs" "$RUN_STATE_DIR" status "$stage" "$child" "$failure" >/dev/null 2>&1 || true
+}
+
+resume_profile() {
+  case "$TEAM_NAME" in
+    best|go|openai) printf '%s\n' "$TEAM_NAME" ;;
+    opencode-openai-daily) printf '%s\n' daily ;;
+    *) return 1 ;;
+  esac
+}
+
+print_resume_command() {
+  local profile
+  [ -n "${PARENT_SESSION_ID:-}" ] || return 0
+  profile=$(resume_profile) || return 0
+  printf '\nResume this session:\nopencode-team %s --resume %s\n' "$profile" "$PARENT_SESSION_ID"
+}
+
 # --- Cleanup (certified GO order) ---
 cleanup_run() {
+  local exit_code=$?
   [ "$CLEANED" -eq 1 ] && return
   CLEANED=1
 
@@ -190,7 +219,12 @@ cleanup_run() {
   fi
 
   # Phase 6: remove run-state
+  if [ "$exit_code" -eq 0 ] && [ -d "$RUN_STATE_DIR" ]; then
+    set_runtime_status stopped "" "" || true
+  fi
   [ -d "$RUN_STATE_DIR" ] && rm -rf "$RUN_STATE_DIR"
+  [ "$exit_code" -eq 0 ] && print_resume_command
+  return "$exit_code"
 }
 
 cleanup_and_exit() {
@@ -319,6 +353,16 @@ claim_session() {
   if tmux has-session -t "$OWNER_TMUX" 2>/dev/null; then
     return 1
   fi
+  local owner_run_dir="$RUNTIME_ROOT/runs/$OWNER_RUN"
+  for owner_role in launcher server bridge; do
+    local owner_identity="$owner_run_dir/$owner_role.identity"
+    local owner_pid owner_start
+    owner_pid=$(sed -n 's/^pid=//p' "$owner_identity" 2>/dev/null)
+    owner_start=$(sed -n 's/^start_epoch=//p' "$owner_identity" 2>/dev/null)
+    if [ -n "$owner_pid" ] && [ -n "$owner_start" ] && kill -0 "$owner_pid" 2>/dev/null && [ "$(process_start_epoch "$owner_pid" 2>/dev/null)" = "$owner_start" ]; then
+      return 1
+    fi
+  done
   rm -rf "$LOCK_ROOT/$SID"
   if mkdir "$LOCK_ROOT/$SID" 2>/dev/null; then
     echo "$RUN_ID" > "$LOCK_ROOT/$SID/run_id"
@@ -391,6 +435,17 @@ wait_server() {
   done
   [ "$ready" -eq 0 ] && die "Server not ready after 30s"
   log "Server ready"
+}
+
+recycle_owned_server() {
+  local old_pid="$SERVER_PID"
+  [ -n "$old_pid" ] || die "Cannot recycle server without an owned PID"
+  safe_signal server "$old_pid" TERM || die "Refusing server recycle: ownership check failed"
+  wait_for_owned_exit server "$old_pid" 125 || die "Owned server did not exit during recycle grace period"
+  start_server
+  wait_server
+  process_owned_by_run server "$SERVER_PID" || die "Refusing server recycle: new server identity failed"
+  log "Recycled exact owned server: old_pid=$old_pid new_pid=$SERVER_PID run_id=$RUN_ID session_id=$PARENT_SESSION_ID directory=$SESSION_DIRECTORY"
 }
 
 # --- Session management ---
@@ -570,6 +625,7 @@ export_env() {
   export XDG_CACHE_HOME="$SANDBOX/cache"
   export XDG_STATE_HOME="$SANDBOX/state"
   export RUNTIME_ROOT PERSISTENT_DATA_ROOT
+  export RUNTIME_RUN_STATE_DIR="$RUN_STATE_DIR"
   export BRIDGE_MODE="$BRIDGE_MODE"
   if [ -n "${CLAUDE_CONFIG_DIR_OVERRIDE:-}" ]; then
     export CLAUDE_CONFIG_DIR="$CLAUDE_CONFIG_DIR_OVERRIDE"
@@ -678,6 +734,7 @@ main() {
   echo "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" > "$RUN_STATE_DIR/created_at"
   echo "$PPID" > "$RUN_STATE_DIR/parent_pid"
   echo "CREATING" > "$RUN_STATE_DIR/state"
+  set_runtime_status initializing
   echo "$("$OPENCODE_TEAM_PYTHON" -c 'import os,pwd; print(pwd.getpwuid(os.getuid()).pw_dir)')" > "$RUN_STATE_DIR/real_home"
   echo "$session_mode" > "$RUN_STATE_DIR/session_mode"
 
@@ -700,9 +757,11 @@ main() {
   fi
 
   # Start server
+  set_runtime_status server_starting
   log "Starting headless server..."
   start_server
   wait_server
+  set_runtime_status server_ready
 
   # Session management
   if [ "$session_mode" = "resume" ]; then
@@ -713,10 +772,28 @@ main() {
     create_parent_session
     claim_session "$PARENT_SESSION_ID" || die "Failed to claim new session $PARENT_SESSION_ID"
   fi
+  set_runtime_status session_published
+
+  if [ "$TEAM_NAME" = "best" ] && [ "$session_mode" = "resume" ]; then
+    local package_root
+    package_root=$(cd "$_CORE_DIR/../.." && pwd)
+    BEST_OPENCODE_DB="$PERSISTENT_DATA_ROOT/opencode/opencode.db" \
+      DATA_ROOT="$(dirname "$PERSISTENT_DATA_ROOT")" \
+      RUNTIME_ROOT="$RUNTIME_ROOT" \
+      BEST_MEMORY_SAFETY_METADATA="$PERSISTENT_DATA_ROOT/memory-safety" \
+      BEST_MEMORY_SAFETY_LOCKS="$PERSISTENT_DATA_ROOT/memory-safety/locks" \
+      BEST_MEMORY_ALLOW_RECYCLE=1 \
+      node "$package_root/teams/best/session-memory-safety.mjs" --run-dir "$RUN_STATE_DIR" >"$RUN_STATE_DIR/memory-safety.log" 2>&1 || log "Memory safety check failed closed; preserving session"
+    if grep -q '"result":"RECYCLE_REQUIRED"' "$RUN_STATE_DIR/memory-safety.log"; then
+      recycle_owned_server
+    fi
+  fi
 
   # Bridge
+  set_runtime_status bridge_starting
   start_bridge
   node "$_CORE_DIR/runtime-manifest.mjs" "$RUN_STATE_DIR" state ACTIVE >/dev/null 2>&1 || true
+  set_runtime_status active
 
   # Watchdog
   local my_tmux
