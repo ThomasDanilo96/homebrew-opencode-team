@@ -21,7 +21,7 @@ fi
 export OPENCODE_TEAM_PYTHON
 
 case "$TASK" in
-  best-tool-output-gc|best-retention|openai-retention|runtime-gc) ;;
+  best-tool-output-gc|best-retention|best-memory-safety|openai-retention|runtime-gc) ;;
   *) printf 'Unknown maintenance task: %s\n' "$TASK" >&2; exit 2 ;;
 esac
 
@@ -176,6 +176,20 @@ case "$TASK" in
       OPENCODE_MAINTENANCE_LOG_FILE="$STATE_ROOT/maintenance/logs/best-retention.log" \
       "$OPENCODE_TEAM_PYTHON" "$PACKAGE_ROOT/shared/maintenance/opencode-cleanup.py" \
         --retention-only --live-retention --team best --max-families 1 --max-session-deletes 3
+    RUNTIME_ROOT="${CACHE_ROOT:-$STATE_ROOT/cache}/runtime" \
+      DATA_ROOT="$DATA_ROOT" \
+      BEST_OPENCODE_DB="$DATA_ROOT/best/data/opencode/opencode.db" \
+      BEST_MEMORY_SAFETY_METADATA="$DATA_ROOT/best/data/memory-safety" \
+      BEST_MEMORY_SAFETY_LOCKS="$DATA_ROOT/best/data/memory-safety/locks" \
+      node "$PACKAGE_ROOT/teams/best/session-memory-safety.mjs"
+    ;;
+  best-memory-safety)
+    RUNTIME_ROOT="${CACHE_ROOT:-$STATE_ROOT/cache}/runtime" \
+      DATA_ROOT="$DATA_ROOT" \
+      BEST_OPENCODE_DB="$DATA_ROOT/best/data/opencode/opencode.db" \
+      BEST_MEMORY_SAFETY_METADATA="$DATA_ROOT/best/data/memory-safety" \
+      BEST_MEMORY_SAFETY_LOCKS="$DATA_ROOT/best/data/memory-safety/locks" \
+      node "$PACKAGE_ROOT/teams/best/session-memory-safety.mjs"
     ;;
   openai-retention)
     OPENCODE_RETENTION_DAYS=7 \

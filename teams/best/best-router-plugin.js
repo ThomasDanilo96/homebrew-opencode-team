@@ -1,4 +1,4 @@
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -38,6 +38,20 @@ implementations, structure, or diagnostics are relevant.
 For documentation, README/config content, exact text, and file paths,
 use the appropriate normal tools.
 </BEST_SEMANTIC_TOOL_GUIDANCE>`
+};
+
+export const memoryCircuitOpen = () => {
+  const liveRss = Number(process.env.BEST_MEMORY_LIVE_RSS_BYTES) || process.memoryUsage().rss;
+  const liveBlock = Number(process.env.BEST_MEMORY_BLOCK_RSS_BYTES) || 1536 * 1024 * 1024;
+  if (liveRss >= liveBlock) return true;
+  const statePath = process.env.RUNTIME_RUN_STATE_DIR;
+  if (!statePath) return false;
+  try {
+    const state = JSON.parse(readFileSync(join(statePath, "memory-pressure.json"), "utf8"));
+    const checkedAt = Date.parse(state.checked_at || "");
+    const maxAge = Number(process.env.BEST_MEMORY_PRESSURE_MAX_AGE_MS) || 5 * 60 * 1000;
+    return state.result === "BLOCK_FANOUT" && Number.isFinite(checkedAt) && Date.now() - checkedAt >= 0 && Date.now() - checkedAt <= maxAge;
+  } catch { return false; }
 };
 const ROUTE_GUIDANCE = {
   EXPLORE: "BEST ROUTE EXPLORE: FIRST route-satisfying action: native task(subagent_type=\"explore\", run_in_background=true). Do not attempt semantic repository tools first. Do not attempt call_omo_agent.",
@@ -177,6 +191,7 @@ export default async function bestRouterPlugin(input) {
     ,
     "tool.execute.before": async (toolInput, output) => {
       const tool = String(toolInput.tool ?? "").toLowerCase();
+      if (tool === "task" && memoryCircuitOpen()) throw new Error("BEST MEMORY SAFETY: fanout paused while the owned server is under extreme physical-memory pressure.");
       if (tool === "call_omo_agent") {
         throw new Error('BEST ROUTING POLICY: call_omo_agent is disabled. Use native task(subagent_type="...", run_in_background=true).');
       }
