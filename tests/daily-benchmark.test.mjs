@@ -15,6 +15,9 @@ test("benchmark manifest has the requested 22-task tier matrix", () => {
   assert.deepEqual(validateManifest(manifest), []);
   assert.equal(manifest.tasks.length, 22);
   assert.deepEqual(Object.fromEntries(Object.entries(manifest.tiers).map(([tier, tasks]) => [tier, tasks.length])), { TRIVIAL: 4, NORMAL: 6, COMPLEX: 6, HEAVY: 4, EXTREME: 2 });
+  const fanoutTask = manifest.tasks.find((task) => task.task_id === "four-lane-repository-audit");
+  assert.match(fanoutTask.objective, /at most three distinct parallel discovery lanes/);
+  assert.deepEqual(fanoutTask.verification, ["three_parallel_lanes", "four_required_slices", "no_duplicate_findings", "no_files_changed"]);
 });
 
 test("isolated preparation creates independent management roots", () => {

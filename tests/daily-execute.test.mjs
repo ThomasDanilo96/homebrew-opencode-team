@@ -585,6 +585,22 @@ test("evaluator returns deterministic PASS, PARTIAL, FAIL and rejects unknown la
   }
 });
 
+test("evaluator accepts authoritative tester PASS evidence for tests_pass", () => {
+  const run = prepareRun(byTask("two-file-feature", TREATMENT_PROFILE));
+  try {
+    const fixtureDiff = {
+      raw: { changed: ["calculator.js", "calculator.test.js"], added: [], deleted: [], outside_fixture: [] },
+      task_relevant: { changed: ["calculator.js", "calculator.test.js"], added: [], deleted: [], outside_fixture: [] },
+      ignored_runtime_generated: [],
+    };
+    const result = evaluateRun({ run, rawResult: {}, gateEvidence: { tester_result: "PASS" }, fixtureDiff });
+    assert.equal(result.outcome, "PASS");
+    assert.equal(result.required_checks.tests_pass, true);
+  } finally {
+    rmSync(run.root, { recursive: true, force: true });
+  }
+});
+
 test("exact README diff is deterministic and answer-key tasks remain read-only", async () => {
   const mutation = await executeRun(byTask("one-line-doc-fix", CONTROL_PROFILE), {
     hooks: {

@@ -99,8 +99,10 @@ function gitDiffScope(run, diff, rawResult) {
   return expected.length ? touched.every((path) => expected.includes(path)) : false;
 }
 
-function testsPass(run, rawResult) {
-  return truthy(rawResult.required_checks?.tests_pass) || truthy(rawResult.tests_pass);
+function testsPass(run, rawResult, gateEvidence) {
+  if (rawResult.required_checks && Object.hasOwn(rawResult.required_checks, "tests_pass")) return truthy(rawResult.required_checks.tests_pass);
+  if (Object.hasOwn(rawResult, "tests_pass")) return truthy(rawResult.tests_pass);
+  return gateEvidence?.tester_result === "PASS";
 }
 
 function expectedFiles(run, diff, rawResult) {
@@ -141,7 +143,7 @@ function labelValue(label, { run, rawResult, gateEvidence, fixtureDiff }) {
     case "no_files_changed": return diff.changed.length === 0 && diff.added.length === 0 && diff.deleted.length === 0;
     case "exact_diff": return exactDiff(run, diff, run.fixture_root) || rawRequired(label, rawResult);
     case "git_diff_scope": return gitDiffScope(run, diff, rawResult);
-    case "tests_pass": return testsPass(run, rawResult);
+    case "tests_pass": return testsPass(run, rawResult, gateEvidence);
     case "expected_files": return expectedFiles(run, diff, rawResult);
     case "unexpected_files_absent": return unexpectedFilesAbsent(diff, rawResult);
     case "four_required_slices": return fourRequiredSlices(rawResult);

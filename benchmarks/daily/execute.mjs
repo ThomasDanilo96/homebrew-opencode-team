@@ -586,6 +586,7 @@ export function buildTaskPrompt(run) {
     "Constraints:",
     "- Work only inside this fixture.",
     "- Preserve product routing, model assignments, and release metadata.",
+    "- Do not provide model or provider overrides when delegating; the runtime assigns the frozen model by agent role.",
     "- For read-only tasks, do not change files.",
     "- For mutating tasks, make the required file changes and run the most focused verification available in the fixture.",
     "- Do not claim success from prose alone; report concrete files inspected or changed and verification evidence.",
