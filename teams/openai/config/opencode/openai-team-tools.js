@@ -71,9 +71,65 @@ const PREMIUM_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-sol", openai
 const DAILY_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-luna", openai_explore: "openai/gpt-5.6-luna", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-luna", reviewer: "openai/gpt-5.6-terra", reviewer_critical: "openai/gpt-5.6-sol", specialist: "openai/gpt-5.6-terra", codex_executor: "openai/gpt-5.6-luna" };
 export const DEFAULT_AGENT_MODELS = process.env.OPENAI_DAILY_PROFILE === "1" ? DAILY_AGENT_MODELS : PREMIUM_AGENT_MODELS;
 const DAILY_AGENT_LABELS = Object.freeze({ openai_explore: "Explore", openai_librarian: "Librarian", openai_ops: "Ops", tester: "Tester", reviewer: "Reviewer", reviewer_critical: "Critical Reviewer", specialist: "Specialist", codex_executor: "Codex" });
+
+const runtimeStatusDirectory = async () => {
+  const directory = process.env.RUNTIME_RUN_STATE_DIR;
+  const runtimeRoot = process.env.RUNTIME_ROOT;
+  if (!directory || !runtimeRoot) return null;
+  try {
+    const actual = await realpath(directory);
+    const root = await realpath(join(runtimeRoot, "runs"));
+    if (!actual.startsWith(`${root}/`) || !/\/runs\/[0-9a-f]{8}$/.test(actual)) return null;
+    return actual;
+  } catch {
+    return null;
+  }
+};
+
+export const writeRuntimeStatus = async (patch, options = {}) => {
+  const directory = await runtimeStatusDirectory();
+  if (!directory) return false;
+  const currentChildPath = join(directory, "active_child_session_id");
+  const retiredChildPath = join(directory, "retired_child_session_id");
+  const currentChild = await readFile(currentChildPath, "utf8").then((value) => value.trim()).catch(() => "");
+  const retiredChild = await readFile(retiredChildPath, "utf8").then((value) => value.trim()).catch(() => "");
+  if (options.expectedChildSessionID && currentChild && currentChild !== options.expectedChildSessionID) return false;
+  if (patch.active_child_session_id && currentChild && currentChild !== patch.active_child_session_id) return false;
+  if (patch.active_child_session_id && retiredChild === patch.active_child_session_id) return false;
+  const allowed = new Set(["status", "stage", "active_child_session_id", "active_child_agent", "provider", "model", "failure_reason", "timeout_reason"]);
+  for (const [name, value] of Object.entries(patch)) {
+    if (!allowed.has(name)) continue;
+    const path = join(directory, name);
+    if (value === null || value === "") {
+      await rm(path, { force: true });
+      continue;
+    }
+    const temporary = `${path}.tmp.${process.pid}.${randomUUID()}`;
+    await writeFile(temporary, `${String(value)}\n`, { mode: 0o600 });
+    await rename(temporary, path);
+  }
+  if (patch.active_child_session_id) await rm(retiredChildPath, { force: true });
+  else if (options.expectedChildSessionID) await writeFile(retiredChildPath, `${options.expectedChildSessionID}\n`, { mode: 0o600 });
+  return true;
+};
+
+const runtimeChildStatus = (pending, childSessionID) => {
+  const verifying = ["tester", "reviewer", "reviewer_critical"].includes(pending.role);
+  const model = pending.executed_model || pending.requested_model || null;
+  return {
+    status: verifying ? "VERIFYING" : "WAITING_CHILD",
+    stage: pending.role,
+    active_child_session_id: childSessionID,
+    active_child_agent: pending.role,
+    provider: model?.includes("/") ? model.split("/", 1)[0] : null,
+    model,
+  };
+};
 export const latestUserObjective = (messages = []) => {
   const entries = Array.isArray(messages) ? messages : Array.isArray(messages?.messages) ? messages.messages : [];
-  const latest = [...entries].reverse().find((message) => message?.info?.role === "user");
+  const users = entries.filter((message) => message?.info?.role === "user");
+  const genuine = users.filter((message) => !(message?.parts || []).some((part) => part.type === "text" && typeof part.text === "string" && /OMO_INTERNAL_INITIATOR/.test(part.text)));
+  const latest = [...(genuine.length ? genuine : users)].reverse()[0];
   const text = (latest?.parts || []).filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n").trim();
   return text || null;
 };
@@ -364,6 +420,7 @@ export const findPendingMandatoryTesterGate = async (rootSessionID, deps = {}) =
 
 const mandatoryTesterDispatchFailures = new Set();
 const observedMandatoryTesterContinuations = new Set();
+const mandatoryReviewerDispatches = new Set();
 export const observeMandatoryTesterContinuation = (rootID, packetID, deps = {}) => {
   const key = `${rootID}:${packetID}`;
   observedMandatoryTesterContinuations.add(key);
@@ -380,15 +437,22 @@ export const observeMandatoryTesterContinuation = (rootID, packetID, deps = {}) 
   })();
 };
 export const mandatoryTesterDispatchTrigger = (eventType) => eventType === "session.idle";
+export const testerSettlementCanProceed = (eventType, completed = false) => Boolean(completed)
+  || eventType === "session.error"
+  || eventType === "session.deleted";
+export const testerSettlementPacketPatch = (passed, failureCode = "TEST_RESULT_INVALID") => passed
+  ? { phase: "background_completion", outcome: "completed", tester_status: "passed", verification_status: "passed" }
+  : { phase: "background_completion", outcome: "error", tester_status: "failed", verification_status: "failed", error_code: failureCode };
 export const driveMandatoryTesterContinuation = async (rootSessionID, deps = {}) => {
   const gate = await findPendingMandatoryTesterGate(rootSessionID, deps);
   if (!gate) return { status: "noop" };
   const packets = await (deps.listWorkPackets || listWorkPackets)();
   const terminal = new Set(["completed", "success", "failed", "error", "cancelled"]);
-  const testerExists = (Array.isArray(packets) ? packets : []).some((packet) =>
+  const testerPackets = (Array.isArray(packets) ? packets : []).filter((packet) =>
     packet?.parent_session_id === rootSessionID && packet.agent === "tester" && packet.test_task_id === gate.packet_id &&
     !terminal.has(String(packet.outcome || "").toLowerCase())
   );
+  const testerExists = testerPackets.some((packet) => Boolean(packet.child_session_id) || String(packet.outcome || "").toLowerCase() === "running");
   if (testerExists) return { status: "existing", packet_id: gate.packet_id };
   const fail = async (code = "MANDATORY_TESTER_NOT_DISPATCHED") => {
     const key = `${rootSessionID}:${gate.packet_id}`;
@@ -399,14 +463,25 @@ export const driveMandatoryTesterContinuation = async (rootSessionID, deps = {})
   };
   const observed = gate.tester_dispatch_state === "observed" || observedMandatoryTesterContinuations.has(`${rootSessionID}:${gate.packet_id}`);
   if (["dispatching", "requested"].includes(gate.tester_dispatch_state) && !observed) {
-    return { status: "waiting", packet_id: gate.packet_id };
+    const unboundTester = testerPackets.find((packet) => !packet.child_session_id);
+    const updatedAt = Date.parse(unboundTester?.updated_at || gate.updated_at || "");
+    const graceMs = Number.isInteger(Number(process.env.OPENAI_TESTER_BIND_GRACE_MS)) ? Math.max(1_000, Math.min(120_000, Number(process.env.OPENAI_TESTER_BIND_GRACE_MS))) : 30_000;
+    if (!unboundTester || !Number.isFinite(updatedAt) || Date.now() - updatedAt < graceMs) return { status: "waiting", packet_id: gate.packet_id };
+    if (typeof deps.reclaimTester === "function") {
+      const reclaimResult = await deps.reclaimTester(unboundTester);
+      if (reclaimResult === false) return { status: "waiting", packet_id: gate.packet_id };
+    }
+    const retired = await (deps.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent)(unboundTester.packet_id, { phase: ["admitted", "background_binding", "background_bound"], outcome: "pending" }, { phase: "foreground_completion", outcome: "failed", tester_status: "failed", verification_status: "failed", error_code: "STALE_TESTER_RESERVATION" });
+    if (!retired?.matched) return { status: "waiting", packet_id: gate.packet_id };
+    const reclaimed = await (deps.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent)(gate.packet_id, { tester_dispatch_state: "requested" }, { tester_dispatch_state: "pending" });
+    if (!reclaimed?.matched) return { status: "waiting", packet_id: gate.packet_id };
   }
   if (observed) {
     await fail();
     return { status: "failed", packet_id: gate.packet_id };
   }
   const cas = await (deps.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent)(gate.packet_id, {
-    tester_status: ["pending", "required"], phase: "pending_verification", outcome: "pending", codex_outcome: "success",
+    tester_status: ["pending", "required"], phase: ["pending_verification", "PENDING_VERIFICATION"], outcome: "pending", codex_outcome: "success",
     tester_dispatch_state: [undefined, "pending"],
   }, { tester_dispatch_state: "dispatching" });
   if (!cas?.matched) return { status: "noop", packet_id: gate.packet_id };
@@ -529,10 +604,11 @@ export const taskRouteAdmissionContext = (route, exactMandatoryTesterGate, remot
   localReadOnly: !exactMandatoryTesterGate && route?.classification === "READ_ONLY" && !remoteReadOnly,
 });
 
-export const createMandatoryTesterRootDriver = ({ pluginInput = {}, updateWorkPacketByID: updatePacket = updateWorkPacketByID, reconcileGateTarget }) => async (rootID, options = {}) => {
+export const createMandatoryTesterRootDriver = ({ pluginInput = {}, updateWorkPacketByID: updatePacket = updateWorkPacketByID, reconcileGateTarget, reclaimTester }) => async (rootID, options = {}) => {
   const result = await driveMandatoryTesterContinuation(rootID, {
     listWorkPackets: pluginInput.listWorkPackets || listWorkPackets,
     readTask: pluginInput.readTask || readTask,
+    reclaimTester,
     updateWorkPacketByIDIfCurrent: pluginInput.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent,
     failRequested: options.failRequested,
     enqueue: async (destinationRoot, text) => {
@@ -1016,6 +1092,10 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       if ((terminal || manualRecovery) && cleanup.master_parent_session_id) {
         const parentGuard = guardrails.get(cleanup.master_parent_session_id);
         if (parentGuard) guardrails.set(cleanup.master_parent_session_id, finishDelegation(parentGuard, ["tester", "reviewer", "reviewer_critical"].includes(cleanup.role), cleanup.delegation_scope));
+        if (cleanup.role === "tester" && cleanup.test_task_id) {
+          const currentGuard = guardrails.get(cleanup.master_parent_session_id);
+          if (currentGuard) guardrails.set(cleanup.master_parent_session_id, settleVerificationGateState(currentGuard, cleanup.test_task_id, "FAILED"));
+        }
       }
       if (record.pending_steps.includes("policy_terminal")) {
         const policy = cleanup.sessionID ? await readPolicy(cleanup.sessionID) : null;
@@ -1266,41 +1346,69 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
      if (!snapshot || !packet || packet.packet_id !== snapshot.packet_id || packet.parent_session_id !== snapshot.parent_session_id || packet.task_fingerprint !== snapshot.task_fingerprint || Number(packet.attempt) !== Number(snapshot.attempt) || (packet.task_lease_id != null && packet.task_lease_id !== snapshot.task_lease_id) || JSON.stringify(expectedHashes) !== JSON.stringify(snapshot.expected_verification_hashes || []) || !task || task.parent_session_id !== snapshot.parent_session_id || Number(task.attempt) !== Number(snapshot.attempt) || task.lease_id !== snapshot.task_lease_id) return { code: "STALE_GATE_EVENT", packet: null };
      return { code: null, packet };
    };
-   const settleTesterGate = async (pending, childID) => {
+   const settleTesterGate = async (pending, childID, lifecycleEventType) => {
     if (!pending?.test_task_id || !childID || pending.child_session_id !== childID) return { pending: true };
-    const response = await pluginInput.client?.session.messages({ path: { id: childID } });
-    const messages = unwrapData(response);
+    let messages = [];
+    try {
+      const response = await pluginInput.client?.session.messages({ path: { id: childID } });
+      messages = unwrapData(response);
+    } catch {
+      // An errored/deleted child can no longer supply its final message.  The
+      // lifecycle event below remains authoritative in that case.
+    }
     const completed = Array.isArray(messages) && messages.some((message) => {
       const info = message?.info || {};
       return (info.sessionID || info.session_id || message?.sessionID || message?.session_id) === childID
         && String(info.role || "").toLowerCase() === "assistant"
         && (messageTime(info, "completed") != null || info.finish != null);
     });
-    if (!completed) return { pending: true };
+    // Idle can arrive before the provider has exposed the terminal assistant
+    // message, but error/deletion are themselves authoritative terminal events.
+    // Do not leave their tester reservation pending waiting for metadata that
+    // will never be written.
+    if (!testerSettlementCanProceed(lifecycleEventType, completed)) return { pending: true };
     const validation = await validateGateTarget(pending, pending.test_task_id);
     if (validation.code) return validation;
     let evidence;
     try { evidence = testerEvidenceFromMessages(messages, { ...pending, ...pending.gate_target }); }
     catch { evidence = []; Object.defineProperty(evidence, "summary", { value: { recognized_count: 0, passed_count: 0, failed_count: 0, truncated_count: 0, status: "missing" }, enumerable: false }); }
     const passed = evidence.summary?.status === "passed";
+    const testerPacket = pending.packet_id && pending.packet_id !== pending.test_task_id
+      ? (await listWorkPackets()).find((entry) => entry.packet_id === pending.packet_id)
+      : null;
+    const failureCode = typeof testerPacket?.error_code === "string" && testerPacket.error_code && testerPacket.error_code !== "TEST_RESULT_INVALID"
+      ? testerPacket.error_code
+      : "TEST_RESULT_INVALID";
+    if (pending.packet_id && pending.packet_id !== pending.test_task_id) {
+      await updateWorkPacketByIDIfCurrent(
+        pending.packet_id,
+        {
+          tester_status: ["pending", "required"],
+          child_session_id: pending.child_session_id,
+          phase: ["background_bound", "background_completion"],
+          outcome: ["pending", "running", "error"],
+        },
+        testerSettlementPacketPatch(passed, failureCode),
+      );
+    }
      if (evidence.summary?.status === "missing" || evidence.length === 0) {
-       await updateWorkPacketByIDIfCurrent(pending.test_task_id, { tester_status: ["pending", "required"] }, { tester_status: "failed", error_code: "TEST_RESULT_INVALID", verification_evidence: evidence });
+       await updateWorkPacketByIDIfCurrent(pending.test_task_id, { tester_status: ["pending", "required"] }, { tester_status: "failed", error_code: failureCode, verification_evidence: evidence });
         const target = (await listWorkPackets()).find((entry) => entry.packet_id === pending.test_task_id);
         await reconcileGateTarget(target);
         const terminalTask = await readTask(target?.task_fingerprint);
         const root = guardrails.get(pending.master_parent_session_id);
         if (root && terminalTask) guardrails.set(pending.master_parent_session_id, settleVerificationGateState(root, pending.test_task_id, terminalTask.state));
-        return { passed: false, code: "TEST_RESULT_INVALID" };
+        return { passed: false, code: failureCode };
      }
-    const update = await updateWorkPacketByIDIfCurrent(pending.test_task_id, { tester_status: ["pending", "required"] }, { tester_status: passed ? "passed" : "failed", verification_evidence: evidence, ...(passed ? {} : { error_code: "TEST_RESULT_INVALID" }) });
+    const update = await updateWorkPacketByIDIfCurrent(pending.test_task_id, { tester_status: ["pending", "required"] }, { tester_status: passed ? "passed" : "failed", verification_evidence: evidence, ...(passed ? {} : { error_code: failureCode }) });
      const target = update.packet || validation.packet;
      await reconcileGateTarget(target);
      const terminalTask = await readTask(target?.task_fingerprint);
-     if (terminalTask && ["COMPLETED", "FAILED"].includes(terminalTask.state)) {
-       const root = guardrails.get(pending.master_parent_session_id);
-       if (root) guardrails.set(pending.master_parent_session_id, settleVerificationGateState(root, pending.test_task_id, terminalTask.state));
-     }
-     return { passed, code: passed ? null : "TEST_RESULT_INVALID" };
+      if (terminalTask && ["COMPLETED", "FAILED", "PENDING_REVIEW"].includes(terminalTask.state)) {
+        const root = guardrails.get(pending.master_parent_session_id);
+        if (root) guardrails.set(pending.master_parent_session_id, settleVerificationGateState(root, pending.test_task_id, terminalTask.state));
+      }
+     return { passed, code: passed ? null : failureCode };
   };
   const rememberCompletedMessage = (id) => {
     if (!id || completedMessageIDs.has(id)) return false;
@@ -1363,7 +1471,43 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     } catch { return null; }
   };
 
- const driveMandatoryTesterForRoot = createMandatoryTesterRootDriver({ pluginInput, updateWorkPacketByID, reconcileGateTarget });
+  const reclaimStaleTester = async (testerPacket) => {
+    const entry = [...reservations.entries()].find(([, pending]) => pending.role === "tester" && pending.master_parent_session_id === testerPacket.parent_session_id && pending.test_task_id === testerPacket.test_task_id && !pending.child_session_id);
+    if (!entry) return true;
+    const [, pending] = entry;
+    const result = await finalizeReservation(pending, { outcome: "error", result_summary: "STALE_TESTER_RESERVATION", sessionID: null, terminal: true, packet: false, taskAction: "fail" });
+    return result.code === "LIFECYCLE_FINALIZED" || result.code === "RECONCILIATION_REQUIRED";
+  };
+  const driveMandatoryTesterForRoot = createMandatoryTesterRootDriver({ pluginInput, updateWorkPacketByID, reconcileGateTarget, reclaimTester: reclaimStaleTester });
+  const driveMandatoryReviewerForRoot = async (rootID, packetID) => {
+    const key = `${rootID}:${packetID}`;
+    const packets = await listWorkPackets();
+    const packet = packets.find((entry) => entry.packet_id === packetID);
+    if (!packet || packet.parent_session_id !== rootID || packet.review_required !== true || packet.review_status !== "pending" || packet.tester_status !== "passed" || packet.outcome !== "pending") return { status: "noop", packet_id: packetID };
+    const reviewer = packet.risk === "critical" ? "reviewer_critical" : "reviewer";
+    if (packets.some((entry) => entry.parent_session_id === rootID && entry.agent === reviewer && entry.review_task_id === packetID && entry.outcome === "pending")) return { status: "existing", packet_id: packetID };
+    if (mandatoryReviewerDispatches.has(key)) return { status: "requested", packet_id: packetID };
+    const claimed = await updateWorkPacketByIDIfCurrent(packetID, { review_status: "pending", tester_status: "passed", review_dispatch_state: [undefined, "pending"] }, { review_dispatch_state: "dispatching" });
+    if (!claimed?.matched) return { status: "waiting", packet_id: packetID };
+    const rootGuard = guardrails.get(rootID);
+    const initialObjective = rootGuard?.authoritativeObjective || rootGuard?.objective || (await resolveInitialObjective(rootID))?.objective || "";
+    const objectiveContext = initialObjective ? `\nParent objective: ${initialObjective}` : "";
+    await writeRuntimeStatus({ status: "VERIFYING", stage: reviewer, active_child_session_id: null, active_child_agent: null, provider: "openai", model: DAILY_AGENT_MODELS[reviewer] || null });
+    const text = `<!-- OMO_INTERNAL_INITIATOR --> MANDATORY_REVIEW_GATE review_task_id=${packetID}${objectiveContext}\nCall the native task exactly once with subagent_type ${reviewer}. Do not call codex_executor, tester, or specialist. Do not report final success before the reviewer reaches terminal completion.`;
+    try {
+      const prompt = pluginInput.client?.session?.promptAsync;
+      if (typeof prompt !== "function") throw new Error("MANDATORY_REVIEW_ENQUEUE_UNAVAILABLE");
+      mandatoryReviewerDispatches.add(key);
+      const response = await prompt.call(pluginInput.client.session, { path: { id: rootID }, body: { parts: [{ type: "text", text }], agent: "openai_orchestrator" } });
+      if (response?.error || response?.failure || ["error", "failed", "failure"].includes(response?.status)) throw new Error("MANDATORY_REVIEW_ENQUEUE_FAILED");
+      await updateWorkPacketByIDIfCurrent(packetID, { review_dispatch_state: "dispatching" }, { review_dispatch_state: "requested" });
+      return { status: "requested", packet_id: packetID };
+    } catch {
+      mandatoryReviewerDispatches.delete(key);
+      await updateWorkPacketByIDIfCurrent(packetID, { review_dispatch_state: "dispatching" }, { review_dispatch_state: "pending" });
+      return { status: "failed", packet_id: packetID };
+    }
+  };
 
  const plugin = ({
   "experimental.session.compacting": async ({ sessionID }, output) => {
@@ -1527,6 +1671,11 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
              try { if (current) await removeRecoveryAndHome(reservation.task_fingerprint, expected); else await removeRecoveryHome(reservation.task_fingerprint, expected); } catch {}
            }
            if (packetCallID && !preservePending) await updateWorkPacketByID(packetCallID, { phase: result.gates_pending ? "pending_verification" : "codex_terminal", outcome: result.gates_pending ? "pending" : outcome, codex_outcome: outcome, duration_ms: durationMs, profile: modelPlan?.profile || null, requested_model: modelPlan?.requested_model || null, executed_model: executedModel || null, fallback_model: modelPlan?.fallback_model || null, fallback_reason: fallbackReason, fallback_count: fallbackCount });
+           if (!preservePending && outcome !== "success" && !result.gates_pending && reservation?.master_parent_session_id) {
+             const rootID = reservation.master_parent_session_id;
+             const rootState = guardrails.get(rootID) || guardrails.get(context.sessionID);
+             if (rootState) guardrails.set(rootID, { ...rootState, codexFailureTerminal: true });
+           }
           if (reservation?.task_fingerprint && !preservePending) {
             if (outcome === "success" && !result.gates_pending) await completeTask(reservation.task_fingerprint, { expectedVersion: reservation.task_state_version, leaseId: reservation.task_lease_id, result_summary: outcome });
              else if (outcome !== "success") await advanceTask(reservation, "FAILED", { retryable: result.retryable === true, error_code: result.error_code || outcome, result_summary: result.error_code || outcome });
@@ -1890,7 +2039,11 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
              phase: gatesPending ? (testerRequired ? "pending_verification" : "pending_review") : "codex_terminal", outcome: gatesPending ? "pending" : "success", codex_outcome: "success",
           });
           await transitionCurrentPolicy(context.sessionID, CODEX_SUCCESS);
-           if (gatesPending) await advanceTask(reservation, testerRequired ? "PENDING_VERIFICATION" : "PENDING_REVIEW", { result_summary: "pending_gates" });
+    if (gatesPending) {
+      const verificationStage = testerRequired ? "tester" : (reviewRequired ? reviewer : "reviewer");
+      await advanceTask(reservation, testerRequired ? "PENDING_VERIFICATION" : "PENDING_REVIEW", { result_summary: "pending_gates" });
+      await writeRuntimeStatus({ status: "VERIFYING", stage: verificationStage, active_child_session_id: null, active_child_agent: null, provider: null, model: null }, { expectedChildSessionID: context.sessionID });
+    }
            if (testerRequired && packetCallID && reservation?.master_parent_session_id) {
              const rootID = reservation.master_parent_session_id;
              const root = guardrails.get(rootID);
@@ -1934,7 +2087,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       enforceDailySearchPolicy(input, output);
       const toolName = String(input.tool || "").toLowerCase();
      let guard = await guardrailFor(input.sessionID);
-     if (toolName === "task" && guard && !guard.authoritativeObjective) {
+      if (toolName === "task" && guard && (!guard.authoritativeObjective || /OMO_INTERNAL_INITIATOR/.test(String(guard.authoritativeObjective)))) {
        const initialObjective = await resolveInitialObjective(input.sessionID);
        if (initialObjective?.objective && initialObjective.rootSessionID === input.sessionID && initialObjective.parentSessionID == null) {
          guard = recoverRootRequestState(guard, initialObjective.objective, Date.now(), process.env);
@@ -1970,32 +2123,53 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
            const selected = selectForegroundTesterReservation(input.sessionID, rootParentForGate, [...reservations.entries()]);
            if (selected) {
              const [, pending] = selected;
-             pending.provisional_child_session_id = input.sessionID;
-             packetCallBySession.set(input.sessionID, pending.packet_id);
-             correlatedPacketID = pending.packet_id;
-             correlatedReservation = resolveCorrelatedTesterReservation(input.sessionID, correlatedPacketID, [pending], rootParentForGate);
-             reservationForTester = correlatedReservation;
-           }
+              pending.provisional_child_session_id = input.sessionID;
+              packetCallBySession.set(input.sessionID, pending.packet_id);
+              correlatedPacketID = pending.packet_id;
+              correlatedReservation = resolveCorrelatedTesterReservation(input.sessionID, correlatedPacketID, [pending], rootParentForGate);
+              reservationForTester = correlatedReservation;
+              await writeRuntimeStatus(runtimeChildStatus(pending, input.sessionID));
+            }
          }
         const mandatoryTesterPacket = sessionAgent === "tester"
-          ? resolveMandatoryTesterPacketForSession(input.sessionID, testerPackets, reservationForTester, rootParentForGate)
-          : null;
-       const mandatoryTesterDecision = mandatoryTesterToolDecision(mandatoryTesterPacket, toolName, output.args?.command ?? output.args?.cmd);
+           ? resolveMandatoryTesterPacketForSession(input.sessionID, testerPackets, reservationForTester, rootParentForGate)
+           : null;
+        if (sessionAgent === "tester" && mandatoryTesterPacket?.child_session_id === input.sessionID) {
+          await writeRuntimeStatus({ status: "VERIFYING", stage: "tester", active_child_session_id: input.sessionID, active_child_agent: "tester", provider: null, model: null });
+        }
+        const mandatoryTesterDecision = mandatoryTesterToolDecision(mandatoryTesterPacket, toolName, output.args?.command ?? output.args?.cmd);
        if (!mandatoryTesterDecision.allowed) {
          if (mandatoryTesterDecision.reason === "MANDATORY_TESTER_COMMAND_ONLY") throw mandatoryTesterCommandOnlyError();
          throw new Error(mandatoryTesterDecision.reason);
        }
-       const rootGuardForGate = guardrails.get(rootParentForGate) || (rootParentForGate === input.sessionID ? guard : null);
-       const durableGate = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator"
+         const rootGuardForGate = guardrails.get(rootParentForGate) || (rootParentForGate === input.sessionID ? guard : null);
+         const reviewerTaskAgent = String(output.args?.subagent_type || output.args?.agent || "");
+         const reviewerTaskPrompt = String(output.args?.prompt || output.args?.description || "");
+         const mandatoryReviewPacketForGate = toolName === "task" && sessionAgent === "openai_orchestrator"
+           ? (await listWorkPackets()).find((packet) => packet.parent_session_id === rootParentForGate && packet.review_required === true && packet.review_status === "pending" && packet.outcome === "pending" && packet.codex_outcome === "success" && String(packet.phase || "").toLowerCase() === "pending_verification" && (reviewerTaskAgent === "reviewer" ? packet.risk !== "critical" : packet.risk === "critical"))
+           : null;
+         const reviewerContinuation = process.env.OPENAI_DAILY_PROFILE === "1" && ["reviewer", "reviewer_critical"].includes(sessionAgent) && rootParentForGate !== input.sessionID && Boolean(rootGuardForGate?.pendingVerificationPacketID);
+         if (reviewerContinuation && guard) {
+           guard = { ...guard, verificationTerminal: false, pendingVerificationPacketID: null, pendingTesterActive: false };
+           guardrails.set(input.sessionID, guard);
+         }
+        const durableGate = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator" && !["reviewer", "reviewer_critical"].includes(sessionAgent)
          ? await findPendingMandatoryTesterGate(rootParentForGate, { listWorkPackets: pluginInput.listWorkPackets, readTask: pluginInput.readTask })
          : null;
-       const gateStateForDecision = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator" && !durableGate
-         ? (rootGuardForGate ? { ...rootGuardForGate, pendingVerificationPacketID: null, pendingTesterActive: false } : rootGuardForGate)
-         : rootGuardForGate;
+        const gateStateForDecision = reviewerContinuation || Boolean(mandatoryReviewPacketForGate)
+          ? { ...(rootGuardForGate || {}), verificationTerminal: false, pendingVerificationPacketID: null, pendingTesterActive: false }
+          : process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator" && !durableGate
+          ? (rootGuardForGate ? { ...rootGuardForGate, pendingVerificationPacketID: null, pendingTesterActive: false } : rootGuardForGate)
+          : rootGuardForGate;
        let mandatoryTesterTargetID = null;
-       if (durableGate) {
-        const requestedAgent = toolName === "task" ? String(output.args?.subagent_type || output.args?.agent || "") : sessionAgent;
-        const testerActive = [...reservations.values()].some((entry) => entry.master_parent_session_id === rootParentForGate && entry.role === "tester" && entry.test_task_id === durableGate.packet_id && entry.token)
+        if (durableGate) {
+         const requestedAgent = toolName === "task" ? String(output.args?.subagent_type || output.args?.agent || "") : sessionAgent;
+         const testerBindGraceMs = Number.isInteger(Number(process.env.OPENAI_TESTER_BIND_GRACE_MS)) ? Math.max(1_000, Math.min(120_000, Number(process.env.OPENAI_TESTER_BIND_GRACE_MS))) : 30_000;
+         for (const [, staleTester] of [...reservations.entries()].filter(([, entry]) => entry.role === "tester" && entry.master_parent_session_id === rootParentForGate && entry.test_task_id === durableGate.packet_id && !entry.child_session_id && Date.now() - Number(entry.started_at || 0) >= testerBindGraceMs)) {
+           const reclaimed = await finalizeReservation(staleTester, { outcome: "error", result_summary: "STALE_TESTER_RESERVATION", sessionID: null, terminal: true, packet: false, taskAction: "fail" });
+           if (reclaimed.code === "LIFECYCLE_FINALIZED") await updateWorkPacketByIDIfCurrent(staleTester.packet_id, { phase: ["admitted", "background_binding", "background_bound"], outcome: "pending" }, { phase: "foreground_completion", outcome: "failed", tester_status: "failed", verification_status: "failed", error_code: "STALE_TESTER_RESERVATION" });
+         }
+         const testerActive = [...reservations.values()].some((entry) => entry.master_parent_session_id === rootParentForGate && entry.role === "tester" && entry.test_task_id === durableGate.packet_id && entry.token)
           || (rootGuardForGate?.pendingTesterActive === true && rootGuardForGate?.pendingVerificationPacketID === durableGate.packet_id);
         const enforced = enforcePendingMandatoryTesterGate(durableGate, {
           tool: toolName, agent: requestedAgent,
@@ -2006,9 +2180,15 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
          output.args = output.args || {};
         output.args.prompt = enforced.prompt;
       }
-      const gateDecision = verificationGateDecision(gateStateForDecision, toolName, toolName === "task" ? String(output.args?.subagent_type || output.args?.agent || "") : sessionAgent, output.args?.prompt || output.args?.description || "", [...reservations.values()].some((entry) => entry.master_parent_session_id === rootParentForGate && entry.role === "tester" && entry.test_task_id === gateStateForDecision?.pendingVerificationPacketID && entry.token));
-     if (!gateDecision.allowed) throw new GuardrailPolicyError(gateDecision.reason);
-    if (guard && toolName !== "openai_run_codex") guardrails.set(input.sessionID, admitToolCall(guard, toolName));
+      const reviewerGateTask = toolName === "task" && (["reviewer", "reviewer_critical"].includes(reviewerTaskAgent) || Boolean(mandatoryReviewPacketForGate)) && (/\breview_task_id=[a-f0-9]{64}\b/i.test(reviewerTaskPrompt) || Boolean(mandatoryReviewPacketForGate));
+      if (reviewerGateTask && guard?.verificationTerminal) {
+        guard = { ...guard, verificationTerminal: false };
+        guardrails.set(input.sessionID, guard);
+      }
+        const gateDecision = verificationGateDecision(gateStateForDecision, toolName, toolName === "task" ? String(output.args?.subagent_type || output.args?.agent || "") : sessionAgent, output.args?.prompt || output.args?.description || "", [...reservations.values()].some((entry) => entry.master_parent_session_id === rootParentForGate && entry.role === "tester" && entry.test_task_id === gateStateForDecision?.pendingVerificationPacketID && entry.token));
+      if (!gateDecision.allowed) throw new GuardrailPolicyError(gateDecision.reason);
+      const exactReviewerTask = reviewerGateTask;
+     if (guard && toolName !== "openai_run_codex" && !exactReviewerTask) guardrails.set(input.sessionID, admitToolCall(guard, toolName));
       if (toolName === "bash" && sessionAgent === "tester") {
         const command = output.args?.command ?? output.args?.cmd;
         if (mandatoryTesterPacket && isAuthorizedTesterVerificationCommand(mandatoryTesterPacket, command)) return;
@@ -2053,10 +2233,16 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const suppliedMarker = extractTaskPacketMarker(currentTaskObjective);
       if (suppliedMarker.present) throw new Error("TASK_PACKET_MARKER_INJECTED");
       const requestedAgent = String(output.args?.subagent_type || output.args?.agent || "");
-      const fallbackParentObjective = guard?.authoritativeObjective ? "" : (await resolveInitialObjective(masterParent(input.sessionID)))?.objective || "";
-      const authoritativeParentObjective = selectAuthoritativeObjective(guard?.authoritativeObjective, fallbackParentObjective);
+       const guardObjective = String(guard?.authoritativeObjective || "").trim();
+       const fallbackParentObjective = guardObjective && !/OMO_INTERNAL_INITIATOR/.test(guardObjective) ? "" : (await resolveInitialObjective(masterParent(input.sessionID)))?.objective || "";
+       let authoritativeParentObjective = selectAuthoritativeObjective(guardObjective && !/OMO_INTERNAL_INITIATOR/.test(guardObjective) ? guardObjective : "", fallbackParentObjective);
+       const mandatoryReviewPacket = ["reviewer", "reviewer_critical"].includes(requestedAgent)
+           ? (await listWorkPackets()).find((packet) => packet.parent_session_id === masterParent(input.sessionID) && packet.review_required === true && packet.tester_status === "passed" && packet.review_status === "pending" && packet.outcome === "pending" && packet.codex_outcome === "success" && String(packet.phase || "").toLowerCase() === "pending_verification" && (requestedAgent === "reviewer_critical" ? packet.risk === "critical" : packet.risk !== "critical"))
+          : null;
+       if (!authoritativeParentObjective && mandatoryReviewPacket) authoritativeParentObjective = `Review completed work review_task_id=${mandatoryReviewPacket.packet_id}`;
        const injectedTesterTaskID = requestedAgent === "tester" ? (mandatoryTesterTargetID || currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i)?.[1]?.toLowerCase()) : null;
        const exactMandatoryTesterGate = isExactMandatoryTesterGate({ daily: process.env.OPENAI_DAILY_PROFILE === "1", sessionAgent, rootSessionID: rootParentForGate, canonicalRootSessionID: masterParent(rootParentForGate), requestedAgent, injectedTesterTaskID, durableGate });
+        const exactMandatoryReviewerGate = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator" && rootParentForGate === masterParent(rootParentForGate) && ["reviewer", "reviewer_critical"].includes(requestedAgent) && (/MANDATORY_REVIEW_GATE\b/i.test(currentTaskObjective) || Boolean(mandatoryReviewPacket));
       const analysis = analyzeObjective(currentTaskObjective);
       if (!authoritativeParentObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
      const route = resolveDelegatedTaskRoute(exactMandatoryTesterGate, routeDelegatedAgent, authoritativeParentObjective, currentTaskObjective, requestedAgent);
@@ -2079,7 +2265,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       }
       delete output.args.category;
       delete output.args.load_skills;
-      output.args.subagent_type = remoteReadOnly ? "openai_ops" : requestedAgent === "tester" ? "tester" : ["reviewer", "reviewer_critical"].includes(requestedAgent) ? (/\breview_task_id=[a-f0-9]{64}\b/i.test(currentTaskObjective) ? requestedAgent : "specialist") : route?.agent;
+       output.args.subagent_type = remoteReadOnly ? "openai_ops" : requestedAgent === "tester" ? "tester" : mandatoryReviewPacket ? "reviewer_critical" : ["reviewer", "reviewer_critical"].includes(requestedAgent) ? (/\breview_task_id=[a-f0-9]{64}\b/i.test(currentTaskObjective) || /\breview\s+task\s+[a-f0-9]{64}\b/i.test(currentTaskObjective) || exactMandatoryReviewerGate ? requestedAgent : "specialist") : route?.agent;
     } else if (requestedAgent === "codex_executor") {
       output.args.subagent_type = "specialist";
     } else if (args.category) {
@@ -2093,20 +2279,27 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        if (agent === "codex_executor" && rootGuard?.codexFailureTerminal) {
          const error = new Error("CODEX_RETRY_DENIED"); error.code = "CODEX_RETRY_DENIED"; error.retryable = false; throw error;
        }
-      let reviewTaskID = ["reviewer", "reviewer_critical"].includes(agent) ? (currentTaskObjective.match(/\breview_task_id=([a-f0-9]{64})\b/i) || [])[1]?.toLowerCase() : null;
+       let reviewTaskID = ["reviewer", "reviewer_critical"].includes(agent) ? ((currentTaskObjective.match(/\breview_task_id=([a-f0-9]{64})\b/i) || currentTaskObjective.match(/\breview\s+task\s+([a-f0-9]{64})\b/i)) || [])[1]?.toLowerCase() || mandatoryReviewPacketForGate?.packet_id || mandatoryReviewPacket?.packet_id || null : null;
       let reviewTarget = null;
       let gateTarget = null;
-      if (["reviewer", "reviewer_critical"].includes(agent)) {
-        if (!reviewTaskID) throw new Error("REVIEW_TASK_ID_REQUIRED");
-        reviewTarget = (await listWorkPackets()).find((packet) => packet.packet_id === reviewTaskID);
-        const requiredRisk = agent === "reviewer_critical" ? "critical" : "high";
-        if (!reviewTarget || reviewTarget.parent_session_id !== rootParent || reviewTarget.review_required !== true || reviewTarget.risk !== requiredRisk || reviewTarget.review_status !== "pending") throw new Error("REVIEW_TARGET_DENIED");
-        gateTarget = await gateTargetSnapshot(reviewTarget);
-        if (!gateTarget) throw new Error("REVIEW_TARGET_DENIED");
+       if (["reviewer", "reviewer_critical"].includes(agent)) {
+         if (!reviewTaskID) throw new Error("REVIEW_TASK_ID_REQUIRED");
+         reviewTarget = (await listWorkPackets()).find((packet) => packet.packet_id === reviewTaskID);
+          const validRisk = agent === "reviewer_critical" ? reviewTarget?.risk === "critical" : reviewTarget?.risk !== "critical";
+          if (!reviewTarget || reviewTarget.parent_session_id !== rootParent || reviewTarget.review_required !== true || !validRisk || reviewTarget.review_status !== "pending") throw new Error("REVIEW_TARGET_DENIED");
+         const activeReviewer = (await listWorkPackets()).find((packet) => packet.parent_session_id === rootParent && packet.agent === agent && packet.review_task_id === reviewTaskID && packet.outcome === "pending");
+         if (activeReviewer) throw new Error("REVIEW_ALREADY_ACTIVE");
+         gateTarget = await gateTargetSnapshot(reviewTarget);
+         if (!gateTarget) throw new Error("REVIEW_TARGET_DENIED");
       }
-       const delegatedObjective = exactMandatoryTesterGate
-          ? exactMandatoryTesterObjective(authoritativeParentObjective, objectiveBeforeMarker(currentTaskObjective), durableGate)
-         : canonicalDelegatedObjective(authoritativeParentObjective, currentTaskObjective, { targetBound: Boolean(reviewTarget) });
+       const canonicalReviewObjective = reviewTarget
+         ? canonicalDelegatedObjective(authoritativeParentObjective, `Review completed work review_task_id=${reviewTaskID}`, { targetBound: true })
+         : "";
+        const delegatedObjective = exactMandatoryTesterGate
+            ? exactMandatoryTesterObjective(authoritativeParentObjective, objectiveBeforeMarker(currentTaskObjective), durableGate)
+            : reviewTarget
+              ? canonicalReviewObjective ? `${canonicalReviewObjective}\nReturn APPROVE or REJECT as the terminal verdict, followed by concise findings.` : ""
+           : canonicalDelegatedObjective(authoritativeParentObjective, currentTaskObjective, { targetBound: Boolean(reviewTarget) });
       if (!delegatedObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
       output.args.prompt = delegatedObjective;
       if (guard) {
@@ -2134,8 +2327,10 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
             explicitlyRequestedReview: /\b(?:review|audit)\b/i.test(parentObjective || "") || Boolean(reviewTarget),
          });
          const gateRoot = rootParent === input.sessionID ? rootGuard : guardrails.get(rootParent);
-         const admittedWithGate = agent === "tester" && gateRoot?.pendingVerificationPacketID === testTaskID
-           ? { ...admittedGuard, pendingTesterActive: true } : admittedGuard;
+          const admittedWithGate = ["reviewer", "reviewer_critical"].includes(agent)
+            ? { ...admittedGuard, pendingVerificationPacketID: null, pendingTesterActive: false }
+            : agent === "tester" && gateRoot?.pendingVerificationPacketID === testTaskID
+              ? { ...admittedGuard, pendingTesterActive: true } : admittedGuard;
          guardrails.set(input.sessionID, admittedWithGate);
          if (agent === "tester" && gateRoot?.pendingVerificationPacketID === testTaskID && rootParent !== input.sessionID) {
            guardrails.set(rootParent, { ...gateRoot, pendingTesterActive: true });
@@ -2149,9 +2344,9 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        throw error;
      }
      const configuredModel = DEFAULT_AGENT_MODELS[agent];
-     if (resolvedModel && configuredModel && resolvedModel !== configuredModel) {
-       throw new Error(`OPENAI MODEL MATRIX: model override '${resolvedModel}' is not permitted for ${agent}; required '${configuredModel}'.`);
-     }
+      if (resolvedModel && configuredModel && resolvedModel !== configuredModel && !exactMandatoryReviewerGate) {
+        throw new Error(`OPENAI MODEL MATRIX: model override '${resolvedModel}' is not permitted for ${agent}; required '${configuredModel}'.`);
+      }
      const selectedModel = configuredModel || DEFAULT_AGENT_MODELS[agent] || "openai/default";
      if (process.env.OPENAI_DAILY_PROFILE === "1") {
        assertDailyProviderModel({ model: selectedModel });
@@ -2207,7 +2402,12 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        const testerMetadata = agent === "tester" && gateTarget ? testerVerificationMetadata(gateTarget) : null;
        const verificationCommands = testerMetadata?.verification_commands || criteriaFrom(currentTaskObjective);
        const expectedVerificationHashes = testerMetadata?.expected_verification_hashes || verificationCommands.filter(isAllowlistedVerificationCommand).map((command) => createHash("sha256").update(command).digest("hex"));
-       const packetMetadata = { task_id: fingerprint, task_fingerprint: fingerprint, task_lease_id: claim.record.lease_id, packet_id: claim.record.packet_id, workspace_fingerprint: workspace.fingerprint, cache_status: cacheableRead ? "miss" : "bypass", complexity: analysis.complexity, codex_profile: analysis.codex_profile, reasoning_effort: analysis.reasoning_effort, risk: analysis.risk, review_required: analysis.review_required, discovery_group_id: discoveryGroupID, discovery_required_lanes: analysis.discovery_agents, attempt: claim.record.attempt, retry_count: claim.record.attempt - 1, tool_call_count: 0, wrapper_round_trips: 0, acceptance_criteria: verificationCommands, verification_commands: verificationCommands, expected_verification_hashes: expectedVerificationHashes, tester_status: agent === "tester" ? "pending" : undefined, test_task_id: agent === "tester" ? (testTaskID || claim.record.packet_id) : testTaskID || undefined };
+          const authoritativeAnalysis = analyzeObjective(authoritativeParentObjective);
+          const riskRank = { low: 0, high: 1, critical: 2 };
+          const effectiveRisk = (riskRank[authoritativeAnalysis.risk] || 0) > (riskRank[analysis.risk] || 0) ? authoritativeAnalysis.risk : analysis.risk;
+          const inheritedReviewRequired = agent === "codex_executor" && authoritativeAnalysis.review_required;
+          const reviewRequired = analysis.review_required || inheritedReviewRequired;
+          const packetMetadata = { task_id: fingerprint, task_fingerprint: fingerprint, task_lease_id: claim.record.lease_id, packet_id: claim.record.packet_id, workspace_fingerprint: workspace.fingerprint, cache_status: cacheableRead ? "miss" : "bypass", complexity: analysis.complexity, codex_profile: effectiveRisk === "critical" ? "complex" : analysis.codex_profile, reasoning_effort: analysis.reasoning_effort, risk: effectiveRisk, review_required: reviewRequired, discovery_group_id: discoveryGroupID, discovery_required_lanes: analysis.discovery_agents, attempt: claim.record.attempt, retry_count: claim.record.attempt - 1, tool_call_count: 0, wrapper_round_trips: 0, acceptance_criteria: verificationCommands, verification_commands: verificationCommands, expected_verification_hashes: expectedVerificationHashes, tester_status: agent === "tester" ? "pending" : undefined, review_dispatch_state: agent === "codex_executor" && reviewRequired ? "pending" : undefined, test_task_id: agent === "tester" ? (testTaskID || claim.record.packet_id) : testTaskID || undefined };
       await recordLatency({ stage: "task_admission", outcome: admission.status === 0 ? "admitted" : "deferred", duration_ms: elapsed(admissionStartedAt), admission_wait_ms: elapsed(admissionStartedAt), agent, call_id: input.callID, ...eventMetadata({ ...packetMetadata, classification: route?.classification, task_call_id: input.callID }) });
      if (admission.status !== 0) {
        if (agent === "tester" && rootGuardForGate?.pendingVerificationPacketID === testTaskID) guardrails.set(rootParent, { ...rootGuardForGate, pendingTesterActive: false });
@@ -2232,7 +2432,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     try {
       const activePath = join(process.env.OPENAI_TEAM_STATE_ROOT || "/tmp", "active", `${admissionToken}.json`);
       const active = JSON.parse(await readFile(activePath, "utf8"));
-      await writeFile(activePath, `${JSON.stringify({ ...active, codex_profile: analysis.codex_profile, classification: route?.classification, complexity: analysis.complexity, risk: analysis.risk })}\n`, { mode: 0o600 });
+       await writeFile(activePath, `${JSON.stringify({ ...active, codex_profile: packetMetadata.codex_profile, classification: route?.classification, complexity: analysis.complexity, risk: packetMetadata.risk })}\n`, { mode: 0o600 });
     } catch (error) {
       await release(admissionToken);
       await transitionTask(fingerprint, { expectedVersion: claim.record.version, expectedStates: ["CLAIMED"], leaseId: claim.record.lease_id, patch: { state: "FAILED", retryable: true, error_code: "ADMISSION_METADATA_FAILED" } });
@@ -2286,6 +2486,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     try {
        const foregroundChildID = !pending.background ? foregroundChildSessionID(pending, output?.metadata) : null;
       if (!pending.background) await bindExactChildReservation(pending, foregroundChildID, { readTask, advanceTask, updateWorkPacket, updateWorkPacketByID });
+      await writeRuntimeStatus(runtimeChildStatus(pending, foregroundChildID));
      if (!pending.background && pending.role === "codex_executor") {
        const childPacket = (await listWorkPackets()).find((entry) => entry.packet_id === pending.packet_id && entry.child_session_id === foregroundChildID);
        const childTask = await readTask(pending.task_fingerprint);
@@ -2312,7 +2513,18 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const validation = await validateGateTarget(pending, pending.review_task_id);
       if (validation.code) gateEvent = validation;
       else {
-      const parsed = parseReviewerVerdict(resultSummary(output));
+       let reviewerResult = resultSummary(output);
+       try {
+         const response = await pluginInput.client?.session?.messages({ path: { id: pending.child_session_id } });
+         const messages = unwrapData(response);
+         const terminalText = (Array.isArray(messages) ? messages : [])
+           .filter((message) => message?.info?.role === "assistant" || message?.role === "assistant")
+           .map((message) => messageTextFromParts(message.parts || message?.info?.parts))
+           .filter(Boolean)
+           .at(-1);
+         if (terminalText) reviewerResult = terminalText;
+       } catch {}
+       const parsed = parseReviewerVerdict(reviewerResult);
       const update = !parsed
         ? await updateWorkPacketByIDIfCurrent(pending.review_task_id, { review_status: "pending" }, { error_code: "REVIEW_RESULT_INVALID", phase: "pending_review" })
         : await updateWorkPacketByIDIfCurrent(pending.review_task_id, { review_status: "pending" }, {
@@ -2323,8 +2535,13 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       // The comparison and write share the packet lock: only one conflicting
       // terminal callback can transition a pending/invalid reviewer result.
       const target = update.packet || validation.packet;
-      if (!parsed && update.matched) gateError = new Error("REVIEW_RESULT_INVALID");
-      await reconcileGateTarget(target);
+       if (!parsed && update.matched) gateError = new Error("REVIEW_RESULT_INVALID");
+       const settledTask = await reconcileGateTarget(target);
+       if (settledTask && ["COMPLETED", "FAILED"].includes(settledTask.state)) {
+         const rootID = masterParent(input.sessionID);
+         const rootState = guardrails.get(rootID);
+         if (rootState) guardrails.set(rootID, settleVerificationGateState(rootState, pending.review_task_id, settledTask.state));
+       }
       }
     }
     if (pending.role === "tester" && pending.test_task_id && !pending.background) {
@@ -2344,14 +2561,15 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        const update = await updateWorkPacketByIDIfCurrent(pending.test_task_id, { tester_status: ["pending", "required"] }, { tester_status: parsed.status === "passed" ? "passed" : "failed", ...(parsed.evidence ? { verification_evidence: parsed.evidence } : {}), ...(parsed.code ? { error_code: parsed.code } : {}) });
        const target = update.packet || validation.packet;
        await reconcileGateTarget(target);
-       if (parsed.status === "passed") {
-         await updateWorkPacketByIDIfCurrent(pending.packet_id, { tester_status: ["pending", "required"] }, {
-           phase: "foreground_completion",
-           outcome: "completed",
-           tester_status: "passed",
-           verification_status: "passed",
-         });
-       }
+        if (parsed.status === "passed") {
+          await updateWorkPacketByIDIfCurrent(pending.packet_id, { tester_status: ["pending", "required"] }, {
+            phase: "foreground_completion",
+            outcome: "completed",
+            tester_status: "passed",
+            verification_status: "passed",
+          });
+          await driveMandatoryReviewerForRoot(pending.master_parent_session_id, pending.test_task_id);
+        }
        if (update.matched && parsed.status !== "passed") gateError = new Error(parsed.code);
        }
     }
@@ -2360,19 +2578,20 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       return gateEvent;
     }
     if (gateError) throw gateError;
-    if (!pending.background) {
+      if (!pending.background) {
         // UI telemetry is best-effort only: a missing/failed SDK client must never
         // affect foreground task completion.
         await enrichTaskInvocationFromClient(output, pluginInput.client, foregroundChildID);
         const finalized = await finalizeReservation(pending, { outcome: "completed", result_summary: resultSummary(output), sessionID: foregroundChildID || null });
         if (finalized.code !== "LIFECYCLE_FINALIZED") throw new Error(finalized.code || "FOREGROUND_FINALIZATION_INCOMPLETE");
          await recordLatency({ stage: "task_foreground_total", outcome: "completed", duration_ms: elapsed(pending.started_at), agent: pending.role, call_id: input.callID, ...eventMetadata(pending) });
-        const completedPacket = await updateWorkPacket(pending.task_call_id, { phase: "foreground_completion", outcome: "completed", duration_ms: elapsed(pending.started_at), cache_status: pending.cacheable_read ? "stored" : pending.cache_status, ...(pending.role === "tester" && !pending.test_task_id ? { tester_status: "passed" } : {}) });
+         const completedPacket = await updateWorkPacket(pending.task_call_id, { phase: "foreground_completion", outcome: "completed", duration_ms: elapsed(pending.started_at), cache_status: pending.cacheable_read ? "stored" : pending.cache_status, ...(pending.role === "tester" && !pending.test_task_id ? { tester_status: "passed" } : {}) });
         if (!completedPacket) throw new Error("FOREGROUND_PACKET_UPDATE_FAILED");
-        if (pending.child_session_id) {
-          packetCallBySession.delete(pending.child_session_id); bufferedOpenCodeTokens.delete(pending.child_session_id);
-        }
-        return gateEvent || undefined;
+         if (pending.child_session_id) {
+           packetCallBySession.delete(pending.child_session_id); bufferedOpenCodeTokens.delete(pending.child_session_id);
+         }
+         await writeRuntimeStatus({ status: "RUNNING", stage: "root_processing", active_child_session_id: null, active_child_agent: null, provider: null, model: null }, { expectedChildSessionID: foregroundChildID });
+         return gateEvent || undefined;
     }
     const childID = childSessionIdFromAfter(output.metadata);
     if (!childID) {
@@ -2398,7 +2617,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       await ensurePolicy(childID, { agent: "codex_executor", master_parent_session_id: pending.master_parent_session_id, task_call_id: boundPacket?.packet_id || pending.packet_id, task_id: pending.task_id, task_fingerprint: pending.task_fingerprint, attempt: pending.attempt, task_lease_id: pending.task_lease_id, packet_id: boundPacket?.packet_id || pending.packet_id });
       }
        packetCallBySession.set(childID, pending.packet_id);
-     reservations.set(childID, { ...pending, child_session_id: childID });
+      reservations.set(childID, { ...pending, child_session_id: childID });
+     await writeRuntimeStatus(runtimeChildStatus(pending, childID));
     await flushBufferedOpenCodeTokens(childID);
     reservations.delete(input.callID);
     } catch (error) {
@@ -2459,6 +2679,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
                 reservations.set(child.id, { ...pending, child_session_id: child.id });
                 reservations.delete(callID);
               }
+              await writeRuntimeStatus(runtimeChildStatus(pending, child.id));
              await flushBufferedOpenCodeTokens(child.id);
              await recordObjectiveEvent("objective_bound", child.id, pending.master_parent_session_id, pending.task_call_id, CODEX_REQUIRED, "BOUND");
           }
@@ -2470,14 +2691,16 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const pending = reservations.get(sessionID);
       if (pending) {
         if (pending.role === "tester" && pending.test_task_id && pending.child_session_id === sessionID) {
-           const gateResult = await settleTesterGate(pending, sessionID);
+           const gateResult = await settleTesterGate(pending, sessionID, event.type);
            if (gateResult?.pending) return;
+           if (gateResult?.passed) await driveMandatoryReviewerForRoot(pending.master_parent_session_id, pending.test_task_id);
            if (gateResult?.code && gateResult.code !== "STALE_GATE_EVENT") {
             try { await advanceTask(pending, "FAILED", { retryable: true, error_code: gateResult.code, result_summary: "tester_failed" }); } catch {}
           }
         }
         if (!pending.codex_terminal) {
-        const finalized = await lifecycleFinalization(pending, event.type, sessionID);
+         const finalized = await lifecycleFinalization(pending, event.type, sessionID);
+         await writeRuntimeStatus({ status: "RUNNING", stage: "root_processing", active_child_session_id: null, active_child_agent: null, provider: null, model: null }, { expectedChildSessionID: sessionID });
         if (finalized.code !== "LIFECYCLE_ALREADY_FINALIZED") {
          await recordLatency({ stage: "task_background_completion", outcome: event.type.replace("session.", ""), duration_ms: elapsed(pending.started_at), agent: pending.role, call_id: pending.task_call_id, session_id: sessionID, ...eventMetadata(pending) });
         }

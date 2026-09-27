@@ -1,14 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { createWorkPacket, readWorkPacketByID, updateWorkPacketByID } from "../teams/openai/config/opencode/work-packet.js";
+import { createWorkPacket, readWorkPacketByID, updateWorkPacketByID, updateWorkPacketByIDIfCurrent } from "../teams/openai/config/opencode/work-packet.js";
 import { claimTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
 import { gateTerminalPacketPatch, lifecycleCleanupOptions } from "../teams/openai/config/opencode/gate-state.js";
 import { beginRequestCycle, createGuardrailState, recoverRootRequestState, settleVerificationGateState, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
-import { enforcePendingMandatoryTesterGate, findPendingMandatoryTesterGate } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { driveMandatoryTesterContinuation, enforcePendingMandatoryTesterGate, findPendingMandatoryTesterGate } from "../teams/openai/config/opencode/openai-team-tools.js";
 
 test("idle cleanup is packet/task neutral", () => {
   assert.deepEqual(lifecycleCleanupOptions("session.idle", { packet: true, taskAction: "complete", terminal: false }), {
@@ -153,5 +153,52 @@ test("terminal tester PASS and FAIL remove the durable gate", async () => {
     assert.equal(await findPendingMandatoryTesterGate("fail-root"), null);
     assert.equal(failedPacket.outcome, "failed");
     assert.notEqual(failedPacket.outcome, "completed");
+  } finally { await rm(state, { recursive: true, force: true }); }
+});
+
+test("stale unbound tester admission is reclaimable but a bound tester remains active", async () => {
+  const state = await mkdtemp(join(tmpdir(), "stale-tester-"));
+  process.env.OPENAI_TEAM_STATE_ROOT = state;
+  process.env.OPENAI_TESTER_BIND_GRACE_MS = "1000";
+  try {
+    const rootSessionID = "stale-tester-root";
+    const { packet: codexPacket, task: codexTask } = await durableGateFixture(rootSessionID);
+    await updateWorkPacketByID(codexPacket.packet_id, { tester_dispatch_state: "requested" });
+    const staleTester = await createWorkPacket("stale-tester-call", {
+      parent_session_id: rootSessionID, agent: "tester", task_fingerprint: "a".repeat(64),
+      tester_status: "pending", test_task_id: codexPacket.packet_id, phase: "admitted", outcome: "pending",
+    });
+    const stalePath = join(state, "work-packets", `${staleTester.packet_id}.json`);
+    const staleRecord = await readFile(stalePath, "utf8").then(JSON.parse);
+    await writeFile(stalePath, `${JSON.stringify({ ...staleRecord, updated_at: new Date(Date.now() - 10_000).toISOString() })}\n`);
+    const dispatched = [];
+    const reclaimed = [];
+    let boundTester;
+    const deps = {
+      listWorkPackets: async () => [await readWorkPacketByID(codexPacket.packet_id), await readWorkPacketByID(staleTester.packet_id), boundTester ? await readWorkPacketByID(boundTester.packet_id) : null].filter(Boolean),
+      readTask: async (fingerprint) => fingerprint === codexTask.task_fingerprint ? codexTask : null,
+      updateWorkPacketByIDIfCurrent,
+      reclaimTester: async (packet) => { reclaimed.push(packet.packet_id); return true; },
+      enqueue: async (_root, text) => { dispatched.push(text); return { status: "ok" }; },
+    };
+    const gateBefore = await findPendingMandatoryTesterGate(rootSessionID, { listWorkPackets: deps.listWorkPackets, readTask: deps.readTask });
+    assert.ok(gateBefore, JSON.stringify(await deps.listWorkPackets()));
+    const first = await driveMandatoryTesterContinuation(rootSessionID, deps);
+    const second = await driveMandatoryTesterContinuation(rootSessionID, deps);
+    assert.equal(first.status, "requested");
+    assert.equal(second.status, "waiting");
+    assert.deepEqual(reclaimed, [staleTester.packet_id]);
+    assert.equal(dispatched.length, 1);
+
+    boundTester = await createWorkPacket("bound-tester-call", {
+      parent_session_id: rootSessionID, agent: "tester", task_fingerprint: "b".repeat(64),
+      tester_status: "pending", test_task_id: codexPacket.packet_id, phase: "admitted", outcome: "pending",
+    });
+    await updateWorkPacketByID(boundTester.packet_id, { child_session_id: "real-tester-child", phase: "background_bound", outcome: "running" });
+    assert.equal((await readWorkPacketByID(boundTester.packet_id)).child_session_id, "real-tester-child");
+    await updateWorkPacketByID(codexPacket.packet_id, { tester_dispatch_state: "requested" });
+    const existing = await driveMandatoryTesterContinuation(rootSessionID, deps);
+    assert.equal(existing.status, "existing");
+    assert.equal(dispatched.length, 1);
   } finally { await rm(state, { recursive: true, force: true }); }
 });

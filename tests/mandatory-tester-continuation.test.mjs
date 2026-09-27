@@ -4,11 +4,11 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { codexResult, createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext, isMandatoryTesterPacketForSession, resolveMandatoryTesterPacketForSession, mandatoryTesterToolDecision, mandatoryTesterCommandOnlyError } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { codexResult, createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, testerSettlementCanProceed, testerSettlementPacketPatch, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext, isMandatoryTesterPacketForSession, resolveMandatoryTesterPacketForSession, mandatoryTesterToolDecision, mandatoryTesterCommandOnlyError } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { verificationCommandCategory, parseVerificationEvidence } from "../teams/openai/config/opencode/execution-policy.js";
 import { gateTerminalPacketPatch } from "../teams/openai/config/opencode/gate-state.js";
 import { claimTask, completeTask, readTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
-import { isInternalContinuation } from "../teams/openai/config/opencode/openai-guardrails.js";
+import { isInternalContinuation, settleVerificationGateState } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { createWorkPacket, updateWorkPacket, listWorkPackets } from "../teams/openai/config/opencode/work-packet.js";
 import { resolveCorrelatedTesterReservation } from "../teams/openai/config/opencode/reservation-correlation.js";
 
@@ -381,6 +381,30 @@ test("deterministic mandatory tester lifecycle reaches completed PASS", async ()
   assert.equal(packet.tester_status, "passed");
   assert.equal(packet.verification_status, "passed");
   assert.equal(packet.outcome, "completed");
+});
+
+test("bound tester error without verification evidence settles the tester and target without redispatch", async () => {
+  const testerPacket = { ...gate("tester-packet"), child_session_id: "tester-child", phase: "background_completion", outcome: "error", verification_status: undefined };
+  const targetPacket = { ...gate("target-packet"), tester_status: "pending", verification_status: undefined };
+  const rootGuardrail = { pendingVerificationPacketID: targetPacket.packet_id, pendingTesterActive: true };
+  assert.equal(testerSettlementCanProceed("session.error", false), true);
+  assert.equal(testerSettlementCanProceed("session.idle", false), false);
+  Object.assign(testerPacket, testerSettlementPacketPatch(false));
+  Object.assign(targetPacket, { tester_status: "failed", error_code: "TEST_RESULT_INVALID" });
+  const targetTask = { state: "FAILED", error_code: "TEST_RESULT_INVALID" };
+  const settledGuardrail = settleVerificationGateState(rootGuardrail, targetPacket.packet_id, targetTask.state);
+  assert.equal(testerPacket.tester_status, "failed");
+  assert.equal(testerPacket.verification_status, "failed");
+  assert.equal(testerPacket.error_code, "TEST_RESULT_INVALID");
+  assert.equal(testerPacket.phase, "background_completion");
+  assert.equal(testerPacket.outcome, "error");
+  assert.equal(targetTask.state, "FAILED");
+  assert.equal(targetPacket.tester_status, "failed");
+  assert.equal(targetPacket.error_code, "TEST_RESULT_INVALID");
+  assert.equal(settledGuardrail.pendingVerificationPacketID, null);
+  assert.equal(settledGuardrail.pendingTesterActive, false);
+  assert.equal(mandatoryTesterDispatchTrigger("session.error"), false);
+  assert.equal(mandatoryTesterDispatchTrigger("session.idle"), true);
 });
 
 test("denied tester Bash attempts are ignored before completed evidence", () => {

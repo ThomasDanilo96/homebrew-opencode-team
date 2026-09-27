@@ -94,7 +94,8 @@ export const postExecutionPolicy = ({ classification, complexity = null, risk = 
   const reviewer_route = risk === "critical" ? "reviewer_critical" : review_required ? "reviewer" : "specialist";
   if (classification !== "MUTATING") return { next_agents: [], reasons: ["read_only_no_post_agent"], reviewer_route: review_required ? "specialist" : null, complexity, verification_status: "not_applicable" };
   if (codex_outcome !== "success") return { next_agents: [], reasons: ["codex_not_successful"], reviewer_route: null, complexity, verification_status };
-  const next_agents = risk === "critical" ? ["reviewer_critical", "tester"] : risky ? ["reviewer", "tester"] : verified ? [] : ["tester"];
-  const reasons = risky ? ["risky_mutation_requires_reviewer", "risky_mutation_requires_tester"] : verified ? ["focused_verification_passed"] : ["focused_verification_missing_or_failed"];
+  const reviewerRequired = review_required === true || risky;
+  const next_agents = risk === "critical" ? ["reviewer_critical", "tester"] : reviewerRequired ? ["reviewer", "tester"] : verified ? [] : ["tester"];
+  const reasons = reviewerRequired ? ["review_required", "tester_required"] : verified ? ["focused_verification_passed"] : ["focused_verification_missing_or_failed"];
   return { next_agents, reasons, reviewer_route, complexity, verification_status };
 };

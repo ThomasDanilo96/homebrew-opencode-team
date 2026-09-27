@@ -22,6 +22,7 @@ const CRITICAL_AUDIT_OR_REVIEW = /\b(?:critical\s+security|security\s+critical|r
 const EXPLICIT_REVIEW = /\b(?:audit|correctness|security\s+review|architecture\s+review|critical\s+review|review(?!\s+architecture))\b/i;
 const STRONG_MUTATION = /\b(?:create|modify|change|implement|refactor|migrat(?:e|ion)?|patch|delete|rename|update|deploy)\b|\bwrite\s+(?:code|file|files|script|implementation|changes?)\b/i;
 const HIGH_RISK = /\b(?:security|auth(?:entication|orization)?|schema|data\s+(?:delet(?:e|ion)|removal)|delete\s+(?:production\s+)?data|shared\s+runtime|concurren(?:cy|t)|cleanup|deploy(?:ment)?)\b/i;
+const EXPLICIT_REVIEW_GATE = /\b(?:reviewer|reviewer\s+gate|review\s+gate)\b/i;
 
 const unquoted = (text) => text.replace(QUOTED_TERM, " ");
 const withoutNegatedMutations = (text) => text.replace(NEGATED_MUTATION, " ");
@@ -65,7 +66,7 @@ export const analyzeObjective = (objective) => {
   const discovery_agents = classification === "READ_ONLY" && repository && LIBRARY.test(plain) ? [...new Set([agent, "openai_librarian"])] : [];
   const intent_evidence = [...clauses.map(({ intent }, index) => `clause-${index + 1}:${intent.toLowerCase()}`), ...(repository ? ["scope:repository"] : []), ...(remote ? ["scope:remote"] : []), ...(LIBRARY.test(plain) ? ["scope:external-docs"] : []), ...(HIGH_RISK.test(plain) ? ["scope:high-risk"] : [])].slice(0, 8);
   const codex_profile = classification !== "MUTATING" ? null : complexity === "TRIVIAL" ? "quick" : risk === "critical" || ["COMPLEX", "HEAVY", "EXTREME"].includes(complexity) ? "complex" : "standard";
-  return { classification, clauses, agent, complexity, fanout_limit: dailyFanout(complexity), reasoning_effort: complexity === "EXTREME" ? "high" : complexity === "HEAVY" ? "medium" : "low", risk, review_required: classification === "MUTATING" && (risk === "high" || risk === "critical"), codex_profile, discovery_agents, intent_evidence };
+  return { classification, clauses, agent, complexity, fanout_limit: dailyFanout(complexity), reasoning_effort: complexity === "EXTREME" ? "high" : complexity === "HEAVY" ? "medium" : "low", risk, review_required: classification === "MUTATING" && (risk === "high" || risk === "critical" || EXPLICIT_REVIEW_GATE.test(plain)), codex_profile, discovery_agents, intent_evidence };
 };
 
 export const classifyObjective = (objective) => analyzeObjective(objective).classification;
@@ -82,6 +83,16 @@ export const selectAuthoritativeObjective = (currentObjective, fallbackObjective
 
 export const routeDelegatedAgent = (parentObjective, childObjective, requestedAgent = "") => {
   const analysis = analyzeObjective(childObjective);
+  const childText = String(childObjective || "");
+  const explicitReviewerTarget = ["reviewer", "reviewer_critical"].includes(requestedAgent)
+    && /\breview_task_id\s*=\s*[a-f0-9]{64}\b/i.test(childText);
+  if (explicitReviewerTarget) return { classification: "READ_ONLY", agent: requestedAgent };
+  const explicitReadOnlyWorker = /\b(?:inspect|analy[sz]e|read|report)\b/i.test(childText)
+    && /\b(?:do not|don't|must not|never)\s+(?:edit|modify|change|write|mutate)\b/i.test(childText);
+  if (explicitReadOnlyWorker) {
+    const agent = READ_ONLY_AGENTS.has(requestedAgent) ? requestedAgent : "specialist";
+    return { classification: "READ_ONLY", agent };
+  }
   if (analysis.classification === "MUTATING" || analysis.classification === "REMOTE_MUTATION") {
     return { classification: analysis.classification, agent: analysis.agent };
   }

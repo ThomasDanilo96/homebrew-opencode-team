@@ -6,18 +6,19 @@ export const childSessionIdFromAfter = (metadata) => {
 };
 
 export const resolveTesterChildSessionID = (pending, metadata) => {
-  if (!pending?.child_session_id) throw new Error("TEST_CHILD_SESSION_MISSING");
+  const expectedChild = pending?.child_session_id || pending?.provisional_child_session_id;
+  if (!expectedChild) throw new Error("TEST_CHILD_SESSION_MISSING");
   const populated = ["sessionId", "sessionID", "session_id"]
     .map((key) => metadata?.[key])
     .filter((value) => typeof value === "string" && value.length > 0);
-  if (populated.some((value) => value !== pending.child_session_id) || new Set(populated).size > 1) {
+  if (populated.some((value) => value !== expectedChild) || new Set(populated).size > 1) {
     throw new Error("TEST_CHILD_SESSION_MISMATCH");
   }
-  return pending.child_session_id;
+  return expectedChild;
 };
 
 export const foregroundChildSessionID = (pending, metadata) =>
-  pending?.role === "tester" && pending.child_session_id
+  pending?.role === "tester" && (pending.child_session_id || pending.provisional_child_session_id)
     ? resolveTesterChildSessionID(pending, metadata)
     : childSessionIdFromAfter(metadata);
 

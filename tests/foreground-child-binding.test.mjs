@@ -105,6 +105,7 @@ test("tester finalization uses the durable child when after metadata is absent",
   assert.equal(evidence.summary.status, "passed");
   assert.throws(() => resolveTesterChildSessionID(pending, { sessionId: "other-child" }), /TEST_CHILD_SESSION_MISMATCH/);
   assert.throws(() => foregroundChildSessionID({ ...pending, role: "tester" }, { sessionId: "child-1", session_id: "other-child" }), /TEST_CHILD_SESSION_MISMATCH/);
+  assert.equal(foregroundChildSessionID({ ...pending, child_session_id: null, provisional_child_session_id: "child-1", role: "tester" }, undefined), "child-1");
 });
 
 test("exact after binding must match a provisional child", async () => {

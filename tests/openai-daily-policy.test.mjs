@@ -10,6 +10,7 @@ import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective } f
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
 import { latestUserObjective, OpenAITeamTools, resolveInitialObjectiveFromClient } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { resolveCodexModels } from "../teams/openai/config/opencode/codex-models.js";
+import { postExecutionPolicy } from "../teams/openai/config/opencode/execution-policy.js";
 
 test("Daily shell policy is bounded by the genuine objective", () => {
   const env = { OPENAI_DAILY_PROFILE: "1" };
@@ -32,10 +33,22 @@ test("mandatory tester gate allows only the exact tester task and blocks root sh
   assert.equal(verificationGateDecision(pending, "bash", "openai_orchestrator", "printf ok").reason, "MANDATORY_TESTER_GATE");
   assert.equal(verificationGateDecision(createGuardrailState(), "bash", "openai_orchestrator", "printf ok").allowed, true);
   assert.equal(verificationGateDecision(pending, "task", "tester", `verify test_task_id=${packetID}`).allowed, true);
+  assert.equal(verificationGateDecision(pending, "bash", "tester", "node gated.test.js", true).allowed, true);
+  assert.equal(verificationGateDecision(pending, "bash", "tester", "node gated.test.js").reason, "MANDATORY_TESTER_GATE");
   for (const [agent, prompt] of [["tester", "verify"], ["tester", `verify test_task_id=${"b".repeat(64)}`], ["specialist", `verify test_task_id=${packetID}`]]) {
     assert.equal(verificationGateDecision(pending, "task", agent, prompt).reason, "MANDATORY_TESTER_GATE");
   }
   assert.equal(verificationGateDecision({ ...pending, pendingTesterActive: true }, "task", "tester", `verify test_task_id=${packetID}`).reason, "TESTER_ALREADY_ACTIVE");
+});
+
+test("mandatory gate survives a root request cycle and admits only its exact reviewer after tester completion", () => {
+  const packetID = "a".repeat(64);
+  const pending = { ...createGuardrailState(), pendingVerificationPacketID: packetID };
+  const cycled = beginRequestCycle(pending, "continue the implementation", 1);
+  assert.equal(cycled.pendingVerificationPacketID, packetID);
+  assert.equal(verificationGateDecision(cycled, "task", "codex_executor", "implement another change").reason, "MANDATORY_TESTER_GATE");
+  assert.equal(verificationGateDecision(cycled, "task", "reviewer", `review review_task_id=${packetID}`).allowed, true);
+  assert.equal(verificationGateDecision(cycled, "task", "reviewer", `review review_task_id=${"b".repeat(64)}`).reason, "MANDATORY_TESTER_GATE");
 });
 
 test("Daily template enables only orchestrator shell access and runtime forwards SSH vars conditionally", async () => {
@@ -64,6 +77,50 @@ test("Daily uses OpenAI-only model tiers", () => {
   assert.equal(DAILY_AGENT_MODELS.reviewer, "openai/gpt-5.6-terra");
   assert.equal(DAILY_AGENT_MODELS.reviewer_critical, "openai/gpt-5.6-sol");
   assert.ok(Object.values(DAILY_AGENT_MODELS).every((model) => model.startsWith("openai/")));
+});
+
+test("Explicit review gates remain required for low-risk mutations", () => {
+  const policy = postExecutionPolicy({
+    classification: "MUTATING",
+    risk: "low",
+    review_required: true,
+    verification_evidence: [],
+    codex_outcome: "success",
+  });
+  assert.deepEqual(policy.next_agents, ["reviewer", "tester"]);
+  assert.equal(policy.reviewer_route, "reviewer");
+});
+
+test("Automatic reviewer prompts retain protocol target binding", () => {
+  const parent = "Implement multiply in calculator.js and calculator.test.js and require a reviewer gate";
+  const child = "Review completed work review_task_id=" + "a".repeat(64);
+  assert.notEqual(canonicalDelegatedObjective(parent, child, { targetBound: true }), "");
+});
+
+test("Root authority survives sequential Explore completion before Codex admission", () => {
+  const rootObjective = "Inspect the fixture, then add multiply(a, b) to calculator.js and calculator.test.js";
+  const exploreObjective = "Inspect calculator.js and calculator.test.js read-only; do not edit files";
+  const codexObjective = "Implement the requested change in the current fixture. You are the only implementation worker and MUST edit only these two files: calculator.js and calculator.test.js. Add multiply(a, b) to calculator.js, export it using the existing CommonJS style, and add one focused test assertion for multiplication to calculator.test.js matching the existing test style. Do not edit, create, delete, or rename any other files. Do not merely describe changes: make the edits. Do not run tests; a separate tester must run exactly node calculator.test.js. Return a concise summary of files changed.";
+  let root = beginRequestCycle(undefined, rootObjective, 1, { OPENAI_DAILY_PROFILE: "1" });
+  const explore = canonicalDelegatedObjective(rootObjective, exploreObjective);
+  root = admitDelegation(root, explore);
+  root = finishDelegation(root, false, explore);
+  root = { ...root, limits: { ...root.limits, delegations: 2 } };
+
+  const codex = canonicalDelegatedObjective(rootObjective, codexObjective);
+  const returnedToRoot = {
+    ...beginRequestCycle(root, codexObjective, 2, { OPENAI_DAILY_PROFILE: "1" }, { preserveVerificationGate: true }),
+    authoritativeObjective: rootObjective,
+  };
+  returnedToRoot.limits = { ...returnedToRoot.limits, delegations: 2 };
+  assert.equal(returnedToRoot.objective, codexObjective);
+  assert.equal(returnedToRoot.authoritativeObjective, rootObjective);
+  assert.equal(objectiveIsBound(returnedToRoot.objective, codex), false);
+  assert.doesNotThrow(() => admitDelegation(returnedToRoot, codex));
+
+  assert.throws(() => admitDelegation(returnedToRoot, canonicalDelegatedObjective(rootObjective, "Modify unrelated billing secrets")), /OBJECTIVE_UNBOUND/);
+  assert.equal(canonicalDelegatedObjective("Inspect the fixture read-only", "Modify calculator.js"), "");
+  assert.throws(() => admitDelegation(returnedToRoot, canonicalDelegatedObjective("Unrelated root objective", codexObjective)), /OBJECTIVE_UNBOUND/);
 });
 
 test("Daily provider boundary accepts only the frozen OpenAI model matrix", () => {
@@ -222,6 +279,8 @@ test("Guardrail task denials are recorded without prompt contents", async () => 
 
 test("Child review wording cannot override an explicitly requested read-only agent", () => {
   assert.equal(routeDelegatedAgent("Inspect the fixture structure", "Review the fixture structure", "openai_explore").agent, "openai_explore");
+  assert.equal(routeDelegatedAgent("Implement the fixture change", "Inspect the fixture first; do not edit files", "specialist").agent, "specialist");
+  assert.deepEqual(routeDelegatedAgent("Implement the fixture change", "Inspect the fixture first; do not edit files", "codex_executor"), { classification: "READ_ONLY", agent: "specialist" });
   assert.equal(routeDelegatedAgent("Review the fixture structure", "Review the fixture structure", "openai_explore").agent, "reviewer");
   assert.equal(routeDelegatedAgent("Critical security review of the fixture", "Review the fixture structure", "openai_explore").agent, "reviewer_critical");
   assert.equal(routeDelegatedAgent("Inspect the fixture structure", "Review the fixture structure", "reviewer").agent, "reviewer");
@@ -543,6 +602,29 @@ test("Recovered Daily HEAVY root objective admits three delegations", () => {
   assert.equal(state.limits.delegations, 3);
   for (let index = 0; index < 3; index += 1) state = admitDelegation(state, `implement a shared runtime change; slice-${index}`);
   assert.equal(state.delegations, 3);
+  assert.throws(() => admitDelegation(state, "implement a shared runtime change; slice-3"), (error) => error instanceof GuardrailPolicyError && error.code === "OPENAI_GUARDRAIL_DELEGATION_LIMIT");
+});
+
+test("Recovered Daily EXTREME root objective denies a fourth delegation", () => {
+  let state = recoverRootRequestState(createGuardrailState({}, 0), "implement an end-to-end runtime recovery", 0, { OPENAI_DAILY_PROFILE: "1" });
+  assert.equal(state.limits.delegations, 3);
+  for (let index = 0; index < 3; index += 1) state = admitDelegation(state, `implement an end-to-end runtime recovery; slice-${index}`);
+  assert.throws(() => admitDelegation(state, "implement an end-to-end runtime recovery; slice-3"), (error) => error instanceof GuardrailPolicyError && error.code === "OPENAI_GUARDRAIL_DELEGATION_LIMIT");
+});
+
+test("Authorized reviewer may reuse the gated mutation scope", () => {
+  const objective = "implement a shared runtime change";
+  let state = beginRequestCycle(undefined, objective, 0, { OPENAI_DAILY_PROFILE: "1" });
+  state = admitDelegation(state, objective);
+  assert.doesNotThrow(() => admitDelegation(state, objective, { review: true, explicitlyRequestedReview: true }));
+});
+
+test("mandatory critical reviewer keeps target binding separate from verdict instructions", () => {
+  const parent = "implement a shared runtime authorship change";
+  const taskID = "a".repeat(64);
+  const bound = canonicalDelegatedObjective(parent, `Review completed work review_task_id=${taskID}`, { targetBound: true });
+  assert.match(bound, new RegExp(`review_task_id=${taskID}`));
+  assert.equal(canonicalDelegatedObjective(parent, `Review completed work review_task_id=${taskID}. Return APPROVE or REJECT as the terminal verdict, followed by concise findings.`, { targetBound: true }), "");
 });
 
 test("Late root recovery preserves consumed and terminal state", () => {
