@@ -68,6 +68,28 @@ export const retainParentCallReservation = (reservationMap, reservation, outcome
   reservationMap.set(reservation.task_call_id, { ...reservation, token: null });
   return true;
 };
+
+export const terminalCodexFailureForRootObjective = (
+  packets = [],
+  rootSessionID = "",
+  rootObjectiveSHA = "",
+) => {
+  if (
+    !Array.isArray(packets)
+    || typeof rootSessionID !== "string"
+    || !rootSessionID
+    || typeof rootObjectiveSHA !== "string"
+    || !/^[a-f0-9]{64}$/i.test(rootObjectiveSHA)
+  ) return null;
+
+  return packets.find((packet) =>
+    packet?.agent === "codex_executor"
+    && packet?.parent_session_id === rootSessionID
+    && packet?.root_objective_sha256 === rootObjectiveSHA
+    && packet?.outcome === "failed"
+    && packet?.retryable === false
+  ) || null;
+};
 const PREMIUM_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-sol", openai_explore: "openai/gpt-5.6-luna-fast", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-terra", reviewer: "openai/gpt-5.6-sol", reviewer_critical: "openai/gpt-6-astra", specialist: "openai/gpt-6-astra", codex_executor: "openai/gpt-5.6-luna-fast" };
 const DAILY_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-luna", openai_explore: "openai/gpt-5.6-luna", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-luna", reviewer: "openai/gpt-5.6-terra", reviewer_critical: "openai/gpt-5.6-sol", specialist: "openai/gpt-5.6-terra", codex_executor: "openai/gpt-5.6-luna" };
 export const agentModelsForEnv = (env = process.env) =>
@@ -826,7 +848,23 @@ export const discoverWorkspaceVerificationCommands = async (repository) => {
       && /(?:\.test|\.spec|^test|^spec)\.js$/.test(entry.name))
     .map((entry) => `node ${entry.name}`)
     .filter((command) => isAllowlistedVerificationCommand(command));
-  return candidates.length === 1 ? candidates : [];
+  if (candidates.length === 1) return candidates;
+
+  try {
+    const insideWorkTree = execFileSync(
+      "git",
+      ["rev-parse", "--is-inside-work-tree"],
+      {
+        cwd: directory,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    ).trim();
+
+    if (insideWorkTree === "true") return ["git diff --check"];
+  } catch {}
+
+  return [];
 };
 export const validatedVerificationAuthorization = (packet = {}) => {
   const recordedHashes = new Set(parseSerializedArray(packet?.expected_verification_hashes)
@@ -2157,7 +2195,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
                verification_evidence: verificationEvidence, next_agents: [], policy_reasons: ["TEST_COMMAND_UNAVAILABLE"],
                review_status: reviewPending ? "pending" : "not_required", tester_required: true, tester_status: "failed", verification_status: "missing",
                verification_recognized_count: verificationEvidence.summary?.recognized_count || 0, verification_passed_count: verificationEvidence.summary?.passed_count || 0, verification_failed_count: verificationEvidence.summary?.failed_count || 0, verification_truncated_count: verificationEvidence.summary?.truncated_count || 0,
-               phase: "foreground_completion", outcome: "failed", codex_outcome: "failed", error_code: "TEST_COMMAND_UNAVAILABLE",
+               phase: "foreground_completion", outcome: "failed", codex_outcome: "failed",
+               retryable: false, error_code: "TEST_COMMAND_UNAVAILABLE",
              });
              const unavailable = codexResult({ status: "failed", kind: "failed", code: "TEST_COMMAND_UNAVAILABLE", retryable: false, task_id: reservation?.task_fingerprint || null, packet_id: packet?.packet_id || null, attempt: reservation?.attempt || 1, tester_required: true, tester_status: "failed", verification_status: "missing", next_agents: [], reasons: ["TEST_COMMAND_UNAVAILABLE"] });
              await report(unavailable);
@@ -2469,6 +2508,23 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
               ? canonicalReviewObjective ? `${canonicalReviewObjective}\nReturn APPROVE or REJECT as the terminal verdict, followed by concise findings.` : ""
            : canonicalDelegatedObjective(authoritativeParentObjective, currentTaskObjective, { targetBound: Boolean(reviewTarget) });
       if (!delegatedObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
+
+      if (agent === "codex_executor") {
+        const rootObjectiveSHA = objectiveHash(authoritativeParentObjective);
+        const durableTerminalFailure = terminalCodexFailureForRootObjective(
+          await listWorkPackets(),
+          rootParent,
+          rootObjectiveSHA,
+        );
+
+        if (rootGuard?.codexFailureTerminal || durableTerminalFailure) {
+          const error = new Error("CODEX_RETRY_DENIED");
+          error.code = "CODEX_RETRY_DENIED";
+          error.retryable = false;
+          throw error;
+        }
+      }
+
       output.args.prompt = delegatedObjective;
       if (guard) {
        if (guard.activeDelegation) {
@@ -2619,12 +2675,15 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       authoritative_objective: agent === "codex_executor" ? delegatedObjective : "",
        review_task_id: reviewTaskID, test_task_id: testTaskID, gate_target: gateTarget,
        objective_sha256: objectiveHash(delegatedObjective),
+       root_objective_sha256: objectiveHash(authoritativeParentObjective),
         classification: route?.classification, cacheable_read: cacheableRead, ...packetMetadata, test_task_id: testTaskID,
          task_id: fingerprint, task_state_version: claim.record.version, task_lease_id: claim.record.lease_id, task_fingerprint: fingerprint, packet_id: claim.record.packet_id, delegation_scope: delegationScope(delegatedObjective),
     });
     try {
       await createWorkPacket(input.callID, {
-        objective_sha256: objectiveHash(delegatedObjective), parent_session_id: rootParent,
+        objective_sha256: objectiveHash(delegatedObjective),
+        root_objective_sha256: objectiveHash(authoritativeParentObjective),
+        parent_session_id: rootParent,
         agent, task_fingerprint: fingerprint, attempt: claim.record.attempt, task_lease_id: claim.record.lease_id, classification: route?.classification, phase: "admitted", outcome: "pending",
          admission_wait_ms: elapsed(admissionStartedAt),
          ...packetMetadata, review_task_id: reviewTaskID, test_task_id: testTaskID, gate_target: gateTarget ? (reviewTaskID || testTaskID) : null,

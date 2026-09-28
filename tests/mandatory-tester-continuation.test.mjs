@@ -1,10 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { codexResult, createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, findPendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, testerSettlementCanProceed, testerSettlementPacketPatch, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext, isMandatoryTesterPacketForSession, resolveMandatoryTesterPacketForSession, mandatoryTesterToolDecision, mandatoryTesterCommandOnlyError, OpenAITeamTools } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { codexResult, createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, discoverWorkspaceVerificationCommands, terminalCodexFailureForRootObjective, enforcePendingMandatoryTesterGate, findPendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, testerSettlementCanProceed, testerSettlementPacketPatch, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext, isMandatoryTesterPacketForSession, resolveMandatoryTesterPacketForSession, mandatoryTesterToolDecision, mandatoryTesterCommandOnlyError, OpenAITeamTools } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { verificationCommandCategory, parseVerificationEvidence } from "../teams/openai/config/opencode/execution-policy.js";
 import { gateTerminalPacketPatch } from "../teams/openai/config/opencode/gate-state.js";
 import { claimTask, completeTask, readTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
@@ -26,6 +27,75 @@ const depsFor = (packets, extra = {}) => ({
     return { matched, packet: current };
   },
   ...extra,
+});
+
+
+test("verification discovery falls back to git diff --check for a git repository without one unique test command", async () => {
+  const repository = await mkdtemp(join(tmpdir(), "daily-verification-fallback-"));
+  try {
+    const init = spawnSync("git", ["init", "-q"], {
+      cwd: repository,
+      encoding: "utf8",
+    });
+    assert.equal(init.status, 0, init.stderr);
+
+    assert.deepEqual(
+      await discoverWorkspaceVerificationCommands(repository),
+      ["git diff --check"],
+    );
+    assert.equal(
+      verificationCommandCategory("git diff --check"),
+      "git_diff_check",
+    );
+  } finally {
+    await rm(repository, { recursive: true, force: true });
+  }
+});
+
+test("terminal non-retryable Codex failure is fenced by root objective, not rephrased child objective", () => {
+  const rootObjectiveSHA = createHash("sha256")
+    .update("Apply the requested linguistic corrections")
+    .digest("hex");
+
+  const packets = [{
+    packet_id: "f".repeat(64),
+    agent: "codex_executor",
+    parent_session_id: root,
+    root_objective_sha256: rootObjectiveSHA,
+    objective_sha256: createHash("sha256")
+      .update("first child wording")
+      .digest("hex"),
+    outcome: "failed",
+    retryable: false,
+    error_code: "TEST_COMMAND_UNAVAILABLE",
+  }];
+
+  assert.equal(
+    terminalCodexFailureForRootObjective(
+      packets,
+      root,
+      rootObjectiveSHA,
+    )?.packet_id,
+    "f".repeat(64),
+  );
+
+  assert.equal(
+    terminalCodexFailureForRootObjective(
+      packets,
+      root,
+      createHash("sha256").update("genuinely new user request").digest("hex"),
+    ),
+    null,
+  );
+
+  assert.equal(
+    terminalCodexFailureForRootObjective(
+      [{ ...packets[0], retryable: true }],
+      root,
+      rootObjectiveSHA,
+    ),
+    null,
+  );
 });
 
 const productionDriverFor = (packets, prompts, failures = []) => createMandatoryTesterRootDriver({

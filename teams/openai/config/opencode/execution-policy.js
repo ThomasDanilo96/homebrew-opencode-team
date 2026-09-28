@@ -14,6 +14,7 @@ const commandCategory = (command) => {
   if (unsafe.test(command) || /\s-c(?:\s|$)|\bnode\s+-e\b/.test(command)) return null;
   const argv = command.trim().split(/\s+/);
   if (!argv.length || argv.some((part) => !part)) return null;
+  if (argv[0] === "git" && argv[1] === "diff" && argv[2] === "--check" && argv.length === 3) return "git_diff_check";
   if (argv[0] === "node" && argv[1] === "--check" && argv.length === 3 && safePath(argv[2])) return "node_check";
   if (argv[0] === "node" && argv[1] === "--test" && (argv.length === 2 || argv.slice(2).every((part) => safePath(part) || part === "--watch=false"))) return "node_test";
   if (argv[0] === "node" && argv.length === 2 && testFilePath(argv[1])) return "node_tests";
