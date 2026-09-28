@@ -460,6 +460,49 @@ test("Routing ignores explicitly negated mutations without hiding genuine mutati
   assert.equal(analyzeObjective("do not modify files; then delete the file").classification, "MUTATING");
 });
 
+
+test("Natural Italian editing requests are classified as mutating and close the Daily root tool surface", () => {
+  const objectives = [
+    "Applica tutte le correzioni linguistiche individuate nei template.",
+    "Apporta tutte le correzioni linguistiche individuate.",
+    "Sistema gli errori grammaticali nei template.",
+    "Sistemami tutti gli errori grammaticali nei template.",
+    "Correggi gli accenti errati nei template.",
+    "Aggiorna i testi dei template.",
+    "Sostituisci le forme senza accento con quelle corrette.",
+  ];
+
+  for (const objective of objectives) {
+    assert.equal(
+      analyzeObjective(objective).classification,
+      "MUTATING",
+      objective,
+    );
+
+    const restricted = dailyRootMutationToolPolicy({
+      daily: true,
+      agent: "openai_orchestrator",
+      root: true,
+      objective,
+      tools: {
+        task: true,
+        read: true,
+        bash: true,
+        apply_patch: true,
+        edit: true,
+        write: true,
+      },
+    });
+
+    assert.equal(restricted.task, true, objective);
+    assert.equal(restricted.read, false, objective);
+    assert.equal(restricted.bash, false, objective);
+    assert.equal(restricted.apply_patch, false, objective);
+    assert.equal(restricted.edit, false, objective);
+    assert.equal(restricted.write, false, objective);
+  }
+});
+
 test("Italian and English mutation scopes bind across languages without widening authority", () => {
   const italianParent = `Esegui un test controllato sul repository corrente.
 
