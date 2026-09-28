@@ -14,12 +14,13 @@ import { createRemoteReadTool } from "./openai-remote-ops.js";
 import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective, REPOSITORY_MUTATING_TOOLS } from "./openai-routing.js";
 import { parseVerificationEvidence, postExecutionPolicy, verificationCommandCategory, isAllowlistedVerificationCommand } from "./execution-policy.js";
 import { DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, runProcessAsync } from "./process-async.js";
+import { createCodexProgressParser, createCodexProgressTracker } from "./codex-progress.js";
 import { addWorkPacketTokensByID, createWorkPacket, incrementWorkPacketByID, listWorkPackets, readWorkPacketByID, pruneWorkPackets, tokenEventHash, updateWorkPacket, updateWorkPacketByID, updateWorkPacketByIDIfCurrent } from "./work-packet.js";
 import { TaskStateError, claimTask, completeTask, readTask, transitionTask } from "./task-state.js";
 import { workspaceFingerprint } from "./read-cache.js";
 import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
 import { gateTerminalPacketPatch, lifecycleCleanupOptions } from "./gate-state.js";
-import { GuardrailPolicyError, admitDelegation, admitToolCall, allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision, writeStopLatch } from "./openai-guardrails.js";
+import { GuardrailPolicyError, admitDelegation, admitToolCall, allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision, writeStopLatch } from "./openai-guardrails.js";
 import { guardToolExecution } from "../../../../shared/tool-output-guard.js";
 import { assertDailyProviderModel, dailySearchDecision } from "../../../daily/daily-policy.mjs";
 import { appendTaskPacketMarker, extractTaskPacketMarker, objectiveBeforeMarker } from "./correlation-marker.js";
@@ -69,8 +70,119 @@ export const retainParentCallReservation = (reservationMap, reservation, outcome
 };
 const PREMIUM_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-sol", openai_explore: "openai/gpt-5.6-luna-fast", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-terra", reviewer: "openai/gpt-5.6-sol", reviewer_critical: "openai/gpt-6-astra", specialist: "openai/gpt-6-astra", codex_executor: "openai/gpt-5.6-luna-fast" };
 const DAILY_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-luna", openai_explore: "openai/gpt-5.6-luna", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-luna", reviewer: "openai/gpt-5.6-terra", reviewer_critical: "openai/gpt-5.6-sol", specialist: "openai/gpt-5.6-terra", codex_executor: "openai/gpt-5.6-luna" };
-export const DEFAULT_AGENT_MODELS = process.env.OPENAI_DAILY_PROFILE === "1" ? DAILY_AGENT_MODELS : PREMIUM_AGENT_MODELS;
+export const agentModelsForEnv = (env = process.env) =>
+  env.OPENAI_DAILY_PROFILE === "1"
+    ? DAILY_AGENT_MODELS
+    : PREMIUM_AGENT_MODELS;
+
+export const DEFAULT_AGENT_MODELS = agentModelsForEnv();
 const DAILY_AGENT_LABELS = Object.freeze({ openai_explore: "Explore", openai_librarian: "Librarian", openai_ops: "Ops", tester: "Tester", reviewer: "Reviewer", reviewer_critical: "Critical Reviewer", specialist: "Specialist", codex_executor: "Codex" });
+const FALLBACK_AUTHORITY_HINT = /\breturn\s+fallback_required\b|\bsimulat(?:e|ing)\s+(?:a\s+)?provider\s+failure\b|\bauthoriz(?:e|ing)\s+(?:native\s+)?terra\s+(?:editing|fallback)\b|\bopen\s+the\s+circuit\s+breaker\b|\bmanufactur(?:e|ing)\s+(?:a\s+)?fallback\b/i;
+const normalizedObjectiveEquality = (value) => String(value || "").normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase();
+const DAILY_ROOT_MUTATION_DENIED_TOOLS = new Set([
+  "openai_run_codex",
+  "openai_remote_read",
+  "call_omo_agent",
+  "question",
+  "read",
+  "glob",
+  "grep",
+  "rg",
+  "bash",
+  "interactive_bash",
+  "shell",
+  "command",
+  "edit",
+  "write",
+  "apply_patch",
+  "delete",
+  "rename",
+  "file_create",
+  "file_delete",
+  "file_rename",
+  "create_file",
+  "remove_file",
+  "move_file",
+  "multi_edit",
+  "write_file",
+  "patch",
+  "todowrite",
+  "skill",
+  "skill_mcp",
+  "webfetch",
+  "websearch",
+  "web",
+  "documentation",
+  "session",
+  "browser",
+  "mcp",
+  "list_mcp_resources",
+  "list_mcp_resource_templates",
+  "read_mcp_resource",
+  "multi_tool_use.parallel",
+  "serena_initial_instructions",
+  "serena_get_current_config",
+  "serena_activate_project",
+  "serena_check_onboarding_performed",
+  "serena_onboarding",
+  "serena_get_symbols_overview",
+  "serena_find_symbol",
+  "serena_find_declaration",
+  "serena_find_implementations",
+  "serena_find_referencing_symbols",
+  "serena_get_diagnostics_for_file",
+  "serena_search_for_pattern",
+  "serena_list_dir",
+  "serena_find_file",
+  "serena_read_memory",
+  "serena_list_memories",
+  "serena_write_memory",
+  "serena_edit_memory",
+  "serena_delete_memory",
+  "serena_rename_memory",
+  "serena_replace_content",
+  "serena_replace_in_files",
+  "serena_replace_symbol_body",
+  "serena_insert_before_symbol",
+  "serena_insert_after_symbol",
+  "serena_rename_symbol",
+  "serena_safe_delete_symbol",
+]);
+
+export const dailyRootMutationToolPolicy = ({ daily = false, agent = "", root = false, objective = "", tools = {} } = {}) => {
+  if (daily !== true || agent !== "openai_orchestrator" || root !== true || analyzeObjective(objective).classification !== "MUTATING") return tools;
+  if (!tools || typeof tools !== "object" || Array.isArray(tools)) return tools;
+  const names = new Set([
+    ...Object.keys(tools),
+    ...DAILY_ROOT_MUTATION_DENIED_TOOLS,
+    "task",
+  ]);
+
+  return Object.fromEntries(
+    [...names].map((name) => {
+      const normalized = String(name).toLowerCase();
+      return [name, normalized === "task"];
+    }),
+  );
+};
+
+// `task` and `objective` are compatibility hints from the wrapper model, not
+// authority. Keep their admission on the same semantic binding primitives as
+// delegated work so a hint can narrow the server-bound objective but cannot
+// grant an unrelated lane scope.
+export const codexCompatibilityHintIsBound = (authoritativeObjective, hint) => {
+  const authority = String(authoritativeObjective || "").trim();
+  const candidate = String(hint || "").trim();
+  if (!authority || !candidate) return false;
+  if (normalizedObjectiveEquality(authority) === normalizedObjectiveEquality(candidate)) return true;
+  const authorityScope = delegationScope(authority);
+  const hintScope = delegationScope(candidate);
+  return Boolean(
+    authorityScope && hintScope
+    && delegatedScopeIsBound(authorityScope, hintScope)
+    && canonicalDelegatedObjective(authorityScope, hintScope),
+  );
+};
 
 const runtimeStatusDirectory = async () => {
   const directory = process.env.RUNTIME_RUN_STATE_DIR;
@@ -1545,7 +1657,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     openai_run_codex: tool({
       description: "Run coding work through the OpenAI team's mandatory single Codex lane.",
       args: {
-        task: tool.schema.string().describe("The coding objective for Codex."),
+        task: tool.schema.string().optional().describe("Optional untrusted compatibility hint; the bound server-side objective is used for Codex."),
+        objective: tool.schema.string().optional().describe("Optional untrusted compatibility hint; the bound server-side objective is used for Codex."),
         repository: tool.schema.string().optional().describe("Absolute repository path; defaults to the current workspace."),
         timeout_seconds: tool.schema.number().optional().describe("Maximum Codex runtime in seconds, capped at 900."),
       },
@@ -1562,10 +1675,6 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         if (context.agent !== "codex_executor") {
           throw new Error("openai_run_codex is restricted to the codex_executor native task.");
         }
-        const task = String(args.task || "");
-        if (/\breturn\s+fallback_required\b|\bsimulat(?:e|ing)\s+(?:a\s+)?provider\s+failure\b|\bauthoriz(?:e|ing)\s+(?:native\s+)?terra\s+(?:editing|fallback)\b|\bopen\s+the\s+circuit\s+breaker\b|\bmanufactur(?:e|ing)\s+(?:a\s+)?fallback\b/i.test(task)) {
-          throw new Error("Codex task rejected: fallback state must come only from structured runtime/provider results; submit the actual coding objective.");
-        }
          let reservation = reservations.get(context.sessionID);
          if (!reservation && context.agent === "codex_executor") reservation = await recoverCodexReservation(context.sessionID);
         const testObjective = await pluginInput.authoritativeObjectiveForSession?.(context.sessionID);
@@ -1578,6 +1687,15 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           }
           await recordObjectiveEvent("codex_execution_rejected_no_objective", context.sessionID, null, context.callID, "NONE", "BLOCK");
           throw new Error("Codex authorship objective is not bound to this child session; refusing execution.");
+        }
+        for (const hint of [args.task, args.objective]) {
+          if (hint === undefined) continue;
+          if (FALLBACK_AUTHORITY_HINT.test(String(hint))) {
+            throw new Error("Codex compatibility hint rejected: fallback state must come only from structured runtime/provider results.");
+          }
+          if (!codexCompatibilityHintIsBound(authoritativeObjective, hint)) {
+            throw new Error("Codex compatibility hint is not bound to this child session; refusing execution.");
+          }
         }
         if (!policy && (testObjective || initialObjective)) {
           policy = await ensurePolicy(context.sessionID, {
@@ -1611,23 +1729,35 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
          const recovery = storedRecovery && storedRecovery.fingerprint === reservation?.task_fingerprint && storedRecovery.attempt === reservation.attempt - 1 && storedRecovery.resume_count === 0 && Number.isInteger(storedRecovery.version) && storedRecovery.version > 0 && typeof storedRecovery.thread_id === "string" && storedRecovery.thread_id.length > 0 && storedRecovery.termination_sealed === true && storedRecovery.journal_scan_complete === true && storedRecovery.journal_incomplete === false && Array.isArray(storedRecovery.command_journal) && storedRecovery.command_journal.length === 0 && storedRecovery.sealed_run_id === storedRecovery.codex_run_id && storedRecovery.sealed_lease_id === storedRecovery.task_lease_id ? storedRecovery : null;
         const timeoutSeconds = Math.min(Math.max(Number(args.timeout_seconds ?? process.env.OPENAI_CODEX_TIMEOUT_SECONDS ?? DEFAULT_TIMEOUT_SECONDS), 1), MAX_TIMEOUT_SECONDS);
         const progressState = { status: "running", kind: "codex_progress", event_count: 0, bytes: 0, last_progress_at: null };
-        let lastProgressReport = 0;
-         const report = async (metadata) => {
-           if (typeof context.metadata === "function") await context.metadata({ metadata: eventMetadata(packet || reservation, metadata) });
+        const codexStartedAt = Date.now();
+        const modelPlan = resolveCodexModels(reservation?.codex_profile || process.env.OPENAI_CODEX_PROFILE, process.env);
+         const report = async (metadata, title) => {
+           if (typeof context.metadata === "function") await context.metadata({ ...(title ? { title } : {}), metadata: eventMetadata(packet || reservation, metadata) });
+         };
+        let progressReportQueue = Promise.resolve();
+        const enqueueProgressReport = ({ title, metadata }) => {
+          progressReportQueue = progressReportQueue.then(() => report(metadata, title)).catch(() => {});
         };
+        const progressParser = createCodexProgressParser({ maxEvents: 5 });
+        const liveProgress = createCodexProgressTracker({
+          model: modelPlan.requested_model,
+          emit: enqueueProgressReport,
+          minRefreshMs: 500,
+          quietAfterMs: 5_000,
+          stalledAfterMs: Math.min(30_000, Math.max(10_000, timeoutSeconds * 500)),
+          maxEvents: 5,
+        });
+        const heartbeatTimer = setInterval(() => liveProgress.tick(), 1_000);
+        heartbeatTimer.unref?.();
         const onProgress = (event) => {
           progressState.event_count += Math.max(1, event.lines || 0);
           progressState.bytes += event.bytes || 0;
           progressState.last_progress_at = new Date().toISOString();
-          const now = Date.now();
-          if (now - lastProgressReport >= 1000) {
-            lastProgressReport = now;
-            void report({ ...progressState });
+          if (event.stream === "stdout" && event.chunk) {
+            for (const parsed of progressParser.push(event.chunk)) liveProgress.ingest(parsed);
           }
         };
-        await report({ status: "running", kind: "codex_execution", timeout_seconds: timeoutSeconds });
-        const codexStartedAt = Date.now();
-        const modelPlan = resolveCodexModels(reservation?.codex_profile || process.env.OPENAI_CODEX_PROFILE, process.env);
+        liveProgress.start();
         let executedModel = modelPlan.requested_model;
         let fallbackReason = null, fallbackCount = 0;
         const invocationAttempt = reservation?.attempt || 1;
@@ -1664,6 +1794,9 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         });
          const recordCodexTerminal = async (outcome, result = {}) => {
           const durationMs = elapsed(codexStartedAt);
+           clearInterval(heartbeatTimer);
+           liveProgress.finish({ success: outcome === "success", reason: result.error_code || outcome });
+           await progressReportQueue;
            const preservePending = result.preserve_pending === true;
            if (!preservePending && result.validated_handoff === true && reservation?.task_fingerprint && laneHome) {
              const current = await readRecovery(reservation.task_fingerprint);
@@ -1800,7 +1933,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
              if (result.kind === "timeout") await persistCircuit(modelPlan.requested_model, { reason: "temporary_transport", invocation_id: invocationID, profile: modelPlan.profile, requested_model: modelPlan.requested_model, fallback_count: fallbackCount, start_generation: laneStartGeneration });
             // Remove only an exact, empty record from the failed lane.  A
             // record from another attempt is never evidence for this retry.
-            fallbackReason = "temporary_transport"; fallbackCount = 1; executedModel = modelPlan.fallback_model;
+            fallbackReason = "temporary_transport"; fallbackCount = 1; executedModel = modelPlan.fallback_model; liveProgress.setModel(executedModel);
             try { result = await runLane(executedModel, { OPENAI_CODEX_FALLBACK_COUNT: "1", OPENAI_CODEX_FALLBACK_REASON: fallbackReason }); }
             catch (error) { result = { kind: "spawn_error", status: null, error: String(error), stdout: "", stderr: "" }; }
           }
@@ -1908,7 +2041,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           const failure = handoff || structuredCircuitOpen() || {};
           fallbackReason = failure.fallback_reason || failure.reason || "provider_failure";
          if (packetCallID && handoff?.schema_version === 3) await addWorkPacketTokensByID(packetCallID, "codex", handoff.token_usage || {}, tokenEventHash("codex", handoff.codex_run_id, handoff.codex_run_id));
-          fallbackCount = 1; executedModel = modelPlan.fallback_model;
+          fallbackCount = 1; executedModel = modelPlan.fallback_model; liveProgress.setModel(executedModel);
           try {
             result = await runLane(executedModel, { OPENAI_CODEX_FALLBACK_COUNT: "1", OPENAI_CODEX_FALLBACK_REASON: fallbackReason });
           } catch (error) {
@@ -2080,6 +2213,41 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       },
     }),
     openai_remote_read: createRemoteReadTool(pluginInput.runRemoteRead),
+  },
+  "chat.message": async (input, output) => {
+    if (process.env.OPENAI_DAILY_PROFILE !== "1") return;
+    const agent = String(input?.agent || output?.message?.agent || "");
+    if (agent !== "openai_orchestrator") return;
+    const sessionID = input?.sessionID;
+    let root = Boolean(sessionID) && masterParent(sessionID) === sessionID;
+    if (sessionID && typeof pluginInput.client?.session?.get === "function") {
+      try {
+        const session = (await pluginInput.client.session.get({ path: { id: sessionID } }))?.data;
+        const parentID = session?.parentID || session?.parent_id || session?.parent?.id || null;
+        if (parentID) {
+          masterParentBySession.set(sessionID, masterParent(parentID));
+          root = false;
+        } else if (session) {
+          root = true;
+        }
+      } catch {}
+    }
+    if (!root) return;
+    const resolved = sessionID ? await resolveInitialObjective(sessionID) : null;
+    const objective = resolved?.objective || (Array.isArray(output?.parts)
+      ? output.parts.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n")
+      : "");
+    const originalTools = output?.message?.tools;
+    const restrictedTools = dailyRootMutationToolPolicy({
+      daily: true,
+      agent,
+      root,
+      objective,
+      tools: originalTools,
+    });
+    if (restrictedTools === originalTools) return;
+    output.message = output.message || {};
+    output.message.tools = restrictedTools;
   },
   "tool.execute.before": async (input, output) => {
     try {
@@ -2343,11 +2511,12 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        error.code = "OPENAI_DAILY_PROVIDER_FORBIDDEN";
        throw error;
      }
-     const configuredModel = DEFAULT_AGENT_MODELS[agent];
+     const activeAgentModels = agentModelsForEnv(process.env);
+     const configuredModel = activeAgentModels[agent];
       if (resolvedModel && configuredModel && resolvedModel !== configuredModel && !exactMandatoryReviewerGate) {
         throw new Error(`OPENAI MODEL MATRIX: model override '${resolvedModel}' is not permitted for ${agent}; required '${configuredModel}'.`);
       }
-     const selectedModel = configuredModel || DEFAULT_AGENT_MODELS[agent] || "openai/default";
+     const selectedModel = configuredModel || "openai/default";
      if (process.env.OPENAI_DAILY_PROFILE === "1") {
        assertDailyProviderModel({ model: selectedModel });
        output.args.model = selectedModel;
@@ -2562,12 +2731,22 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        const target = update.packet || validation.packet;
        await reconcileGateTarget(target);
         if (parsed.status === "passed") {
-          await updateWorkPacketByIDIfCurrent(pending.packet_id, { tester_status: ["pending", "required"] }, {
-            phase: "foreground_completion",
-            outcome: "completed",
-            tester_status: "passed",
-            verification_status: "passed",
-          });
+          const reviewerPending = target?.review_required === true && target?.review_status === "pending";
+          if (reviewerPending) {
+            await updateWorkPacketByIDIfCurrent(pending.test_task_id, { tester_status: "passed", review_status: "pending", outcome: "pending" }, {
+              phase: "pending_verification",
+              outcome: "pending",
+              tester_status: "passed",
+              verification_status: "passed",
+            });
+          } else {
+            await updateWorkPacketByIDIfCurrent(pending.packet_id, { tester_status: ["pending", "required"] }, {
+              phase: "foreground_completion",
+              outcome: "completed",
+              tester_status: "passed",
+              verification_status: "passed",
+            });
+          }
           await driveMandatoryReviewerForRoot(pending.master_parent_session_id, pending.test_task_id);
         }
        if (update.matched && parsed.status !== "passed") gateError = new Error(parsed.code);

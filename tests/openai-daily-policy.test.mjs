@@ -8,7 +8,7 @@ import { allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequest
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
 import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
-import { latestUserObjective, OpenAITeamTools, resolveInitialObjectiveFromClient } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { dailyRootMutationToolPolicy, latestUserObjective, OpenAITeamTools, resolveInitialObjectiveFromClient } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { resolveCodexModels } from "../teams/openai/config/opencode/codex-models.js";
 import { postExecutionPolicy } from "../teams/openai/config/opencode/execution-policy.js";
 
@@ -70,6 +70,254 @@ test("Daily template enables only orchestrator shell access and runtime forwards
   const runtime = await readFile(new URL("../core/bin/team-runtime", import.meta.url), "utf8");
   assert.match(runtime, /OPENCODE_AUTH_SOURCE OPENAI_CODEX_AUTH_SOURCE SSH_AUTH_SOCK SSH_AGENT_PID/);
   assert.match(runtime, /\[\s*"\$\{!auth_var\+x\}"\s*=\s*x\s*\]/);
+});
+
+test("Daily mutating root delegates to Codex before repository inspection", async () => {
+  const template = await readFile(
+    new URL("../teams/daily/opencode.jsonc.template", import.meta.url),
+    "utf8",
+  );
+
+  assert.match(
+    template,
+    /For repository-mutating objectives, delegate immediately to codex_executor as your first operational tool call\./,
+  );
+
+  assert.match(
+    template,
+    /Do not inspect, read, glob, grep, search, use Serena, run shell commands, or write todos before that delegation\./,
+  );
+});
+
+test("Daily root mutation tool policy allows only task and denies inspection, mutation, and Serena tools", () => {
+  const tools = {
+    task: false,
+    openai_run_codex: true,
+    read: true,
+    glob: true,
+    grep: true,
+    bash: true,
+    edit: true,
+    write: true,
+    todowrite: true,
+    serena_find_symbol: true,
+    serena_replace_symbol_body: true,
+    webfetch: true,
+  };
+  const restricted = dailyRootMutationToolPolicy({
+    daily: true,
+    agent: "openai_orchestrator",
+    root: true,
+    objective: "Add multiply(a, b) to calculator.js",
+    tools,
+  });
+
+  for (const name of Object.keys(tools)) {
+    assert.equal(
+      restricted[name],
+      name === "task",
+      `${name} must match the DAILY mutating-root policy`,
+    );
+  }
+
+  assert.equal(restricted.task, true);
+  assert.deepEqual(tools, {
+    task: false,
+    openai_run_codex: true,
+    read: true,
+    glob: true,
+    grep: true,
+    bash: true,
+    edit: true,
+    write: true,
+    todowrite: true,
+    serena_find_symbol: true,
+    serena_replace_symbol_body: true,
+    webfetch: true,
+  });
+
+  const emptyCatalog = dailyRootMutationToolPolicy({
+    daily: true,
+    agent: "openai_orchestrator",
+    root: true,
+    objective: "Add multiply(a, b) to calculator.js",
+    tools: {},
+  });
+
+  assert.equal(emptyCatalog.task, true);
+
+  for (const name of [
+    "read",
+    "glob",
+    "grep",
+    "bash",
+    "interactive_bash",
+    "apply_patch",
+    "todowrite",
+    "openai_run_codex",
+    "openai_remote_read",
+    "serena_initial_instructions",
+    "serena_onboarding",
+    "serena_find_symbol",
+    "serena_search_for_pattern",
+    "list_mcp_resources",
+    "list_mcp_resource_templates",
+    "read_mcp_resource",
+    "multi_tool_use.parallel",
+  ]) {
+    assert.equal(
+      emptyCatalog[name],
+      false,
+      `${name} must be explicitly disabled for a DAILY mutating root`,
+    );
+  }
+
+  const sparseCatalog = dailyRootMutationToolPolicy({
+    daily: true,
+    agent: "openai_orchestrator",
+    root: true,
+    objective: "Add multiply(a, b) to calculator.js",
+    tools: {
+      task: false,
+      strange_new_tool: true,
+    },
+  });
+
+  assert.equal(sparseCatalog.task, true);
+  assert.equal(sparseCatalog.strange_new_tool, false);
+  assert.equal(sparseCatalog.read, false);
+  assert.equal(sparseCatalog.bash, false);
+  assert.equal(sparseCatalog.serena_initial_instructions, false);
+
+  const withoutTask = { read: true, edit: true, webfetch: true };
+  const withoutTaskRestricted = dailyRootMutationToolPolicy({
+    daily: true,
+    agent: "openai_orchestrator",
+    root: true,
+    objective: "Add multiply(a, b) to calculator.js",
+    tools: withoutTask,
+  });
+
+  assert.equal(withoutTaskRestricted.task, true);
+  assert.equal(withoutTaskRestricted.read, false);
+  assert.equal(withoutTaskRestricted.edit, false);
+  assert.equal(withoutTaskRestricted.webfetch, false);
+  assert.equal(withoutTaskRestricted.bash, false);
+  assert.equal(withoutTaskRestricted.serena_initial_instructions, false);
+});
+
+test("Daily chat.message hook applies fail-closed tools to a mutating root with an absent catalog", async () => {
+  const previousDaily = process.env.OPENAI_DAILY_PROFILE;
+  const previousRoot = process.env.OPENAI_TEAM_STATE_ROOT;
+
+  process.env.OPENAI_DAILY_PROFILE = "1";
+  process.env.OPENAI_TEAM_STATE_ROOT = await mkdtemp(join(tmpdir(), "daily-tool-hook-"));
+
+  try {
+    const objective = "Add multiply(a, b) to calculator.js";
+
+    const client = {
+      session: {
+        get: async () => ({
+          data: {
+            id: "root-session",
+            parentID: null,
+          },
+        }),
+        messages: async () => ({
+          data: [
+            {
+              info: {
+                role: "user",
+                agent: "openai_orchestrator",
+              },
+              parts: [
+                {
+                  type: "text",
+                  text: objective,
+                },
+              ],
+            },
+          ],
+        }),
+      },
+    };
+
+    const plugin = await OpenAITeamTools({ client });
+
+    const output = {
+      message: {
+        agent: "openai_orchestrator",
+      },
+      parts: [
+        {
+          type: "text",
+          text: objective,
+        },
+      ],
+    };
+
+    await plugin["chat.message"](
+      {
+        sessionID: "root-session",
+        agent: "openai_orchestrator",
+      },
+      output,
+    );
+
+    assert.equal(output.message.tools.task, true);
+
+    for (const name of [
+      "read",
+      "glob",
+      "grep",
+      "bash",
+      "interactive_bash",
+      "apply_patch",
+      "todowrite",
+      "openai_run_codex",
+      "openai_remote_read",
+      "serena_initial_instructions",
+      "serena_find_symbol",
+    ]) {
+      assert.equal(output.message.tools[name], false, name);
+    }
+  } finally {
+    await rm(process.env.OPENAI_TEAM_STATE_ROOT, {
+      recursive: true,
+      force: true,
+    });
+
+    if (previousDaily === undefined) {
+      delete process.env.OPENAI_DAILY_PROFILE;
+    } else {
+      process.env.OPENAI_DAILY_PROFILE = previousDaily;
+    }
+
+    if (previousRoot === undefined) {
+      delete process.env.OPENAI_TEAM_STATE_ROOT;
+    } else {
+      process.env.OPENAI_TEAM_STATE_ROOT = previousRoot;
+    }
+  }
+});
+
+test("Daily root mutation tool policy preserves read-only, child, and non-Daily behavior", () => {
+  const tools = { task: false, read: true, edit: true, serena_find_symbol: true };
+  const cases = [
+    { daily: true, agent: "openai_orchestrator", root: true, objective: "Inspect calculator.js" },
+    { daily: true, agent: "openai_orchestrator", root: false, objective: "Add multiply(a, b)" },
+    { daily: false, agent: "openai_orchestrator", root: true, objective: "Add multiply(a, b)" },
+    { daily: true, agent: "openai_explore", root: true, objective: "Add multiply(a, b)" },
+  ];
+  for (const policy of cases) assert.strictEqual(dailyRootMutationToolPolicy({ ...policy, tools }), tools);
+});
+
+test("Daily and OpenAI templates expose Codex executor as a native subagent", async () => {
+  for (const path of ["../teams/daily/opencode.jsonc.template", "../teams/openai/opencode.jsonc.template"]) {
+    const template = await readFile(new URL(path, import.meta.url), "utf8");
+    assert.match(template, /"codex_executor": \{[\s\S]*?"mode": "subagent"[\s\S]*?"tools": \{[\s\S]*?"openai_run_codex": true[\s\S]*?"read": false/);
+  }
 });
 
 test("Daily uses OpenAI-only model tiers", () => {
@@ -285,6 +533,17 @@ test("Child review wording cannot override an explicitly requested read-only age
   assert.equal(routeDelegatedAgent("Critical security review of the fixture", "Review the fixture structure", "openai_explore").agent, "reviewer_critical");
   assert.equal(routeDelegatedAgent("Inspect the fixture structure", "Review the fixture structure", "reviewer").agent, "reviewer");
   assert.equal(routeDelegatedAgent("Inspect the fixture structure", "Modify the fixture", "openai_explore").agent, "codex_executor");
+});
+
+test("Scoped no-modify constraints cannot downgrade delegated mutation work to read-only", () => {
+  const parent = "Add multiply(a, b), export it consistently with the existing module style, add one focused test for multiplication, run the relevant test, and report what changed.";
+  const child = "In /private/tmp/daily-autonomous-git.rqqJ9E, implement the user's request: add multiply(a, b) to calculator.js, export it consistently with existing CommonJS style, and add one focused multiplication assertion to calculator.test.js consistent with the existing direct Node test. Use the smallest change. Run the relevant test command (likely `node calculator.test.js`) and report the files changed and test result. You are authorized to edit these files; do not modify unrelated files.";
+
+  assert.equal(analyzeObjective(child).classification, "MUTATING");
+  assert.deepEqual(
+    routeDelegatedAgent(parent, child, "codex_executor"),
+    { classification: "MUTATING", agent: "codex_executor" },
+  );
 });
 
 test("Exact live coding parent/task binding is bounded and routes mutation to Codex", () => {

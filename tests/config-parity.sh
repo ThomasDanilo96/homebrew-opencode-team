@@ -106,6 +106,14 @@ for (const team of ["openai", "daily"]) {
     assert(denied.has("skill_mcp"), `${team}/${agent} effective skill_mcp surface`);
     assert(denied.has("codegraph_*"), `${team}/${agent} effective codegraph surface`);
   }
+  const codexResolved = spawnSync("opencode", ["debug", "agent", "codex_executor"], { cwd: root, env, encoding: "utf8" });
+  assert(codexResolved.status === 0, `${team}/codex_executor runtime config rejected: ${codexResolved.stderr}`);
+  const codexEffective = JSON.parse(codexResolved.stdout);
+  same(codexEffective.mode, "subagent", `${team}/codex_executor effective mode`);
+  assert(codexEffective.tools?.openai_run_codex === true, `${team}/codex_executor missing openai_run_codex`);
+  for (const tool of ["read", "glob", "grep", "bash", "apply_patch", "edit", "write", "task", "skill", "shell", "command", "todowrite", "openai_remote_read"]) {
+    assert([false, undefined].includes(codexEffective.tools?.[tool]), `${team}/codex_executor operational tool exposed: ${tool}`);
+  }
 }
 {
   const env = {

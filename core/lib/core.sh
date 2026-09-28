@@ -218,11 +218,16 @@ cleanup_run() {
     fi
   fi
 
-  # Phase 6: remove run-state
-  if [ "$exit_code" -eq 0 ] && [ -d "$RUN_STATE_DIR" ]; then
-    set_runtime_status stopped "" "" || true
+  # Phase 6: retain failed run-state so the cause remains diagnosable.
+  if [ "$exit_code" -eq 0 ]; then
+    if [ -d "$RUN_STATE_DIR" ]; then
+      set_runtime_status stopped "" "" || true
+      rm -rf "$RUN_STATE_DIR"
+    fi
+  elif [ -d "$RUN_STATE_DIR" ]; then
+    set_runtime_status failed "" "Runtime exited with status $exit_code" || true
+    log "Preserving failed run state at $RUN_STATE_DIR"
   fi
-  [ -d "$RUN_STATE_DIR" ] && rm -rf "$RUN_STATE_DIR"
   [ "$exit_code" -eq 0 ] && print_resume_command
   return "$exit_code"
 }

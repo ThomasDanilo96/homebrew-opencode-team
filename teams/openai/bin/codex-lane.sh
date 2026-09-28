@@ -274,20 +274,32 @@ if [ -n "$resume_thread_id" ]; then codex_args+=(resume --model "${OPENAI_CODEX_
 else codex_args+=(--model "${OPENAI_CODEX_MODEL:?OPENAI_CODEX_MODEL is required}" -c "model_reasoning_effort=$reasoning_effort" -c "model_auto_compact_token_limit=$compact_token_limit" -c "compact_prompt=\"$compact_prompt\"" --skip-git-repo-check --json --sandbox workspace-write "$execution_task"); fi
 (cd "$repo" && CODEX_HOME="$codex_home" ZDOTDIR="$node_zdotdir" PATH="$node_lane_path" "${OPENAI_CODEX_BIN:-codex}" "${codex_args[@]}") > "$out" 2> "$stderr_file" &
 codex_pid=$!
-last_heartbeat=$(date +%s)
-printf '%s\n' '{"type":"codex_progress","status":"running"}'
+streamed_event_lines=0
+stream_codex_events() {
+  local line_count start_line
+  line_count=$(wc -l < "$out" 2>/dev/null || printf '0')
+  line_count=${line_count//[[:space:]]/}
+  case "$line_count" in ''|*[!0-9]*) line_count=0 ;; esac
+  if [ "$line_count" -gt "$streamed_event_lines" ]; then
+    start_line=$((streamed_event_lines + 1))
+    sed -n "${start_line},${line_count}p" "$out"
+    streamed_event_lines=$line_count
+  fi
+}
+stream_codex_remainder() {
+  local start_line
+  start_line=$((streamed_event_lines + 1))
+  tail -n "+${start_line}" "$out" 2>/dev/null || true
+}
 while kill -0 "$codex_pid" 2>/dev/null; do
-  now=$(date +%s)
+  stream_codex_events
   discover_thread
   [ -z "$thread_id" ] || persist_recovery "$thread_id" running || true
-  if [ "$((now - last_heartbeat))" -ge 5 ]; then
-    printf '%s\n' '{"type":"codex_progress","status":"running"}'
-    last_heartbeat=$now
-  fi
   sleep 0.2
 done
 wait "$codex_pid"
 status=$?
+stream_codex_events
 set -e
 trap - TERM INT
 cleanup_node_zdotdir
@@ -378,6 +390,6 @@ elif [ "$probe_attempt" -eq 1 ]; then
 else
   printf '%s\n' "TASK FAILURE breaker unchanged run=$run_id" >> "$root/logs/codex.log"
 fi
-cat "$out"
+stream_codex_remainder
 printf '%s\n' "$handoff"
 exit "$status"

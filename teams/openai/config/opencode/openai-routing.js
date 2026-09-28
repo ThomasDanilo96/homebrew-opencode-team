@@ -87,14 +87,18 @@ export const routeDelegatedAgent = (parentObjective, childObjective, requestedAg
   const explicitReviewerTarget = ["reviewer", "reviewer_critical"].includes(requestedAgent)
     && /\breview_task_id\s*=\s*[a-f0-9]{64}\b/i.test(childText);
   if (explicitReviewerTarget) return { classification: "READ_ONLY", agent: requestedAgent };
+
+  // A positive mutation classification must win over read-only wording
+  // heuristics. Mutation prompts commonly include bounded scope constraints
+  // such as "do not modify unrelated files" plus reporting instructions.
+  if (analysis.classification === "MUTATING" || analysis.classification === "REMOTE_MUTATION") {
+    return { classification: analysis.classification, agent: analysis.agent };
+  }
   const explicitReadOnlyWorker = /\b(?:inspect|analy[sz]e|read|report)\b/i.test(childText)
     && /\b(?:do not|don't|must not|never)\s+(?:edit|modify|change|write|mutate)\b/i.test(childText);
   if (explicitReadOnlyWorker) {
     const agent = READ_ONLY_AGENTS.has(requestedAgent) ? requestedAgent : "specialist";
     return { classification: "READ_ONLY", agent };
-  }
-  if (analysis.classification === "MUTATING" || analysis.classification === "REMOTE_MUTATION") {
-    return { classification: analysis.classification, agent: analysis.agent };
   }
   if (analysis.classification === "REMOTE_READ_ONLY") {
     return { classification: analysis.classification, agent: analysis.agent };

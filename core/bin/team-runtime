@@ -112,6 +112,6 @@ else
     fi
   done
   tmux new-session -d "${tmux_env_args[@]}" -s "$SESSION_NAME" -x "$COLS" -y "$LINES" \
-    "TEAM_RUNTIME_INNER=1 RUN_ID=$RUN_ID SESSION_MODE=$SESSION_MODE RESUME_SESSION_ID=$RESUME_SESSION_ID bash $CORE_DIR/bin/team-runtime --config '$CONFIG_FILE'"
+    "TEAM_RUNTIME_INNER=1 RUN_ID=$RUN_ID SESSION_MODE=$SESSION_MODE RESUME_SESSION_ID=$RESUME_SESSION_ID bash $CORE_DIR/bin/team-runtime --config '$CONFIG_FILE'; rc=\$?; if [ \$rc -ne 0 ]; then printf '\\nRuntime exited with status %s. Press Enter to close this pane.\\n' \$rc; read _; fi; exit \$rc"
   exec tmux attach-session -t "$SESSION_NAME"
 fi

@@ -4,12 +4,12 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { codexResult, createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, testerSettlementCanProceed, testerSettlementPacketPatch, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext, isMandatoryTesterPacketForSession, resolveMandatoryTesterPacketForSession, mandatoryTesterToolDecision, mandatoryTesterCommandOnlyError } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { codexResult, createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, enforcePendingMandatoryTesterGate, findPendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, testerSettlementCanProceed, testerSettlementPacketPatch, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext, isMandatoryTesterPacketForSession, resolveMandatoryTesterPacketForSession, mandatoryTesterToolDecision, mandatoryTesterCommandOnlyError, OpenAITeamTools } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { verificationCommandCategory, parseVerificationEvidence } from "../teams/openai/config/opencode/execution-policy.js";
 import { gateTerminalPacketPatch } from "../teams/openai/config/opencode/gate-state.js";
 import { claimTask, completeTask, readTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
 import { isInternalContinuation, settleVerificationGateState } from "../teams/openai/config/opencode/openai-guardrails.js";
-import { createWorkPacket, updateWorkPacket, listWorkPackets } from "../teams/openai/config/opencode/work-packet.js";
+import { createWorkPacket, readWorkPacketByID, updateWorkPacket, updateWorkPacketByID, listWorkPackets } from "../teams/openai/config/opencode/work-packet.js";
 import { resolveCorrelatedTesterReservation } from "../teams/openai/config/opencode/reservation-correlation.js";
 
 const root = "root-session";
@@ -381,6 +381,106 @@ test("deterministic mandatory tester lifecycle reaches completed PASS", async ()
   assert.equal(packet.tester_status, "passed");
   assert.equal(packet.verification_status, "passed");
   assert.equal(packet.outcome, "completed");
+});
+
+test("foreground tester PASS keeps a review gate pending for one exact reviewer continuation", async () => {
+  const stateRoot = await mkdtemp(join(tmpdir(), "mandatory-review-continuation-"));
+  const previousStateRoot = process.env.OPENAI_TEAM_STATE_ROOT;
+  const previousDailyProfile = process.env.OPENAI_DAILY_PROFILE;
+  const previousSynthetic = process.env.OPENAI_SYNTHETIC_TEST;
+  const rootSessionID = `review-root-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  const testerChildID = `${rootSessionID}-tester`;
+  const reviewerChildID = `${rootSessionID}-reviewer`;
+  const objective = "Verify the completed fixture with node calculator.test.js and require a reviewer after verification.";
+  const command = "node calculator.test.js";
+  const commandHash = createHash("sha256").update(command).digest("hex");
+  const taskFingerprint = createHash("sha256").update(`${rootSessionID}:gate`).digest("hex");
+  const targetCallID = `${rootSessionID}:target`;
+  let reviewerMessages = false;
+  const reviewerPrompts = [];
+  const client = {
+    session: {
+      get: async ({ path: { id } }) => ({ data: { id, ...(id === rootSessionID ? {} : { parentID: rootSessionID }) } }),
+      messages: async ({ path: { id } }) => {
+        if (id === rootSessionID) return { data: [{ info: { role: "user", sessionID: rootSessionID }, parts: [{ type: "text", text: objective }] }] };
+        if (id === testerChildID) { const now = Date.now(); return { data: [{ info: { role: "assistant", agent: "tester", sessionID: testerChildID, time: { created: now, completed: now + 1 } }, parts: [{ type: "tool", tool: "bash", state: { status: "completed", input: { command }, metadata: { exit_code: 0 } } }] }] }; }
+        if (id === reviewerChildID && reviewerMessages) return { data: [{ info: { role: "assistant", sessionID: reviewerChildID, time: { created: 1, completed: 2 } }, parts: [{ type: "text", text: "APPROVE\nThe verification evidence is sufficient." }] }] };
+        return { data: [] };
+      },
+      promptAsync: async (request) => { reviewerPrompts.push(request); return { status: "ok" }; },
+    },
+  };
+  try {
+    process.env.OPENAI_TEAM_STATE_ROOT = stateRoot;
+    process.env.OPENAI_DAILY_PROFILE = "1";
+    process.env.OPENAI_SYNTHETIC_TEST = "1";
+    const targetPacket = await createWorkPacket(targetCallID, {
+      parent_session_id: rootSessionID, task_fingerprint: taskFingerprint, objective_sha256: createHash("sha256").update(objective).digest("hex"),
+      agent: "codex_executor", phase: "pending_verification", outcome: "pending", codex_outcome: "success",
+      review_required: true, review_status: "pending", tester_required: true, tester_status: "pending", verification_status: "pending",
+      risk: "critical", verification_commands: [command], expected_verification_hashes: [commandHash], acceptance_criteria: [command],
+    });
+    const claimed = await claimTask({ task_fingerprint: taskFingerprint, objective_sha256: createHash("sha256").update(objective).digest("hex"), parent_session_id: rootSessionID, agent: "codex_executor", first_call_id: targetCallID, packet_id: targetPacket.packet_id });
+    const pendingTask = await transitionTask(taskFingerprint, {
+      expectedVersion: claimed.record.version, expectedAttempt: claimed.record.attempt, expectedLease: claimed.record.lease_id,
+      leaseId: claimed.record.lease_id, expectedStates: ["CLAIMED"], patch: { state: "PENDING_VERIFICATION" },
+    });
+    await updateWorkPacketByID(targetPacket.packet_id, { attempt: pendingTask.attempt, task_lease_id: pendingTask.lease_id, phase: "pending_verification", outcome: "pending" });
+    assert.ok(await findPendingMandatoryTesterGate(rootSessionID), JSON.stringify(await listWorkPackets()));
+
+    const plugin = await OpenAITeamTools({ client });
+    const testerCallID = `${rootSessionID}:tester-call`;
+    const testerOutput = { args: { subagent_type: "tester", prompt: `test_task_id=${targetPacket.packet_id}` } };
+    await plugin["tool.execute.before"]({ tool: "task", sessionID: rootSessionID, callID: testerCallID, agent: "openai_orchestrator" }, testerOutput);
+    await plugin["tool.execute.after"]({ tool: "task", sessionID: rootSessionID, callID: testerCallID }, { metadata: { sessionID: testerChildID } });
+
+    let gate = await readWorkPacketByID(targetPacket.packet_id);
+    assert.equal(gate.phase, "pending_verification");
+    assert.equal(gate.outcome, "pending");
+    assert.equal(gate.tester_status, "passed");
+    assert.equal(gate.verification_status, "passed");
+    assert.equal(gate.review_status, "pending");
+    assert.equal(reviewerPrompts.length, 1);
+    const reviewPrompt = reviewerPrompts[0].body.parts[0].text;
+    assert.match(reviewPrompt, new RegExp(`review_task_id=${targetPacket.packet_id}`));
+    assert.equal((await listWorkPackets()).filter((packet) => packet.agent === "reviewer_critical" && packet.review_task_id === targetPacket.packet_id).length, 0);
+
+    await plugin["tool.execute.after"]({ tool: "task", sessionID: rootSessionID, callID: testerCallID }, { metadata: { sessionID: testerChildID } });
+    assert.equal(reviewerPrompts.length, 1);
+
+    const reviewerCallID = `${rootSessionID}:reviewer-call`;
+    const reviewerOutput = { args: { subagent_type: "reviewer_critical", prompt: reviewPrompt } };
+    const pendingGate = await readWorkPacketByID(targetPacket.packet_id);
+    const { parent_session_id, review_required, review_status, risk, tester_status, outcome, phase } = pendingGate;
+    assert.deepEqual({ parent_session_id, review_required, review_status, risk, tester_status, outcome, phase }, {
+      parent_session_id: rootSessionID, review_required: true, review_status: "pending", risk: "critical", tester_status: "passed", outcome: "pending", phase: "pending_verification",
+    });
+    const reviewerPlugin = await OpenAITeamTools({ client });
+    await reviewerPlugin["tool.execute.before"]({ tool: "task", sessionID: rootSessionID, callID: reviewerCallID, agent: "openai_orchestrator" }, reviewerOutput);
+    reviewerMessages = true;
+    await reviewerPlugin["tool.execute.after"]({ tool: "task", sessionID: rootSessionID, callID: reviewerCallID }, { metadata: { sessionID: reviewerChildID } });
+
+    gate = await readWorkPacketByID(targetPacket.packet_id);
+    assert.equal(gate.review_status, "approved");
+    assert.equal(gate.phase, "foreground_completion");
+    assert.equal(gate.outcome, "completed");
+    assert.equal(gate.tester_status, "passed");
+    assert.equal(gate.verification_status, "passed");
+    assert.equal((await readTask(taskFingerprint)).state, "COMPLETED");
+    const reviewerPackets = (await listWorkPackets()).filter((packet) => packet.agent === "reviewer_critical" && packet.review_task_id === targetPacket.packet_id);
+    assert.equal(reviewerPackets.length, 1);
+    assert.equal(reviewerPackets[0].outcome, "completed");
+    await reviewerPlugin["tool.execute.after"]({ tool: "task", sessionID: rootSessionID, callID: reviewerCallID }, { metadata: { sessionID: reviewerChildID } });
+    assert.equal((await listWorkPackets()).filter((packet) => packet.agent === "reviewer_critical" && packet.review_task_id === targetPacket.packet_id).length, 1);
+  } finally {
+    if (previousStateRoot === undefined) delete process.env.OPENAI_TEAM_STATE_ROOT;
+    else process.env.OPENAI_TEAM_STATE_ROOT = previousStateRoot;
+    if (previousDailyProfile === undefined) delete process.env.OPENAI_DAILY_PROFILE;
+    else process.env.OPENAI_DAILY_PROFILE = previousDailyProfile;
+    if (previousSynthetic === undefined) delete process.env.OPENAI_SYNTHETIC_TEST;
+    else process.env.OPENAI_SYNTHETIC_TEST = previousSynthetic;
+    await rm(stateRoot, { recursive: true, force: true });
+  }
 });
 
 test("bound tester error without verification evidence settles the tester and target without redispatch", async () => {

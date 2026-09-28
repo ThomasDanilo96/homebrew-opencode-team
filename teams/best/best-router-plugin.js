@@ -100,6 +100,33 @@ export function isSafeRootInspection(tool, args = {}) {
   return false;
 }
 
+export const isBestRouterInternalMessage = (parts = []) => {
+  if (!Array.isArray(parts)) return false;
+
+  return parts.some((part) => {
+    if (
+      part?.type !== "text"
+      || typeof part.text !== "string"
+    ) {
+      return false;
+    }
+
+    const value = part.text;
+
+    if (
+      /<!--\s*OMO_INTERNAL_NOREPLY\s*-->/i.test(value)
+    ) {
+      return true;
+    }
+
+    return (
+      /<system-reminder>/i.test(value)
+      && /\[(?:BACKGROUND TASK COMPLETED|ALL BACKGROUND TASKS COMPLETE)\]/i.test(value)
+      && /<!--\s*OMO_INTERNAL_INITIATOR\s*-->/i.test(value)
+    );
+  });
+};
+
 function appendSemanticGuidance(agent, output) {
   const guidance = SEMANTIC_GUIDANCE[agent];
   if (!guidance || output.parts.some((part) => part.type === "text" && part.text?.includes(SEMANTIC_GUIDANCE_MARKER))) return;
@@ -144,13 +171,28 @@ export default async function bestRouterPlugin(input) {
     "chat.message": async (hookInput, output) => {
       const agent = hookInput.agent ?? output.message?.agent ?? "";
       const sessionID = hookInput.sessionID;
+      const textParts = output.parts.filter((part) => part.type === "text" && part.text);
+
+      if (
+        agent === "OpenCode-Builder"
+        && isBestRouterInternalMessage(textParts)
+      ) {
+        log({
+          event: "chat.message",
+          session_id: sessionID,
+          agent,
+          classification: "SKIPPED_INTERNAL",
+          route_appended: false,
+        });
+        return;
+      }
+
       appendSemanticGuidance(agent, output);
       if (agent !== "OpenCode-Builder") {
         log({ event: "chat.message", session_id: sessionID, agent, classification: "SKIPPED_CHILD", route_appended: false });
         return;
       }
 
-      const textParts = output.parts.filter((part) => part.type === "text" && part.text);
       if (textParts.some((part) => /<BEST_ROUTER_ROUTE>(EXPLORE|LIBRARIAN|BOTH)<\/BEST_ROUTER_ROUTE>/.test(part.text))) {
         log({ event: "chat.message", session_id: sessionID, agent, classification: "ALREADY_TAGGED", route_appended: false });
         return;

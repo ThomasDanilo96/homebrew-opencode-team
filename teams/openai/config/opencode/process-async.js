@@ -4,6 +4,7 @@ export const DEFAULT_TIMEOUT_SECONDS = 300;
 export const MAX_TIMEOUT_SECONDS = 900;
 const TERM_GRACE_MS = 250;
 export const DEFAULT_MAX_TAIL_BYTES = 1024 * 1024;
+export const DEFAULT_PROGRESS_CHUNK_BYTES = 64 * 1024;
 const maxTailBytes = (value) => Math.max(1024, Math.min(Number(value) || DEFAULT_MAX_TAIL_BYTES, 64 * 1024 * 1024));
 
 const boundedTimeout = (value) => {
@@ -68,7 +69,11 @@ export const runProcessAsync = (file, args, options = {}) => new Promise((resolv
     const text = String(chunk);
     if (stream === "stdout") stdout = retainTail(stdout, text, stream);
     else stderr = retainTail(stderr, text, stream);
-    onProgress?.({ stream, bytes: Buffer.byteLength(text), lines: text.split(/\r?\n/).length - 1 });
+    const progressBytes = Buffer.from(text, "utf8");
+    const progressChunk = progressBytes.length > DEFAULT_PROGRESS_CHUNK_BYTES
+      ? progressBytes.subarray(progressBytes.length - DEFAULT_PROGRESS_CHUNK_BYTES).toString("utf8")
+      : text;
+    onProgress?.({ stream, bytes: progressBytes.length, lines: text.split(/\r?\n/).length - 1, chunk: progressChunk });
   };
   child.stdout?.on("data", (chunk) => readOutput("stdout", chunk));
   child.stderr?.on("data", (chunk) => readOutput("stderr", chunk));
