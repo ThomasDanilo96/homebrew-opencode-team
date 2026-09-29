@@ -3,7 +3,21 @@ import assert from "node:assert/strict";
 
 import {
   isBestRouterInternalMessage,
+  routeGuidanceFor,
 } from "../teams/best/best-router-plugin.js";
+
+test("BEST route guidance defines the exact first native task contract", () => {
+  const guidance = ["EXPLORE", "LIBRARIAN", "BOTH"].map(routeGuidanceFor);
+  assert.match(guidance[0], /exactly one native task\(subagent_type="explore", run_in_background=true\)/);
+  assert.match(guidance[1], /exactly one native task\(subagent_type="librarian", run_in_background=true\)/);
+  assert.match(guidance[2], /exactly two native task calls/);
+  assert.match(guidance[2], /one task\(subagent_type="explore", run_in_background=true\)/);
+  assert.match(guidance[2], /one task\(subagent_type="librarian", run_in_background=true\)/);
+  for (const text of guidance) {
+    assert.match(text, /do not use general/i);
+    assert.match(text, /do not launch (?:a )?duplicate/i);
+  }
+});
 
 test("BEST router ignores OMO no-reply internal continuation", () => {
   assert.equal(

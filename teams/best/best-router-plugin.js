@@ -18,7 +18,7 @@ const ROUTE_STATE = new Map();
 const PENDING_TASKS = new Map();
 const BLOCKED_TOOLS = new Set(["bash", "glob", "grep", "read", "webfetch"]);
 const SERENA_BOOTSTRAP_TOOLS = new Set(["serena_initial_instructions", "serena_get_current_config"]);
-const GATE_MESSAGE = "BEST ROUTING GATE: complete the required native task delegation before direct repository or research tools may be used.";
+const GATE_MESSAGE = "BEST ROUTING GATE: complete the required native task delegation before direct repository or research tools may be used. The required task must use the exact subagent_type and run_in_background=true.";
 const SEMANTIC_GUIDANCE_MARKER = "<BEST_SEMANTIC_TOOL_GUIDANCE>";
 const SEMANTIC_GUIDANCE = {
   explore: `${SEMANTIC_GUIDANCE_MARKER}
@@ -54,10 +54,12 @@ export const memoryCircuitOpen = () => {
   } catch { return false; }
 };
 const ROUTE_GUIDANCE = {
-  EXPLORE: "BEST ROUTE EXPLORE: FIRST route-satisfying action: native task(subagent_type=\"explore\", run_in_background=true). Do not attempt semantic repository tools first. Do not attempt call_omo_agent.",
-  LIBRARIAN: "BEST ROUTE LIBRARIAN: FIRST route-satisfying action: native task(subagent_type=\"librarian\", run_in_background=true). Do not attempt documentation tools first. Do not attempt call_omo_agent.",
-  BOTH: "BEST ROUTE BOTH: FIRST route-satisfying actions: native task(subagent_type=\"explore\", run_in_background=true) and native task(subagent_type=\"librarian\", run_in_background=true). Do not attempt repository or documentation tools first. Do not attempt call_omo_agent."
+  EXPLORE: "BEST ROUTE EXPLORE: FIRST and ONLY route-satisfying action: issue exactly one native task(subagent_type=\"explore\", run_in_background=true). The task schema requires both fields; do not omit run_in_background. Do not use general, do not retry, do not launch a duplicate explore task, do not attempt semantic repository tools first, and do not attempt call_omo_agent.",
+  LIBRARIAN: "BEST ROUTE LIBRARIAN: FIRST and ONLY route-satisfying action: issue exactly one native task(subagent_type=\"librarian\", run_in_background=true). The task schema requires both fields; do not omit run_in_background. Do not use general, do not retry, do not launch a duplicate librarian task, do not attempt documentation tools first, and do not attempt call_omo_agent.",
+  BOTH: "BEST ROUTE BOTH: FIRST and ONLY route-satisfying actions: issue exactly two native task calls, one task(subagent_type=\"explore\", run_in_background=true) and one task(subagent_type=\"librarian\", run_in_background=true). The task schema requires both fields; do not use general, do not retry, do not launch duplicates, do not attempt repository or documentation tools first, and do not attempt call_omo_agent."
 };
+
+export const routeGuidanceFor = (route) => ROUTE_GUIDANCE[route] || "";
 
 const KNOWN_READ_FILES = new Set([
   "teams/best/patch-omo-core.py",
@@ -243,7 +245,7 @@ export default async function bestRouterPlugin(input) {
       if (!state) return;
       if (tool === "task") {
         const subagent = typeof output.args?.subagent_type === "string" ? output.args.subagent_type : "";
-        const background = output.args?.run_in_background;
+        let background = output.args?.run_in_background;
         const details = {
           session_id: toolInput.sessionID,
           route: state.route,
@@ -262,7 +264,13 @@ export default async function bestRouterPlugin(input) {
           throw new Error(buildGateMessage(state));
         }
         if (background !== true) {
-          throw new Error(GATE_MESSAGE);
+          const originalBackground = background;
+          output.args.run_in_background = true;
+          background = true;
+          log({ event: "task_background_normalized", ...details, original_background: originalBackground, gate_action: "normalize" });
+        }
+        if (background !== true) {
+          throw new Error(`BEST ROUTING GATE: task requires run_in_background=true for the exact route agent '${subagent}'. Use native task(subagent_type="${subagent}", run_in_background=true); general and duplicate tasks do not satisfy route ${state.route}.`);
         }
         state.pending_agents.push(subagent);
         PENDING_TASKS.set(`${toolInput.sessionID}:${toolInput.callID}`, { sessionID: toolInput.sessionID, agent: subagent });
@@ -315,5 +323,5 @@ function buildGateMessage(state) {
     return `BEST ROUTING GATE: Route ${state.route} requires native task delegation to ${remaining.join(" and ")}. Use those required agents before any other task or direct work.`;
   }
   const pending = state.required_agents.filter((agent) => state.pending_agents.includes(agent));
-  return `BEST ROUTING GATE: Required delegation is already pending for ${pending.join(" and ")}. Do not launch a duplicate task; direct work may continue while background delegation runs.`;
+  return `BEST ROUTING GATE: Required delegation is already pending for ${pending.join(" and ")}. The gate remains fail-closed until the background task completes. Do not launch a duplicate task or use general as a substitute.`;
 }

@@ -308,7 +308,11 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
     const hooks = await bestRouterPlugin({ directory: root });
     const output = { message: {}, parts: [{ id: `${sessionID}-prompt`, type: "text", text: prompt }] };
     await hooks["chat.message"]({ agent: "OpenCode-Builder", sessionID }, output);
-    const before = (tool, args = {}, callID = `${sessionID}-${tool}`) => hooks["tool.execute.before"]({ sessionID, tool, callID }, { args });
+    const before = async (tool, args = {}, callID = `${sessionID}-${tool}`) => {
+      const output = { args };
+      await hooks["tool.execute.before"]({ sessionID, tool, callID }, output);
+      return output;
+    };
     const after = (callID, success = true) => hooks["tool.execute.after"]({ sessionID, tool: "task", callID }, { metadata: { success } });
     return { hooks, output, before, after };
   };
@@ -319,36 +323,49 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   await assert.rejects(() => direct.before("call_omo_agent", { subagent_type: "explore", run_in_background: false }), /BEST ROUTING POLICY: call_omo_agent is disabled/);
 
   const explore = await routeSession("ses-explore", "Inspect repository implementation");
-  assert.match(explore.output.parts.at(-1).text, /FIRST route-satisfying action: native task\(subagent_type="explore", run_in_background=true\)/);
-  assert.match(explore.output.parts.at(-1).text, /Do not attempt call_omo_agent/);
+  assert.match(explore.output.parts.at(-1).text, /exactly one native task\(subagent_type="explore", run_in_background=true\)/);
+  assert.match(explore.output.parts.at(-1).text, /Do not attempt call_omo_agent/i);
   await explore.before("serena_initial_instructions", {});
   await explore.before("serena_get_current_config", {});
   for (const background of [false, true]) {
     await assert.rejects(() => explore.before("call_omo_agent", { subagent_type: "explore", run_in_background: background }), /BEST ROUTING POLICY: call_omo_agent is disabled/);
   }
   for (const [tool, args] of [["bash", { command: "git status" }], ["bash", { command: "git diff --check" }], ["read", { filePath: "teams/best/patch-omo-core.py" }], ["grep", { pattern: "fallbackChain", path: "teams/best" }], ["glob", { pattern: "*.js", path: "teams/best" }]]) await explore.before(tool, args);
-  for (const [tool, args] of [["glob", { pattern: "**/*", path: "." }], ["grep", { pattern: "x", path: "." }], ["serena_find_symbol", {}], ["serena_search_for_pattern", {}], ["task", { subagent_type: "librarian", run_in_background: true }], ["task", { subagent_type: "explore", run_in_background: false }]]) await assert.rejects(() => explore.before(tool, args), /BEST ROUTING GATE/);
+  for (const [tool, args] of [["glob", { pattern: "**/*", path: "." }], ["grep", { pattern: "x", path: "." }], ["serena_find_symbol", {}], ["serena_search_for_pattern", {}], ["task", { subagent_type: "librarian", run_in_background: true }]]) await assert.rejects(() => explore.before(tool, args), /BEST ROUTING GATE/);
   await assert.rejects(() => explore.before("bash", { command: "git add ." }), /BEST ROUTING GATE/);
   await explore.before("task", { subagent_type: "explore", run_in_background: true }, "explore-task");
   await assert.rejects(() => explore.before("task", { subagent_type: "explore", run_in_background: true }, "explore-duplicate"), /BEST ROUTING GATE/);
   await explore.after("explore-task");
   await explore.before("bash", { command: "git status" });
 
+  const omittedExplore = await routeSession("ses-explore-omitted", "Inspect repository implementation");
+  const omittedArgs = { subagent_type: "explore" };
+  await omittedExplore.before("task", omittedArgs, "explore-omitted");
+  assert.equal(omittedArgs.run_in_background, true);
+  await omittedExplore.after("explore-omitted");
+
+  const falseExplore = await routeSession("ses-explore-false", "Inspect repository implementation");
+  const falseArgs = { subagent_type: "explore", run_in_background: false };
+  await falseExplore.before("task", falseArgs, "explore-false");
+  assert.equal(falseArgs.run_in_background, true);
+  await falseExplore.after("explore-false");
+
   const librarian = await routeSession("ses-librarian", "Find official documentation");
-  assert.match(librarian.output.parts.at(-1).text, /FIRST route-satisfying action: native task\(subagent_type="librarian", run_in_background=true\)/);
+  assert.match(librarian.output.parts.at(-1).text, /exactly one native task\(subagent_type="librarian", run_in_background=true\)/);
   await librarian.before("serena_initial_instructions", {});
   await librarian.before("serena_get_current_config", {});
   for (const background of [false, true]) {
     await assert.rejects(() => librarian.before("call_omo_agent", { subagent_type: "librarian", run_in_background: background }), /BEST ROUTING POLICY: call_omo_agent is disabled/);
   }
   await assert.rejects(() => librarian.before("webfetch", { url: "https://example.com" }), /BEST ROUTING GATE/);
-  await assert.rejects(() => librarian.before("task", { subagent_type: "librarian", run_in_background: false }), /BEST ROUTING GATE/);
-  await librarian.before("task", { subagent_type: "librarian", run_in_background: true }, "librarian-task");
+  const librarianArgs = { subagent_type: "librarian", run_in_background: false };
+  await librarian.before("task", librarianArgs, "librarian-task");
+  assert.equal(librarianArgs.run_in_background, true);
   await librarian.after("librarian-task");
   await librarian.before("webfetch", { url: "https://example.com" });
 
   const both = await routeSession("ses-both", "both code analysis and official documentation");
-  assert.match(both.output.parts.at(-1).text, /native task\(subagent_type="explore", run_in_background=true\).*native task\(subagent_type="librarian", run_in_background=true\)/s);
+  assert.match(both.output.parts.at(-1).text, /one task\(subagent_type="explore", run_in_background=true\).*one task\(subagent_type="librarian", run_in_background=true\)/s);
   await both.before("task", { subagent_type: "explore", run_in_background: true }, "both-explore");
   await both.after("both-explore");
   await both.before("bash", { command: "git status" });

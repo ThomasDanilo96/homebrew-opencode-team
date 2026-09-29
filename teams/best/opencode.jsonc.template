@@ -13,6 +13,7 @@
   },
   "agent": {
     "OpenCode-Builder": {
+      "prompt_append": "When BEST routing guidance contains <BEST_ROUTER_ROUTE>, obey it before any analysis: issue the exact native task call(s) named by the guidance with subagent_type and run_in_background=true. EXPLORE and LIBRARIAN require exactly one matching task and no general substitute or retry; BOTH requires exactly one explore task and exactly one librarian task. Do not call call_omo_agent or use repository/research tools before those route tasks.",
       "permission": {
         "task": "allow",
         "call_omo_agent": "deny",
