@@ -11,7 +11,7 @@ import { readRecovery, removeRecovery, removeRecoveryAndHome, removeRecoveryHome
 import { openCodexCircuit, readCodexCircuitGeneration } from "./codex-circuit.js";
 import { resolveCodexModels } from "./codex-models.js";
 import { createRemoteReadTool } from "./openai-remote-ops.js";
-import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective, REPOSITORY_MUTATING_TOOLS } from "./openai-routing.js";
+import { analyzeObjective, objectiveRequestsLocalCommit, routeDelegatedAgent, selectAuthoritativeObjective, REPOSITORY_MUTATING_TOOLS } from "./openai-routing.js";
 import { parseVerificationEvidence, postExecutionPolicy, verificationCommandCategory, isAllowlistedVerificationCommand } from "./execution-policy.js";
 import { DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, runProcessAsync } from "./process-async.js";
 import { createCodexProgressParser, createCodexProgressTracker } from "./codex-progress.js";
@@ -67,6 +67,125 @@ export const retainParentCallReservation = (reservationMap, reservation, outcome
   if (!(reservationMap instanceof Map) || outcome !== "success" || gatesPending !== true || !reservation?.task_call_id) return false;
   reservationMap.set(reservation.task_call_id, { ...reservation, token: null });
   return true;
+};
+
+
+export const gitCommitState = (repository) => {
+  try {
+    const inside = execFileSync(
+      "git",
+      ["rev-parse", "--is-inside-work-tree"],
+      {
+        cwd: repository,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    ).trim();
+
+    if (inside !== "true") {
+      return {
+        valid: false,
+        head: null,
+        dirty: false,
+      };
+    }
+
+    let head = null;
+
+    try {
+      head = execFileSync(
+        "git",
+        ["rev-parse", "HEAD"],
+        {
+          cwd: repository,
+          encoding: "utf8",
+          stdio: ["ignore", "pipe", "ignore"],
+        },
+      ).trim() || null;
+    } catch {}
+
+    const status = execFileSync(
+      "git",
+      ["status", "--porcelain=v1"],
+      {
+        cwd: repository,
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+      },
+    );
+
+    return {
+      valid: true,
+      head,
+      dirty: status.trim().length > 0,
+    };
+  } catch {
+    return {
+      valid: false,
+      head: null,
+      dirty: false,
+    };
+  }
+};
+
+export const localCommitPostcondition = ({
+  requested = false,
+  before = null,
+  after = null,
+} = {}) => {
+  if (!requested) {
+    return {
+      ok: true,
+      reason: "not_required",
+    };
+  }
+
+  if (!before?.valid || !after?.valid) {
+    return {
+      ok: false,
+      reason: "repository_unavailable",
+    };
+  }
+
+  if (!before.dirty) {
+    if (after.dirty) {
+      return {
+        ok: false,
+        reason: "worktree_became_dirty",
+      };
+    }
+
+    if (after.head !== before.head) {
+      return {
+        ok: false,
+        reason: "unexpected_commit_from_clean_worktree",
+      };
+    }
+
+    return {
+      ok: true,
+      reason: "nothing_to_commit",
+    };
+  }
+
+  if (!after.head || after.head === before.head) {
+    return {
+      ok: false,
+      reason: "head_not_advanced",
+    };
+  }
+
+  if (after.dirty) {
+    return {
+      ok: false,
+      reason: "worktree_dirty_after_commit",
+    };
+  }
+
+  return {
+    ok: true,
+    reason: "commit_created",
+  };
 };
 
 export const terminalCodexFailureForRootObjective = (
@@ -1890,6 +2009,14 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           await recordCodexTerminal("recovery_side_effect_review_required", { preserve_pending: true });
           return JSON.stringify(refusal);
         }
+        const localCommitRequested = objectiveRequestsLocalCommit(
+          authoritativeObjective,
+        );
+
+        const localCommitBefore = localCommitRequested
+          ? gitCommitState(repository)
+          : null;
+
         let laneStartGeneration = 0;
         let laneHome = null;
         let terminalHandoff = null;
@@ -1920,6 +2047,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
                  OPENAI_CODEX_TASK_FINGERPRINT: reservation?.task_fingerprint || "", OPENAI_CODEX_ATTEMPT: String(reservation?.attempt || 1),
                  OPENAI_CODEX_TASK_LEASE_ID: reservation?.task_lease_id || "",
                  OPENAI_TEAM_RECOVERY_HOME_ROOT: recoveryHomeRoot(),
+                 OPENAI_CODEX_LOCAL_COMMIT: localCommitRequested ? "1" : "0",
                 ...extraEnv,
               }, signal: context.abort, timeoutMs: timeoutSeconds * 1000, onProgress,
              });
@@ -2188,6 +2316,78 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
             await recordCodexTerminal("recovery_identity_conflict", { preserve_pending: true });
             return JSON.stringify(terminal);
           }
+           if (localCommitRequested) {
+             const localCommitAfter = gitCommitState(repository);
+
+             const commitCheck = localCommitPostcondition({
+               requested: true,
+               before: localCommitBefore,
+               after: localCommitAfter,
+             });
+
+             if (!commitCheck.ok) {
+               await transitionCurrentPolicy(
+                 context.sessionID,
+                 CODEX_TASK_FAILED,
+                 {
+                   error: "LOCAL_COMMIT_POSTCONDITION_FAILED",
+                 },
+               );
+
+               if (packetCallID) {
+                 await updateWorkPacketByID(packetCallID, {
+                   phase: "foreground_completion",
+                   outcome: "failed",
+                   codex_outcome: "failed",
+                   retryable: false,
+                   error_code: "LOCAL_COMMIT_POSTCONDITION_FAILED",
+                   next_agents: [],
+                   policy_reasons: [
+                     "LOCAL_COMMIT_POSTCONDITION_FAILED",
+                     commitCheck.reason,
+                   ],
+                   review_status: "not_required",
+                   tester_required: false,
+                   tester_status: "not_required",
+                   verification_status: "failed",
+                 });
+               }
+
+               const terminal = codexResult({
+                 status: "failed",
+                 kind: "failed",
+                 code: "LOCAL_COMMIT_POSTCONDITION_FAILED",
+                 retryable: false,
+                 task_id: reservation?.task_fingerprint || null,
+                 packet_id: packet?.packet_id || null,
+                 attempt: reservation?.attempt || 1,
+                 tester_required: false,
+                 tester_status: "not_required",
+                 verification_status: "failed",
+                 next_agents: [],
+                 reasons: [
+                   "LOCAL_COMMIT_POSTCONDITION_FAILED",
+                   commitCheck.reason,
+                 ],
+                 codex_run_id: handoff?.codex_run_id || null,
+                 progress: progressState,
+               });
+
+               await report(terminal);
+
+               await recordCodexTerminal("failed", {
+                 ...result,
+                 packet: false,
+                 gates_pending: false,
+                 validated_handoff: true,
+                 retryable: false,
+                 error_code: "LOCAL_COMMIT_POSTCONDITION_FAILED",
+               });
+
+               return JSON.stringify(terminal);
+             }
+           }
+
            if (testerRequired && promotedVerification.commands.length === 0) {
              await transitionCurrentPolicy(context.sessionID, CODEX_TASK_FAILED, { error: "TEST_COMMAND_UNAVAILABLE" });
              if (packetCallID) await updateWorkPacketByID(packetCallID, {

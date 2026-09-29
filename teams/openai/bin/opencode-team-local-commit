@@ -1,0 +1,107 @@
+#!/bin/bash
+set -euo pipefail
+umask 077
+
+if [ "$#" -ne 1 ]; then
+  echo "LOCAL_COMMIT_USAGE_ERROR" >&2
+  exit 64
+fi
+
+message="$1"
+repo="${OPENAI_REPOSITORY_PATH:?OPENAI_REPOSITORY_PATH is required}"
+
+if [ -z "$message" ]; then
+  echo "LOCAL_COMMIT_EMPTY_MESSAGE" >&2
+  exit 64
+fi
+
+case "$message" in
+  *$'\n'*|*$'\r'*)
+    echo "LOCAL_COMMIT_INVALID_MESSAGE" >&2
+    exit 64
+    ;;
+esac
+
+if [ "${#message}" -gt 200 ]; then
+  echo "LOCAL_COMMIT_MESSAGE_TOO_LONG" >&2
+  exit 64
+fi
+
+repo="$(cd "$repo" && pwd -P)"
+cwd="$(pwd -P)"
+
+if [ "$cwd" != "$repo" ]; then
+  echo "LOCAL_COMMIT_WRONG_DIRECTORY" >&2
+  exit 65
+fi
+
+top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+
+if [ -z "$top" ]; then
+  echo "LOCAL_COMMIT_NOT_GIT_REPOSITORY" >&2
+  exit 65
+fi
+
+top="$(cd "$top" && pwd -P)"
+
+if [ "$top" != "$repo" ]; then
+  echo "LOCAL_COMMIT_REPOSITORY_MISMATCH" >&2
+  exit 65
+fi
+
+before="$(git rev-parse HEAD 2>/dev/null || true)"
+initial_status="$(git status --porcelain=v1)"
+
+if [ -z "$initial_status" ]; then
+  jq -nc \
+    --arg head "$before" \
+    '{
+      code:"LOCAL_COMMIT_NOTHING_TO_COMMIT",
+      committed:false,
+      head_before:(if $head == "" then null else $head end),
+      head_after:(if $head == "" then null else $head end),
+      worktree_clean:true
+    }'
+  exit 0
+fi
+
+git diff --check
+
+git add -A
+
+git diff --cached --check
+
+if git diff --cached --quiet; then
+  echo "LOCAL_COMMIT_NOTHING_STAGED" >&2
+  exit 66
+fi
+
+git commit -m "$message"
+
+after="$(git rev-parse HEAD)"
+
+if [ -z "$after" ] || [ "$after" = "$before" ]; then
+  echo "LOCAL_COMMIT_HEAD_NOT_ADVANCED" >&2
+  exit 67
+fi
+
+final_status="$(git status --porcelain=v1)"
+
+if [ -n "$final_status" ]; then
+  echo "LOCAL_COMMIT_WORKTREE_DIRTY_AFTER" >&2
+  printf '%s\n' "$final_status" >&2
+  exit 68
+fi
+
+jq -nc \
+  --arg before "$before" \
+  --arg after "$after" \
+  --arg message "$message" \
+  '{
+    code:"LOCAL_COMMIT_SUCCESS",
+    committed:true,
+    head_before:(if $before == "" then null else $before end),
+    head_after:$after,
+    message:$message,
+    worktree_clean:true
+  }'

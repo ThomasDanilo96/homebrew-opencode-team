@@ -45,6 +45,129 @@ def requirement_block(agent, empty=False):
     fallbackChain: {chain}
   }},'''
 
+def _matching_delimiter(text, start, opener="[", closer="]"):
+    depth = 0
+    quote = None
+    escaped = False
+
+    for i in range(start, len(text)):
+        ch = text[i]
+
+        if quote is not None:
+            if escaped:
+                escaped = False
+                continue
+            if ch == "\\":
+                escaped = True
+                continue
+            if ch == quote:
+                quote = None
+            continue
+
+        if ch in ("'", '"', "`"):
+            quote = ch
+            continue
+
+        if ch == opener:
+            depth += 1
+        elif ch == closer:
+            depth -= 1
+            if depth == 0:
+                return i
+
+    return -1
+
+
+def empty_agent_fallback_chain(agent):
+    global src
+
+    requirements_anchor = "var AGENT_MODEL_REQUIREMENTS = {"
+    requirements_start = src.find(requirements_anchor)
+
+    if requirements_start < 0 or src.count(requirements_anchor) != 1:
+        print(
+            "REFUSED: AGENT_MODEL_REQUIREMENTS anchor count != 1",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    requirements_end = src.find("\n};", requirements_start)
+    if requirements_end < 0:
+        print(
+            "REFUSED: AGENT_MODEL_REQUIREMENTS end not found",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    agent_token = f"  {agent}: {{"
+    agent_start = src.find(
+        agent_token,
+        requirements_start,
+        requirements_end,
+    )
+
+    if agent_start < 0:
+        print(
+            f"REFUSED: BEST requirement for {agent} not found",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    chain_token = "    fallbackChain: "
+    chain_key = src.find(
+        chain_token,
+        agent_start,
+        requirements_end,
+    )
+
+    if chain_key < 0:
+        print(
+            f"REFUSED: BEST fallbackChain for {agent} not found",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    array_start = src.find(
+        "[",
+        chain_key + len(chain_token),
+        requirements_end,
+    )
+
+    if array_start < 0:
+        print(
+            f"REFUSED: BEST fallback array for {agent} not found",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    array_end = _matching_delimiter(
+        src,
+        array_start,
+        "[",
+        "]",
+    )
+
+    if array_end < 0 or array_end >= requirements_end:
+        print(
+            f"REFUSED: BEST fallback array for {agent} is malformed",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    current = src[array_start:array_end + 1]
+
+    if current == "[]":
+        return False
+
+    src = (
+        src[:array_start]
+        + "[]"
+        + src[array_end + 1:]
+    )
+
+    return True
+
+
 def patch_model_routes():
     global src
     changed = False
@@ -74,60 +197,188 @@ def patch_model_routes():
     else:
         print(f"REFUSED: unexpected BEST agent-requirement source state old={old_counts} empty={empty_counts}", file=sys.stderr); sys.exit(1)
 
+    # BEST Builder is OMO's Sisyphus agent. Its configured fallback chain
+    # must also be fail-closed so the selected Builder model cannot silently
+    # fall through to DeepSeek or another provider.
+    if empty_agent_fallback_chain("sisyphus"):
+        changed = True
+
     # Layer 2: configured delegate fallback_models and final execution chain.
     delegate_before = '''async function resolveSubagentModel(agentToUse, matchedAgent, executorCtx) {
   let categoryModel = undefined;
   let fallbackChain = undefined;
   const agentConfigKey = getAgentConfigKey(agentToUse);
   const agentOverride = findAgentOverride2(executorCtx.agentOverrides, agentConfigKey);'''
-    delegate_after = '''async function resolveSubagentModel(agentToUse, matchedAgent, executorCtx) {
+
+    delegate_after_v1 = '''async function resolveSubagentModel(agentToUse, matchedAgent, executorCtx) {
   let categoryModel = undefined;
   let fallbackChain = undefined;
   const agentConfigKey = getAgentConfigKey(agentToUse);
   const _bestNoDelegateFallback = agentConfigKey === "explore" || agentConfigKey === "librarian";
   const agentOverride = findAgentOverride2(executorCtx.agentOverrides, agentConfigKey);'''
+
+    delegate_after = '''async function resolveSubagentModel(agentToUse, matchedAgent, executorCtx) {
+  let categoryModel = undefined;
+  let fallbackChain = undefined;
+  const agentConfigKey = getAgentConfigKey(agentToUse);
+  const _bestNoDelegateFallback = agentConfigKey === "sisyphus" || agentConfigKey === "explore" || agentConfigKey === "librarian";
+  const agentOverride = findAgentOverride2(executorCtx.agentOverrides, agentConfigKey);'''
+
     delegate_anchor = "async function resolveSubagentModel(agentToUse, matchedAgent, executorCtx) {"
     delegate_sentinel_count = src.count(DELEGATE_SENTINEL)
+
     normalized_before = "  const normalizedAgentFallbackModels = normalizeFallbackModels(agentOverride?.fallback_models ?? agentCategoryConfig?.fallback_models);"
     normalized_after = "  const normalizedAgentFallbackModels = _bestNoDelegateFallback ? [] : normalizeFallbackModels(agentOverride?.fallback_models ?? agentCategoryConfig?.fallback_models);"
+
     chain_before = '''    const configuredFallbackChain = buildFallbackChainFromModels(normalizedAgentFallbackModels, defaultProviderID);
     fallbackChain = configuredFallbackChain ?? (resolutionSkipped || hasExplicitUserModel ? undefined : agentRequirement?.fallbackChain);'''
+
     chain_after = '''    const configuredFallbackChain = buildFallbackChainFromModels(normalizedAgentFallbackModels, defaultProviderID);
     fallbackChain = _bestNoDelegateFallback ? [] : (configuredFallbackChain ?? (resolutionSkipped || hasExplicitUserModel ? undefined : agentRequirement?.fallbackChain));'''
+
     if delegate_sentinel_count == 0:
-        if src.count(delegate_before) != 1 or src.count(delegate_after) != 0 or src.count(normalized_before) != 1 or src.count(normalized_after) != 0 or src.count(chain_before) != 1 or src.count(chain_after) != 0:
-            print("REFUSED: unexpected BEST delegate fallback source state", file=sys.stderr); sys.exit(1)
+        if (
+            src.count(delegate_before) != 1
+            or src.count(delegate_after_v1) != 0
+            or src.count(delegate_after) != 0
+            or src.count(normalized_before) != 1
+            or src.count(normalized_after) != 0
+            or src.count(chain_before) != 1
+            or src.count(chain_after) != 0
+        ):
+            print(
+                "REFUSED: unexpected BEST delegate fallback source state",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
         src = src.replace(delegate_before, delegate_after, 1)
         src = src.replace(normalized_before, normalized_after, 1)
         src = src.replace(chain_before, chain_after, 1)
+
         if src.count(delegate_anchor) != 1:
-            print("REFUSED: BEST delegate anchor count != 1", file=sys.stderr); sys.exit(1)
-        src = src.replace(delegate_anchor, f"{DELEGATE_SENTINEL}\n{delegate_anchor}", 1)
+            print(
+                "REFUSED: BEST delegate anchor count != 1",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+        src = src.replace(
+            delegate_anchor,
+            f"{DELEGATE_SENTINEL}\n{delegate_anchor}",
+            1,
+        )
         changed = True
-    elif delegate_sentinel_count != 1 or src.count(delegate_before) or src.count(normalized_before) or src.count(chain_before) or src.count(delegate_after) != 1 or src.count(normalized_after) != 1 or src.count(chain_after) != 1:
-        print("REFUSED: contradictory BEST delegate fallback protection state", file=sys.stderr); sys.exit(1)
+
+    elif delegate_sentinel_count == 1:
+        # Production V1 -> protected Builder migration.
+        if (
+            src.count(delegate_after_v1) == 1
+            and src.count(delegate_after) == 0
+            and src.count(normalized_after) == 1
+            and src.count(chain_after) == 1
+        ):
+            src = src.replace(
+                delegate_after_v1,
+                delegate_after,
+                1,
+            )
+            changed = True
+
+        elif not (
+            src.count(delegate_after_v1) == 0
+            and src.count(delegate_after) == 1
+            and src.count(normalized_after) == 1
+            and src.count(chain_after) == 1
+        ):
+            print(
+                "REFUSED: contradictory BEST delegate fallback protection state",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    else:
+        print(
+            "REFUSED: duplicate BEST delegate fallback sentinel",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
     # Layer 3: the final model-fallback controller boundary.
     controller_before = '''  function setPendingModelFallback(sessionID, agentName, currentProviderID, currentModelID) {
     const agentKey = getAgentConfigKey(agentName);
     const requirements = AGENT_MODEL_REQUIREMENTS[agentKey];'''
-    controller_after = '''  function setPendingModelFallback(sessionID, agentName, currentProviderID, currentModelID) {
+
+    controller_after_v1 = '''  function setPendingModelFallback(sessionID, agentName, currentProviderID, currentModelID) {
     const agentKey = getAgentConfigKey(agentName);
     if (agentKey === "explore" || agentKey === "librarian") {
       log2(`[model-fallback] BEST fail-closed: no authorized fallback for agent: ${agentName} (key: ${agentKey})`);
       return false;
     }
     const requirements = AGENT_MODEL_REQUIREMENTS[agentKey];'''
+
+    controller_after = '''  function setPendingModelFallback(sessionID, agentName, currentProviderID, currentModelID) {
+    const agentKey = getAgentConfigKey(agentName);
+    if (agentKey === "sisyphus" || agentKey === "explore" || agentKey === "librarian") {
+      log2(`[model-fallback] BEST fail-closed: no authorized fallback for agent: ${agentName} (key: ${agentKey})`);
+      return false;
+    }
+    const requirements = AGENT_MODEL_REQUIREMENTS[agentKey];'''
+
     controller_anchor = "  function setPendingModelFallback(sessionID, agentName, currentProviderID, currentModelID) {"
     cc = src.count(CONTROLLER_SENTINEL)
+
     if cc == 0:
-        if src.count(controller_before) != 1 or src.count(controller_after) != 0 or src.count(controller_anchor) != 1:
-            print("REFUSED: unexpected BEST fallback-controller source state", file=sys.stderr); sys.exit(1)
+        if (
+            src.count(controller_before) != 1
+            or src.count(controller_after_v1) != 0
+            or src.count(controller_after) != 0
+            or src.count(controller_anchor) != 1
+        ):
+            print(
+                "REFUSED: unexpected BEST fallback-controller source state",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
         src = src.replace(controller_before, controller_after, 1)
-        src = src.replace(controller_anchor, f"{CONTROLLER_SENTINEL}\n{controller_anchor}", 1)
+        src = src.replace(
+            controller_anchor,
+            f"{CONTROLLER_SENTINEL}\n{controller_anchor}",
+            1,
+        )
         changed = True
-    elif cc != 1 or src.count(controller_before) or src.count(controller_after) != 1:
-        print("REFUSED: contradictory BEST fallback-controller protection state", file=sys.stderr); sys.exit(1)
+
+    elif cc == 1:
+        # Production V1 -> protected Builder migration.
+        if (
+            src.count(controller_after_v1) == 1
+            and src.count(controller_after) == 0
+        ):
+            src = src.replace(
+                controller_after_v1,
+                controller_after,
+                1,
+            )
+            changed = True
+
+        elif not (
+            src.count(controller_after_v1) == 0
+            and src.count(controller_after) == 1
+        ):
+            print(
+                "REFUSED: contradictory BEST fallback-controller protection state",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    else:
+        print(
+            "REFUSED: duplicate BEST fallback-controller sentinel",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
     return changed
 
 v1_count = src.count(OLD_V1_SENTINEL)

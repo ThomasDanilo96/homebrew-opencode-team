@@ -18,6 +18,83 @@ node_zdotdir=$(mktemp -d "$codex_home/.codex-node-zdotdir.XXXXXX"); chmod 0700 "
 trap cleanup_node_zdotdir EXIT
 printf '%s\n' 'unsetopt rcs' "export PATH=$(printf '%q' "$node_bin_dir"):\$PATH" > "$node_zdotdir/.zshenv"; chmod 0600 "$node_zdotdir/.zshenv"
 node_lane_path="$node_bin_dir:${PATH:-}"
+
+local_commit_enabled=${OPENAI_CODEX_LOCAL_COMMIT:-0}
+
+case "$local_commit_enabled" in
+  0|1) ;;
+  *)
+    printf '%s\n' "OPENAI_CODEX_LOCAL_COMMIT must be 0 or 1" >&2
+    exit 2
+    ;;
+esac
+
+if [ "$local_commit_enabled" = 1 ]; then
+  capability_source="$(cd "$(dirname "$0")" && pwd)/opencode-team-local-commit"
+
+  if [ ! -x "$capability_source" ]; then
+    printf '%s\n' "Local commit capability is missing: $capability_source" >&2
+    exit 2
+  fi
+
+  mkdir -p "$codex_home/bin" "$codex_home/rules"
+  chmod 0700 "$codex_home/bin" "$codex_home/rules"
+
+  cp \
+    "$capability_source" \
+    "$codex_home/bin/opencode-team-local-commit"
+
+  chmod 0700 \
+    "$codex_home/bin/opencode-team-local-commit"
+
+  cat > "$codex_home/rules/default.rules" <<'RULES'
+prefix_rule(
+    pattern = ["opencode-team-local-commit"],
+    decision = "allow",
+    justification = "Explicit bounded local commit capability."
+)
+
+prefix_rule(
+    pattern = ["git", "add"],
+    decision = "forbidden",
+    justification = "Use opencode-team-local-commit."
+)
+
+prefix_rule(
+    pattern = ["git", "commit"],
+    decision = "forbidden",
+    justification = "Use opencode-team-local-commit."
+)
+
+prefix_rule(
+    pattern = ["git", "push"],
+    decision = "forbidden",
+    justification = "Remote push is not authorized."
+)
+
+prefix_rule(
+    pattern = ["git", "fetch"],
+    decision = "forbidden",
+    justification = "Remote Git operations are not authorized."
+)
+
+prefix_rule(
+    pattern = ["git", "pull"],
+    decision = "forbidden",
+    justification = "Remote Git operations are not authorized."
+)
+
+prefix_rule(
+    pattern = ["git", "-C"],
+    decision = "forbidden",
+    justification = "Commit capability is bound to the current repository."
+)
+RULES
+
+  chmod 0600 "$codex_home/rules/default.rules"
+
+  node_lane_path="$codex_home/bin:$node_bin_dir:${PATH:-}"
+fi
 if [ "${OPENAI_CODEX_NODE_PROBE:-}" = 1 ] || [ "${1:-}" = --probe-node ]; then
   ZDOTDIR="$node_zdotdir" PATH="$node_lane_path" /bin/zsh -lc 'command -v node; node --version'
   cleanup_node_zdotdir; exit 0
@@ -206,6 +283,22 @@ Efficiency contract:
 - Do not retry the same failed or environment-blocked probe.
 - Run only focused tests unless the full suite is explicitly requested.
   - Stop after requested verification and concise summary."
+
+if [ "$local_commit_enabled" = 1 ]; then
+  execution_task="$execution_task
+
+Local commit contract:
+- The authoritative objective explicitly permits one local commit.
+- Direct git add, git commit, git push, git fetch, and git pull are forbidden.
+- Inspect the repository using read-only Git commands.
+- Choose a concise commit message based on the actual diff.
+- Create the commit only by executing:
+  opencode-team-local-commit \"<message>\"
+- Call that capability at most once.
+- Never perform a remote Git operation.
+- After success, inspect git status and report the resulting commit hash."
+fi
+
 resume_prompt="Inspect the current workspace and continue the objective."
 persist_recovery() {
   local thread_id=$1 recovery_state=$2 final=${3:-false} temporary owner now deadline current_token current_attempt current_resume current_version next_version expected_version journal stage lock_token owner_pid age

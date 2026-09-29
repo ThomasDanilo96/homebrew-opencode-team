@@ -53,44 +53,125 @@ function extractFunction(source, signature) {
 }
 
 function migratedFixture() {
-  // The installed BEST bundle carries the native patch and may already contain the new
-  // protections. Rewind only those BEST-owned changes, then restore the real OMO chains.
+  // The installed BEST dependency is mutable: setup may have migrated it
+  // already. Build a deterministic migration fixture by preserving unrelated
+  // native BEST patches while restoring every model-routing surface from the
+  // pristine OMO dependency.
   const pristine = readFileSync(pristineInstalled, "utf8");
   let native = sourceFixture;
-  native = native
-    .replace(/^const _BEST_CONFIGURED_AGENT_NO_FALLBACK_V1 = true;\n/m, "")
-    .replace(/^const _BEST_DELEGATE_NO_FALLBACK_V1 = true;\n/m, "")
-    .replace(/^const _BEST_MODEL_FALLBACK_CONTROLLER_GUARD_V1 = true;\n/m, "");
-  native = native
-    .replace("  const _bestNoDelegateFallback = agentConfigKey === \"explore\" || agentConfigKey === \"librarian\";\n", "")
-    .replace("  const normalizedAgentFallbackModels = _bestNoDelegateFallback ? [] : normalizeFallbackModels(agentOverride?.fallback_models ?? agentCategoryConfig?.fallback_models);", "  const normalizedAgentFallbackModels = normalizeFallbackModels(agentOverride?.fallback_models ?? agentCategoryConfig?.fallback_models);")
-    .replace("    fallbackChain = _bestNoDelegateFallback ? [] : (configuredFallbackChain ?? (resolutionSkipped || hasExplicitUserModel ? undefined : agentRequirement?.fallbackChain));", "    fallbackChain = configuredFallbackChain ?? (resolutionSkipped || hasExplicitUserModel ? undefined : agentRequirement?.fallbackChain);")
-    .replace('    if (agentKey === "explore" || agentKey === "librarian") {\n      log2(`[model-fallback] BEST fail-closed: no authorized fallback for agent: ${agentName} (key: ${agentKey})`);\n      return false;\n    }\n', "");
-  assert.equal(native.includes("_BEST_DELEGATE_NO_FALLBACK_V1"), false);
-  assert.equal(native.includes("_BEST_MODEL_FALLBACK_CONTROLLER_GUARD_V1"), false);
-  const agentStart = pristine.indexOf("var AGENT_MODEL_REQUIREMENTS = {");
-  assert.notEqual(agentStart, -1, "fixture must be actual OMO source");
-  const agentEnd = pristine.indexOf("\n};", agentStart) + 3;
-  const req = pristine.slice(agentStart, agentEnd);
-  const nativePrefix = native.slice(0, native.indexOf("var AGENT_MODEL_REQUIREMENTS = {"));
-  const nativeReqStart = native.indexOf("var AGENT_MODEL_REQUIREMENTS = {");
-  const nativeReqEnd = native.indexOf("\n};", nativeReqStart) + 3;
-  const nativeReq = native.slice(nativeReqStart, nativeReqEnd);
-  const nativeSuffix = native.slice(nativeReqEnd);
-  const patchedReq = nativeReq
-    .replace(/  explore: \{\n    fallbackChain: \[\]\n  \},/, req.match(/  explore: \{\n    fallbackChain: \[[\s\S]*?\n  \},/)[0])
-    .replace(/  librarian: \{\n    fallbackChain: \[\]\n  \},/, req.match(/  librarian: \{\n    fallbackChain: \[[\s\S]*?\n  \},/)[0]);
-  assert.notEqual(patchedReq, nativeReq, "fixture restoration must replace both manually emptied chains");
-  return nativePrefix + patchedReq + nativeSuffix;
+
+  for (const sentinel of sentinels) {
+    native = native.replace(`${sentinel}\n`, "");
+  }
+
+  const restoreFunction = (signature) => {
+    const current = extractFunction(native, signature);
+    const baseline = extractFunction(pristine, signature);
+
+    assert.notEqual(
+      current.length,
+      0,
+      `installed fixture missing ${signature}`,
+    );
+
+    assert.notEqual(
+      baseline.length,
+      0,
+      `pristine fixture missing ${signature}`,
+    );
+
+    native = native.replace(current, baseline);
+  };
+
+  restoreFunction(
+    "async function resolveSubagentModel(agentToUse, matchedAgent, executorCtx)",
+  );
+
+  restoreFunction(
+    "function createModelFallbackStateController(input)",
+  );
+
+  const anchor = "var AGENT_MODEL_REQUIREMENTS = {";
+
+  const pristineStart = pristine.indexOf(anchor);
+  const nativeStart = native.indexOf(anchor);
+
+  assert.notEqual(
+    pristineStart,
+    -1,
+    "pristine fixture missing AGENT_MODEL_REQUIREMENTS",
+  );
+
+  assert.notEqual(
+    nativeStart,
+    -1,
+    "installed fixture missing AGENT_MODEL_REQUIREMENTS",
+  );
+
+  const pristineEnd = pristine.indexOf("\n};", pristineStart) + 3;
+  const nativeEnd = native.indexOf("\n};", nativeStart) + 3;
+
+  assert.ok(
+    pristineEnd > pristineStart,
+    "invalid pristine requirement object",
+  );
+
+  assert.ok(
+    nativeEnd > nativeStart,
+    "invalid installed requirement object",
+  );
+
+  const pristineRequirements = pristine.slice(
+    pristineStart,
+    pristineEnd,
+  );
+
+  native =
+    native.slice(0, nativeStart)
+    + pristineRequirements
+    + native.slice(nativeEnd);
+
+  // The resulting fixture must contain no BEST-owned model fallback
+  // protection before the patcher is invoked.
+  for (const sentinel of sentinels) {
+    assert.equal(
+      native.includes(sentinel),
+      false,
+      `fixture retained ${sentinel}`,
+    );
+  }
+
+  assert.equal(
+    native.includes(
+      'const _bestNoDelegateFallback = agentConfigKey === "sisyphus"'
+    ),
+    false,
+  );
+
+  assert.equal(
+    native.includes(
+      'const _bestNoDelegateFallback = agentConfigKey === "explore"'
+    ),
+    false,
+  );
+
+  assert.equal(
+    native.includes(
+      'BEST fail-closed: no authorized fallback for agent'
+    ),
+    false,
+  );
+
+  return native;
 }
 
-test("BEST migration patches actual OMO 4.19.4 source, preserves other agents and is idempotent", () => {
+test("BEST migration protects Builder, Explore and Librarian and is idempotent", () => {
   const first = runPatcher(migratedFixture());
   assert.equal(first.status, 0, first.output);
   for (const sentinel of sentinels) assert.equal(first.patched.split(sentinel).length - 1, 1);
+  assert.match(first.patched, /  sisyphus: \{\n    fallbackChain: \[\]/);
   assert.match(first.patched, /  explore: \{\n    fallbackChain: \[\]\n  \},/);
   assert.match(first.patched, /  librarian: \{\n    fallbackChain: \[\]\n  \},/);
-  assert.match(first.patched, /  sisyphus: \{\n    fallbackChain: \[/);
   assert.match(first.output, /MIGRATED|ALREADY_PATCHED/);
 
   const second = runPatcher(first.patched);
@@ -114,15 +195,15 @@ test("BEST migration refuses partial and unexpected source states without writin
   assert.equal(unknownResult.patched, unknown);
 });
 
-test("BEST requirements and fallback controller fail closed only for Explore and Librarian", () => {
+test("BEST requirements and fallback controller fail closed for Builder, Explore and Librarian", () => {
   const patched = runPatcher(migratedFixture());
   assert.equal(patched.status, 0, patched.output);
   const reqStart = patched.patched.indexOf("var AGENT_MODEL_REQUIREMENTS = {");
   const reqEnd = patched.patched.indexOf("\n};", reqStart) + 3;
   const requirements = new Function(`return (${patched.patched.slice(reqStart).match(/var AGENT_MODEL_REQUIREMENTS = ([\s\S]*?\n};)/)[1].replace(/\n};$/, "\n}" )})`)();
+  assert.equal(requirements.sisyphus.fallbackChain.length, 0);
   assert.equal(requirements.explore.fallbackChain.length, 0);
   assert.equal(requirements.librarian.fallbackChain.length, 0);
-  assert.ok(requirements.sisyphus.fallbackChain.length > 0);
   assert.ok(reqEnd > reqStart);
 
   const body = extractFunction(patched.patched, "function createModelFallbackStateController(input)");
@@ -130,15 +211,25 @@ test("BEST requirements and fallback controller fail closed only for Explore and
     (name) => name.toLowerCase(), requirements, () => {}, (_id, state) => state.fallbackChain[state.attemptCount] ?? null, () => false
   );
   const controller = factory({ pendingModelFallbacks: new Map(), lastToastKey: new Map(), sessionFallbackChains: new Map() });
-  for (const agent of ["explore", "librarian"]) {
+  for (const agent of ["sisyphus", "explore", "librarian"]) {
     const session = `ses-${agent}`;
-    controller.setSessionFallbackChain(session, ["qwen3.7-plus", "minimax-m3", "minimax-m2.7"]);
-    assert.equal(controller.setPendingModelFallback(session, agent, "opencode-go", "qwen3.7-plus"), false);
+    controller.setSessionFallbackChain(
+      session,
+      ["deepseek-v4-flash", "fallback-model"],
+    );
+
+    assert.equal(
+      controller.setPendingModelFallback(
+        session,
+        agent,
+        agent === "sisyphus" ? "openai" : "opencode-go",
+        agent === "sisyphus" ? "gpt-5.6-luna" : "qwen3.7-plus",
+      ),
+      false,
+    );
+
     assert.equal(controller.getNextFallback(session), null);
   }
-  controller.setSessionFallbackChain("ses-sisyphus", ["fallback-model"]);
-  assert.equal(controller.setPendingModelFallback("ses-sisyphus", "sisyphus", "openai", "gpt-primary"), true);
-  assert.equal(controller.getNextFallback("ses-sisyphus"), "fallback-model");
 });
 
 test("BEST delegate resolver discards configured fallbacks while preserving its primary model", async () => {
@@ -149,25 +240,54 @@ test("BEST delegate resolver discards configured fallbacks while preserving its 
     "getAgentConfigKey", "findAgentOverride2", "AGENT_MODEL_REQUIREMENTS", "normalizeFallbackModels", "getAvailableModelsForDelegateTask", "normalizeModelFormat", "resolveModelForDelegateTask2", "flattenToFallbackModelStrings", "buildFallbackChainFromModels", "resolveEffectiveFallbackEntry", "applyFallbackEntrySettings", "applyCategoryParams", "fuzzyMatchModel2", "log2",
     `${body}; return resolveSubagentModel;`
   )(
-    (name) => name.toLowerCase(), (overrides, key) => overrides[key], { explore: { fallbackChain: [] }, librarian: { fallbackChain: [] } }, (models) => models ?? [], async () => new Set(), (model) => typeof model === "string" ? { providerID: model.split("/")[0], modelID: model.split("/")[1] } : model,
+    (name) => name.toLowerCase(), (overrides, key) => overrides[key], { sisyphus: { fallbackChain: [] }, explore: { fallbackChain: [] }, librarian: { fallbackChain: [] } }, (models) => models ?? [], async () => new Set(), (model) => typeof model === "string" ? { providerID: model.split("/")[0], modelID: model.split("/")[1] } : model,
     ({ userModel }) => ({ model: userModel }), (models) => models, (models) => models?.length ? models : undefined, () => undefined, (model) => model, (model) => model, () => true, () => {}
   );
-  for (const agent of ["explore", "librarian"]) {
-    const result = await resolve(agent, { model: "opencode-go/qwen3.7-plus" }, {
-      agentOverrides: { [agent]: { model: "opencode-go/qwen3.7-plus", fallback_models: ["opencode-go/minimax-m3", "opencode-go/minimax-m2.7"] } },
-      userCategories: {}, client: {}
+  for (const agent of ["sisyphus", "explore", "librarian"]) {
+    const primary = agent === "sisyphus"
+      ? "openai/gpt-5.6-luna"
+      : "opencode-go/qwen3.7-plus";
+
+    const result = await resolve(agent, { model: primary }, {
+      agentOverrides: {
+        [agent]: {
+          model: primary,
+          fallback_models: [
+            "deepseek/deepseek-v4-flash",
+            "opencode-go/minimax-m3",
+          ],
+        },
+      },
+      userCategories: {},
+      client: {},
     });
-    assert.deepEqual(result.categoryModel, { providerID: "opencode-go", modelID: "qwen3.7-plus" });
+
+    assert.deepEqual(
+      result.categoryModel,
+      agent === "sisyphus"
+        ? { providerID: "openai", modelID: "gpt-5.6-luna" }
+        : { providerID: "opencode-go", modelID: "qwen3.7-plus" },
+    );
+
     assert.deepEqual(result.fallbackChain, []);
   }
 });
 
 test("BEST primary failure makes no alternate model attempts", () => {
-  for (const agent of ["explore", "librarian"]) {
+  for (const agent of ["sisyphus", "explore", "librarian"]) {
+    const primary = agent === "sisyphus"
+      ? "openai/gpt-5.6-luna"
+      : "opencode-go/qwen3.7-plus";
+
     const attempts = [];
-    const invokePrimary = () => { attempts.push("opencode-go/qwen3.7-plus"); throw new Error("primary unavailable"); };
+
+    const invokePrimary = () => {
+      attempts.push(primary);
+      throw new Error("primary unavailable");
+    };
+
     assert.throws(invokePrimary, /primary unavailable/);
-    assert.deepEqual(attempts, ["opencode-go/qwen3.7-plus"]);
+    assert.deepEqual(attempts, [primary]);
   }
 });
 

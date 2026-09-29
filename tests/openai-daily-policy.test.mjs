@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { assertDailyProviderModel, dailyCost, dailyFanout, dailyModelIdentity, dailySearchDecision, dailyInvestigationLimits, DAILY_AGENT_MODELS, DAILY_PRICING, shouldStopDaily } from "../teams/daily/daily-policy.mjs";
 import { allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, isStopText, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
-import { analyzeObjective, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
+import { analyzeObjective, objectiveRequestsLocalCommit, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
-import { dailyRootMutationToolPolicy, latestUserObjective, OpenAITeamTools, resolveInitialObjectiveFromClient } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { dailyRootMutationToolPolicy, latestUserObjective, localCommitPostcondition, OpenAITeamTools, resolveInitialObjectiveFromClient } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { resolveCodexModels } from "../teams/openai/config/opencode/codex-models.js";
 import { postExecutionPolicy } from "../teams/openai/config/opencode/execution-policy.js";
 
@@ -25,6 +25,220 @@ test("Daily shell policy is bounded by the genuine objective", () => {
   assert.equal(allowsDailyOrchestratorShell("bash", "rm file", "Do not delete anything", env), false);
   assert.equal(allowsDailyOrchestratorShell("bash", "rm file", "I explicitly confirm deletion", env), true);
   assert.equal(allowsDailyOrchestratorShell("bash", "printf ok", "Inspect", {}), false);
+});
+
+
+test("Daily commit requests are mutating and route through Codex without granting root Git mutation", () => {
+  const objectives = [
+    "Fai un commit delle modifiche attuali senza fare push.",
+    "Committa le modifiche correnti, non fare push.",
+    "Effettua il commit delle modifiche senza push.",
+    "Esegui git commit per le modifiche correnti ma non fare push.",
+    "Create a commit for the current changes and do not push.",
+    "Commit the current changes but do not push.",
+  ];
+
+  for (const objective of objectives) {
+    assert.equal(
+      analyzeObjective(objective).classification,
+      "MUTATING",
+      objective,
+    );
+
+    const tools = dailyRootMutationToolPolicy({
+      daily: true,
+      agent: "openai_orchestrator",
+      root: true,
+      objective,
+      tools: {
+        task: true,
+        read: true,
+        bash: true,
+        interactive_bash: true,
+        edit: true,
+        write: true,
+      },
+    });
+
+    assert.equal(tools.task, true, objective);
+    assert.equal(tools.read, false, objective);
+    assert.equal(tools.bash, false, objective);
+    assert.equal(tools.interactive_bash, false, objective);
+    assert.equal(tools.edit, false, objective);
+    assert.equal(tools.write, false, objective);
+  }
+
+  assert.equal(
+    analyzeObjective("Inspect commit abc123 and explain what changed").classification,
+    "READ_ONLY",
+  );
+});
+
+test("Daily orchestrator shell never performs local Git repository mutations directly", () => {
+  const env = { OPENAI_DAILY_PROFILE: "1" };
+  const objective = "Fai un commit delle modifiche attuali senza fare push.";
+
+  for (const command of [
+    "git add .",
+    "git add templates/customer.html",
+    "git commit -m 'Fix copy'",
+    "git commit --amend --no-edit",
+    "git checkout other-branch",
+    "git switch other-branch",
+    "git reset HEAD file",
+    "git restore file",
+    "git clean -fd",
+    "git merge feature",
+    "git rebase main",
+    "git cherry-pick abc123",
+    "git revert abc123",
+    "git rm file",
+    "git mv old new",
+    "git apply fix.patch",
+    "git am patch.mbox",
+    "git status && git commit -m 'Fix copy'",
+  ]) {
+    assert.equal(
+      allowsDailyOrchestratorShell("bash", command, objective, env),
+      false,
+      command,
+    );
+  }
+
+  for (const command of [
+    "git status",
+    "git status --short",
+    "git diff",
+    "git diff --check",
+    "git log -5",
+    "git branch --show-current",
+  ]) {
+    assert.equal(
+      allowsDailyOrchestratorShell(
+        "bash",
+        command,
+        "Inspect the repository",
+        env,
+      ),
+      true,
+      command,
+    );
+  }
+});
+
+
+test("Daily local commit intent respects explicit negation", () => {
+  for (const objective of [
+    "Crea un commit locale con tutte le modifiche correnti senza fare push.",
+    "Committa le modifiche correnti, non fare push.",
+    "Create a commit for the current changes and do not push.",
+  ]) {
+    assert.equal(
+      objectiveRequestsLocalCommit(objective),
+      true,
+      objective,
+    );
+  }
+
+  for (const objective of [
+    "Non fare commit, limita la verifica al diff.",
+    "Senza creare un commit, mostrami lo stato.",
+    "Do not commit anything; inspect the changes only.",
+    "Never run git commit; just inspect the repository.",
+  ]) {
+    assert.equal(
+      objectiveRequestsLocalCommit(objective),
+      false,
+      objective,
+    );
+  }
+});
+
+test("local commit postcondition requires HEAD advancement and a clean final worktree", () => {
+  const before = {
+    valid: true,
+    head: "a".repeat(40),
+    dirty: true,
+  };
+
+  assert.deepEqual(
+    localCommitPostcondition({
+      requested: true,
+      before,
+      after: {
+        valid: true,
+        head: "b".repeat(40),
+        dirty: false,
+      },
+    }),
+    {
+      ok: true,
+      reason: "commit_created",
+    },
+  );
+
+  assert.equal(
+    localCommitPostcondition({
+      requested: true,
+      before,
+      after: {
+        valid: true,
+        head: before.head,
+        dirty: true,
+      },
+    }).reason,
+    "head_not_advanced",
+  );
+
+  assert.equal(
+    localCommitPostcondition({
+      requested: true,
+      before,
+      after: {
+        valid: true,
+        head: "b".repeat(40),
+        dirty: true,
+      },
+    }).reason,
+    "worktree_dirty_after_commit",
+  );
+
+  assert.deepEqual(
+    localCommitPostcondition({
+      requested: true,
+      before: {
+        valid: true,
+        head: before.head,
+        dirty: false,
+      },
+      after: {
+        valid: true,
+        head: before.head,
+        dirty: false,
+      },
+    }),
+    {
+      ok: true,
+      reason: "nothing_to_commit",
+    },
+  );
+
+  assert.equal(
+    localCommitPostcondition({
+      requested: true,
+      before: {
+        valid: true,
+        head: before.head,
+        dirty: false,
+      },
+      after: {
+        valid: true,
+        head: "b".repeat(40),
+        dirty: false,
+      },
+    }).reason,
+    "unexpected_commit_from_clean_worktree",
+  );
 });
 
 test("mandatory tester gate allows only the exact tester task and blocks root shell", () => {

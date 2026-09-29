@@ -110,7 +110,28 @@ for (const team of ["openai", "daily"]) {
   assert(codexResolved.status === 0, `${team}/codex_executor runtime config rejected: ${codexResolved.stderr}`);
   const codexEffective = JSON.parse(codexResolved.stdout);
   same(codexEffective.mode, "subagent", `${team}/codex_executor effective mode`);
-  assert(codexEffective.tools?.openai_run_codex === true, `${team}/codex_executor missing openai_run_codex`);
+  assert(
+    config.agent.codex_executor?.tools?.openai_run_codex === true,
+    `${team}/codex_executor generated config missing openai_run_codex`,
+  );
+
+  const effectivePermissionAllowsCodex = Array.isArray(codexEffective.permission)
+    ? codexEffective.permission.some(
+        (entry) =>
+          entry?.permission === "openai_run_codex"
+          && entry?.action === "allow",
+      )
+    : codexEffective.permission?.openai_run_codex === "allow";
+
+  assert(
+    effectivePermissionAllowsCodex,
+    `${team}/codex_executor effective openai_run_codex permission missing`,
+  );
+
+  assert(
+    codexEffective.tools?.openai_run_codex !== false,
+    `${team}/codex_executor effective openai_run_codex explicitly disabled`,
+  );
   for (const tool of ["read", "glob", "grep", "bash", "apply_patch", "edit", "write", "task", "skill", "shell", "command", "todowrite", "openai_remote_read"]) {
     assert([false, undefined].includes(codexEffective.tools?.[tool]), `${team}/codex_executor operational tool exposed: ${tool}`);
   }
@@ -135,7 +156,23 @@ for (const team of ["openai", "daily"]) {
   if (effective.model !== undefined) {
     same(effective.model, { providerID: "openai", modelID: "gpt-5.6-luna" }, "BEST effective Builder model");
   }
-  same(effective.tools.call_omo_agent, false, "BEST effective Builder legacy delegation tool");
+  const effectiveCallOmoDenied = Array.isArray(effective.permission)
+    ? effective.permission.some(
+        (entry) =>
+          entry?.permission === "call_omo_agent"
+          && entry?.action === "deny",
+      )
+    : effective.permission?.call_omo_agent === "deny";
+
+  assert(
+    effectiveCallOmoDenied,
+    "BEST effective Builder legacy delegation permission missing",
+  );
+
+  assert(
+    effective.tools?.call_omo_agent !== true,
+    "BEST effective Builder legacy delegation tool unexpectedly enabled",
+  );
 }
 
 for (const team of ["best", "go", "openai", "daily"]) {

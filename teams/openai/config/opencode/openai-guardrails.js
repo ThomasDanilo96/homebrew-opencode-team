@@ -93,12 +93,14 @@ const shellStages = (operation) => {
   return stages;
 };
 const DAILY_SHELL_MUTATION = /^(?:(["'])(patch|apply_patch)\1|(patch|apply_patch))(?=\s|$|<)/i;
+const DAILY_GIT_REPOSITORY_MUTATION = /^git\s+(?:add|commit|checkout|switch|reset|restore|clean|merge|rebase|cherry-pick|revert|rm|mv|apply|am)\b/i;
 const hasDailyShellMutation = (operation) => shellStages(operation).some((stage) => DAILY_SHELL_MUTATION.test(stage.trim()));
+const hasDailyGitRepositoryMutation = (operation) => shellStages(operation).some((stage) => DAILY_GIT_REPOSITORY_MUTATION.test(stage.trim()));
 export const allowsDailyOrchestratorShell = (tool, command, authoritativeObjective, env = process.env) => {
   if (env.OPENAI_DAILY_PROFILE !== "1" || !DAILY_SHELL_TOOLS.has(String(tool || "").toLowerCase())) return false;
   const objective = String(authoritativeObjective || "");
   const operation = String(command || "");
-  if (hasDailyShellMutation(operation)) return false;
+  if (hasDailyShellMutation(operation) || hasDailyGitRepositoryMutation(operation)) return false;
   const category = confirmationCategory(operation);
   if (category === "vps_ssh" && SAFE_SSH_PROBE.test(operation)) return true;
   if (category === "vps_ssh" && !CATEGORIES.vps_ssh.test(objective)) return false;
