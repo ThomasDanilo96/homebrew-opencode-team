@@ -276,6 +276,8 @@ test("Daily template enables only orchestrator shell access and runtime forwards
   assert.match(template, /"skill_mcp": "deny"/);
   assert.match(template, /CodeGraph and skill_mcp are unavailable/);
   assert.match(template, /"openai_run_codex": false/);
+  assert.match(template, /NORMAL repository work is never direct: repository mutations must use exactly one codex_executor child first, and read-only repository objectives must use exactly one openai_explore child first/);
+  assert.match(template, /do not launch a second repository child/);
   const premium = await readFile(new URL("../teams/openai/opencode.jsonc.template", import.meta.url), "utf8");
   assert.match(premium, /"bash": "deny"/);
   assert.match(premium, /"interactive_bash": "deny"/);
@@ -516,15 +518,86 @@ test("Daily chat.message hook applies fail-closed tools to a mutating root with 
   }
 });
 
-test("Daily root mutation tool policy preserves read-only, child, and non-Daily behavior", () => {
+test("Daily root tool policy routes read-only roots through an OpenAI explorer child", () => {
   const tools = { task: false, read: true, edit: true, serena_find_symbol: true };
-  const cases = [
-    { daily: true, agent: "openai_orchestrator", root: true, objective: "Inspect calculator.js" },
+  const restricted = dailyRootMutationToolPolicy({ daily: true, agent: "openai_orchestrator", root: true, objective: "Inspect calculator.js", tools });
+  assert.equal(restricted.task, true);
+  assert.equal(restricted.read, false);
+  assert.equal(restricted.edit, false);
+  assert.equal(restricted.serena_find_symbol, false);
+
+  for (const policy of [
     { daily: true, agent: "openai_orchestrator", root: false, objective: "Add multiply(a, b)" },
     { daily: false, agent: "openai_orchestrator", root: true, objective: "Add multiply(a, b)" },
     { daily: true, agent: "openai_explore", root: true, objective: "Add multiply(a, b)" },
+  ]) assert.strictEqual(dailyRootMutationToolPolicy({ ...policy, tools }), tools);
+});
+
+test("Real Italian implementation objectives close the root surface before Codex", async () => {
+  const objectives = [
+    "Modifica il modulo campagne e aggiorna i flussi interessati.",
+    "Nel modulo campagne deve essere possibile associare più account Ads allo stesso cliente e scegliere quale usare per ogni campagna.",
+    "Nel dettaglio cliente deve comparire anche l'account Ads associato alla campagna e il flusso deve supportare più account per cliente.",
   ];
-  for (const policy of cases) assert.strictEqual(dailyRootMutationToolPolicy({ ...policy, tools }), tools);
+
+  for (const objective of objectives) {
+    assert.equal(analyzeObjective(objective).classification, "MUTATING", objective);
+    const tools = dailyRootMutationToolPolicy({
+      daily: true,
+      agent: "openai_orchestrator",
+      root: true,
+      objective,
+      tools: { task: true, read: true, glob: true, grep: true, bash: true, edit: true },
+    });
+    assert.equal(tools.task, true, objective);
+    for (const name of ["read", "glob", "grep", "bash", "edit"]) assert.equal(tools[name], false, `${name}: ${objective}`);
+  }
+
+  const readOnly = "Analizza come vengono collegati oggi clienti, campagne e Google Ads e spiegami il flusso senza modificare nulla.";
+  assert.equal(analyzeObjective(readOnly).classification, "READ_ONLY");
+  assert.equal(dailyRootMutationToolPolicy({
+    daily: true,
+    agent: "openai_orchestrator",
+    root: true,
+    objective: readOnly,
+    tools: { task: true, read: true, glob: true },
+  }).read, false);
+
+  const negated = "Non modificare nulla e non implementare niente: mostrami soltanto come funziona.";
+  assert.equal(analyzeObjective(negated).classification, "READ_ONLY");
+});
+
+test("Daily chat.message closes an unresolved root before objective recovery", async () => {
+  const previousDaily = process.env.OPENAI_DAILY_PROFILE;
+  const previousRoot = process.env.OPENAI_TEAM_STATE_ROOT;
+  process.env.OPENAI_DAILY_PROFILE = "1";
+  process.env.OPENAI_TEAM_STATE_ROOT = await mkdtemp(join(tmpdir(), "daily-unresolved-root-"));
+
+  try {
+    const plugin = await OpenAITeamTools({
+      client: {
+        session: {
+          get: async () => ({ data: { id: "root-session", parentID: null } }),
+          messages: async () => ({ data: [] }),
+        },
+      },
+    });
+    const output = {
+      message: { agent: "openai_orchestrator", tools: { task: true, read: true, glob: true, grep: true, bash: true, edit: true } },
+      parts: [],
+    };
+
+    await plugin["chat.message"]({ sessionID: "root-session", agent: "openai_orchestrator" }, output);
+
+    assert.equal(output.message.tools.task, true);
+    for (const name of ["read", "glob", "grep", "bash", "edit"]) assert.equal(output.message.tools[name], false, name);
+  } finally {
+    await rm(process.env.OPENAI_TEAM_STATE_ROOT, { recursive: true, force: true });
+    if (previousDaily === undefined) delete process.env.OPENAI_DAILY_PROFILE;
+    else process.env.OPENAI_DAILY_PROFILE = previousDaily;
+    if (previousRoot === undefined) delete process.env.OPENAI_TEAM_STATE_ROOT;
+    else process.env.OPENAI_TEAM_STATE_ROOT = previousRoot;
+  }
 });
 
 test("Daily and OpenAI templates expose Codex executor as a native subagent", async () => {

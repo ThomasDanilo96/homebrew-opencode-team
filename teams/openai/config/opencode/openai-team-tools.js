@@ -291,7 +291,7 @@ const DAILY_ROOT_MUTATION_DENIED_TOOLS = new Set([
 ]);
 
 export const dailyRootMutationToolPolicy = ({ daily = false, agent = "", root = false, objective = "", tools = {} } = {}) => {
-  if (daily !== true || agent !== "openai_orchestrator" || root !== true || analyzeObjective(objective).classification !== "MUTATING") return tools;
+  if (daily !== true || agent !== "openai_orchestrator" || root !== true) return tools;
   if (!tools || typeof tools !== "object" || Array.isArray(tools)) return tools;
   const names = new Set([
     ...Object.keys(tools),
@@ -2652,7 +2652,18 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         const exactMandatoryReviewerGate = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator" && rootParentForGate === masterParent(rootParentForGate) && ["reviewer", "reviewer_critical"].includes(requestedAgent) && (/MANDATORY_REVIEW_GATE\b/i.test(currentTaskObjective) || Boolean(mandatoryReviewPacket));
       const analysis = analyzeObjective(currentTaskObjective);
       if (!authoritativeParentObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
-     const route = resolveDelegatedTaskRoute(exactMandatoryTesterGate, routeDelegatedAgent, authoritativeParentObjective, currentTaskObjective, requestedAgent);
+       const rootObjectiveClassification = analyzeObjective(authoritativeParentObjective).classification;
+       const rootMutationRoute = rootParentForGate === input.sessionID
+         && rootObjectiveClassification === "MUTATING"
+         && !exactMandatoryTesterGate;
+       const rootReadOnlyRoute = rootParentForGate === input.sessionID
+         && rootObjectiveClassification === "READ_ONLY"
+         && !exactMandatoryTesterGate;
+       const route = rootMutationRoute
+         ? { classification: "MUTATING", agent: "codex_executor" }
+         : rootReadOnlyRoute
+           ? { classification: "READ_ONLY", agent: "openai_explore" }
+         : resolveDelegatedTaskRoute(exactMandatoryTesterGate, routeDelegatedAgent, authoritativeParentObjective, currentTaskObjective, requestedAgent);
     const remoteReadOnly = route?.classification === "REMOTE_READ_ONLY" ||
       (/\bopenai_remote_read\b/i.test(currentTaskObjective) && route?.classification !== "REMOTE_MUTATION");
     const delegatedAgent = decideDelegatedTaskAgent(requestedAgent, route?.classification, exactMandatoryTesterGate);
@@ -2681,12 +2692,13 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     let agent = String(output.args?.subagent_type || output.args?.agent || "");
       const allowedTaskAgents = new Set(["codex_executor", "openai_librarian", "openai_explore", "openai_ops", "tester", "reviewer", "reviewer_critical", "specialist"]);
       if (!allowedTaskAgents.has(agent)) throw new Error(`Native task agent '${agent || "(missing)"}' is not allowed for the OpenAI team.`);
-       const rootParent = masterParent(input.sessionID);
+      if (agent === "codex_executor" && args.run_in_background === true) throw new GuardrailPolicyError("CODEX_BACKGROUND_DENIED");
+        const rootParent = masterParent(input.sessionID);
        const rootGuard = guardrails.get(rootParent) || guard;
-       if (agent === "codex_executor" && rootGuard?.codexFailureTerminal) {
-         const error = new Error("CODEX_RETRY_DENIED"); error.code = "CODEX_RETRY_DENIED"; error.retryable = false; throw error;
-       }
-       let reviewTaskID = ["reviewer", "reviewer_critical"].includes(agent) ? ((currentTaskObjective.match(/\breview_task_id=([a-f0-9]{64})\b/i) || currentTaskObjective.match(/\breview\s+task\s+([a-f0-9]{64})\b/i)) || [])[1]?.toLowerCase() || mandatoryReviewPacketForGate?.packet_id || mandatoryReviewPacket?.packet_id || null : null;
+      if (agent === "codex_executor" && rootGuard?.codexFailureTerminal) {
+          const error = new Error("CODEX_RETRY_DENIED"); error.code = "CODEX_RETRY_DENIED"; error.retryable = false; throw error;
+        }
+        let reviewTaskID = ["reviewer", "reviewer_critical"].includes(agent) ? ((currentTaskObjective.match(/\breview_task_id=([a-f0-9]{64})\b/i) || currentTaskObjective.match(/\breview\s+task\s+([a-f0-9]{64})\b/i)) || [])[1]?.toLowerCase() || mandatoryReviewPacketForGate?.packet_id || mandatoryReviewPacket?.packet_id || null : null;
       let reviewTarget = null;
       let gateTarget = null;
        if (["reviewer", "reviewer_critical"].includes(agent)) {
@@ -2702,15 +2714,27 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        const canonicalReviewObjective = reviewTarget
          ? canonicalDelegatedObjective(authoritativeParentObjective, `Review completed work review_task_id=${reviewTaskID}`, { targetBound: true })
          : "";
-        const delegatedObjective = exactMandatoryTesterGate
-            ? exactMandatoryTesterObjective(authoritativeParentObjective, objectiveBeforeMarker(currentTaskObjective), durableGate)
-            : reviewTarget
-              ? canonicalReviewObjective ? `${canonicalReviewObjective}\nReturn APPROVE or REJECT as the terminal verdict, followed by concise findings.` : ""
-           : canonicalDelegatedObjective(authoritativeParentObjective, currentTaskObjective, { targetBound: Boolean(reviewTarget) });
+       const delegatedObjective = exactMandatoryTesterGate
+             ? exactMandatoryTesterObjective(authoritativeParentObjective, objectiveBeforeMarker(currentTaskObjective), durableGate)
+             : reviewTarget
+               ? canonicalReviewObjective ? `${canonicalReviewObjective}\nReturn APPROVE or REJECT as the terminal verdict, followed by concise findings.` : ""
+            : `${canonicalDelegatedObjective(authoritativeParentObjective, currentTaskObjective, { targetBound: Boolean(reviewTarget) })}${route?.classification === "MUTATING" && agent === "codex_executor" ? "\nThe parent objective is mutating. Implement it directly in the repository; do not downgrade it to read-only because of delegated wording." : ""}`;
       if (!delegatedObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
 
       if (agent === "codex_executor") {
         const rootObjectiveSHA = objectiveHash(authoritativeParentObjective);
+        const existingCodex = (await listWorkPackets()).some((packet) =>
+          packet?.agent === "codex_executor"
+          && packet?.parent_session_id === rootParent
+          && packet?.root_objective_sha256 === rootObjectiveSHA
+          && packet?.packet_id,
+        );
+        if (existingCodex) {
+          const error = new Error("CODEX_DUPLICATE_DENIED");
+          error.code = "CODEX_DUPLICATE_DENIED";
+          error.retryable = false;
+          throw error;
+        }
         const durableTerminalFailure = terminalCodexFailureForRootObjective(
           await listWorkPackets(),
           rootParent,
@@ -2720,6 +2744,21 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         if (rootGuard?.codexFailureTerminal || durableTerminalFailure) {
           const error = new Error("CODEX_RETRY_DENIED");
           error.code = "CODEX_RETRY_DENIED";
+          error.retryable = false;
+          throw error;
+        }
+      }
+      if (route?.classification === "READ_ONLY" && agent === "openai_explore") {
+        const rootObjectiveSHA = objectiveHash(authoritativeParentObjective);
+        const existingExplore = (await listWorkPackets()).some((packet) =>
+          packet?.agent === "openai_explore"
+          && packet?.parent_session_id === rootParent
+          && packet?.root_objective_sha256 === rootObjectiveSHA
+          && packet?.packet_id,
+        );
+        if (existingExplore) {
+          const error = new Error("READ_ONLY_EXPLORE_DUPLICATE_DENIED");
+          error.code = "READ_ONLY_EXPLORE_DUPLICATE_DENIED";
           error.retryable = false;
           throw error;
         }
@@ -2789,7 +2828,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const gateIntent = /\b(?:gate|gated|verification[_ -]?gate|release[_ -]?gate)\b/i.test(currentTaskObjective);
       // A tester may freely perform an isolated read-only check only when it
       // cannot accidentally leave an existing mandatory gate unbound.
-      if ((["high", "critical"].includes(analysis.risk) || gateIntent || pendingGates.length) && !testTaskID) throw new Error("TEST_TARGET_REQUIRED");
+       if ((["high", "critical"].includes(analysis.risk) || gateIntent || pendingGates.length || (route?.classification === "MUTATING" && rootParent === input.sessionID)) && !testTaskID) throw new Error("TEST_TARGET_REQUIRED");
       if (testTaskID) {
         const target = packets.find((packet) => packet.packet_id === testTaskID);
         if (!target || target.parent_session_id !== rootParent || !["pending", "required"].includes(target.tester_status)) throw new Error("TEST_TARGET_DENIED");

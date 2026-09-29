@@ -19,10 +19,11 @@ export const objectiveRequestsLocalCommit = (objective) => {
 };
 
 const NEGATED_MUTATION = /\b(?:make\s+no\s+edits?|no\s+edits?)\b|\b(?:do\s+not|don['’]t|must\s+not|never)\s+(?:(?:(?![.;]|\bthen\b).)*?\b(?:run\s+)?(?:any\s+)?write\s+operations?\b|(?:(?:ever|also|actually|just)\s+)*(?:add(?!\s*\()|create|modify|change|implement|refactor|migrat(?:e|ion)?|patch|delete|rename|update|deploy|fix(?:es|ed|ing)?|write\s+(?:code|file|files|script|tests?|implementation|changes?)|(?:apply|make)\s+(?:the\s+)?(?:changes?|edits?|fix(?:es)?|patch(?:es)?))(?:\s+(?:or|and)\s+(?:add(?!\s*\()|create|modify|change|implement|refactor|migrat(?:e|ion)?|patch|delete|rename|update|deploy|fix(?:es|ed|ing)?|write\s+(?:code|file|files|script|tests?|implementation|changes?)|(?:apply|make)\s+(?:the\s+)?(?:changes?|edits?|fix(?:es)?|patch(?:es)?)))*\b)/gi;
-const READ_ONLY_ACTION = /\b(?:analy[sz]e|inspect|audit|research|compare|review|map|understand|report|profile|investigate|find|read|propose|document|test|verify)\b/i;
+const READ_ONLY_ACTION = /\b(?:analy[sz]e|analizza|inspect|audit|research|compare|review|map|understand|report|profile|investigate|find|read|propose|document|test|verify|spiega|spiegami|mostra|mostrami)\b|\b(?:senza|non)\s+(?:modificare|implementare|scrivere|cambiare)\b/i;
 const REMOTE_CONTEXT = /\b(?:ssh|remote|server|vps|docker(?:\s+(?:ps|inspect|logs|images|stats|info)|\s+containers?)?|systemctl|journalctl|remote\s+logs?|host\s+diagnostics?|deployment\s+state)\b/i;
 const REMOTE_MUTATION = /\b(?:restart|start|stop|reload|enable|disable|exec|run|kill|rm|pull|push|checkout|switch|reset|clean|commit|merge|rebase|deploy|delete|remove|change|modify)\b/i;
 const REPOSITORY_CONTEXT = /\b(?:repository|repo|code|file|module|test|implementation|database|schema|dependency)\b/i;
+const IMPLEMENTATION_OUTCOME = /(?:\b(?:deve|dovr(?:à|a)|bisogna|occorre)\s+(?:essere\s+)?(?:possibile|supportare|comparire|consentire|permettere|gestire)\b|\b(?:must|should|needs?\s+to|allow(?:s)?|support(?:s)?|enable(?:s)?|show(?:s)?)\s+(?:the\s+)?(?:system|flow|module|feature|account|support|ability)\b)/iu;
 const QUOTED_TERM = /(?:`[^`]*`|'[^']*'|"[^"]*")/g;
 const HISTORY = /\b(?:already\s+(?:applied|fixed|implemented)|after\b.*\bfix(?:ed)?\b|history|provenance|resume)\b/i;
 const PROPOSAL = /\b(?:propos(?:e|ing)|proposed)\s+(?:a\s+)?(?:fix|change|patch)/i;
@@ -34,7 +35,7 @@ const CRITICAL_AUDIT_OR_REVIEW = /\b(?:critical\s+security|security\s+critical|r
 const EXPLICIT_REVIEW = /\b(?:audit|correctness|security\s+review|architecture\s+review|critical\s+review|review(?!\s+architecture))\b/i;
 const STRONG_MUTATION = /\b(?:create|modify|change|implement|refactor|migrat(?:e|ion)?|patch|delete|rename|update|deploy)\b|\bwrite\s+(?:code|file|files|script|implementation|changes?)\b/i;
 const HIGH_RISK = /\b(?:security|auth(?:entication|orization)?|schema|data\s+(?:delet(?:e|ion)|removal)|delete\s+(?:production\s+)?data|shared\s+runtime|concurren(?:cy|t)|cleanup|deploy(?:ment)?)\b/i;
-const EXPLICIT_REVIEW_GATE = /\b(?:reviewer|reviewer\s+gate|review\s+gate)\b/i;
+const EXPLICIT_REVIEW_GATE = /\b(?:reviewer|reviewer\s+gate|review\s+gate|revisore|revisione)\b/iu;
 
 const unquoted = (text) => text.replace(QUOTED_TERM, " ");
 const withoutNegatedMutations = (text) => text.replace(NEGATED_MUTATION, " ");
@@ -55,7 +56,7 @@ export const analyzeObjective = (objective) => {
       text: clauseText,
       // History/proposal language may qualify a request, but never neutralizes an
       // unquoted mutation verb in that same clause.
-      intent: (MUTATING_INTENT.test(mutationClausePlain) || objectiveRequestsLocalCommit(mutationClausePlain)) && !PROPOSAL.test(clausePlain) ? "MUTATING" : READ_ONLY_ACTION.test(clausePlain) ? "READ_ONLY" : "AMBIGUOUS",
+      intent: (MUTATING_INTENT.test(mutationClausePlain) || objectiveRequestsLocalCommit(mutationClausePlain) || IMPLEMENTATION_OUTCOME.test(mutationClausePlain)) && !PROPOSAL.test(clausePlain) ? "MUTATING" : READ_ONLY_ACTION.test(clausePlain) ? "READ_ONLY" : "AMBIGUOUS",
       remote: REMOTE_CONTEXT.test(clausePlain),
     };
   });
