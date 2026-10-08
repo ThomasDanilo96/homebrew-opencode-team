@@ -187,16 +187,27 @@ jobs:
               if ! tmux -L "$tmux_socket" has-session -t "$session" 2>/dev/null; then break; fi
               sleep 1
             done
-            if [ "$ready" -ne 1 ]; then cat "$log" >&2; fi
-            test "$ready" -eq 1
+            if [ "$ready" -ne 1 ]; then
+              echo "Runtime smoke did not become ready for $team; last readiness: $readiness" >&2
+              cat "$log" >&2
+              exit 1
+            fi
             tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
             for _ in $(seq 1 15); do
               if ! ps -axo pid=,command= | rg "$test_home" | rg -v 'rg ' >/dev/null; then break; fi
               sleep 1
             done
-            if ps -axo pid=,command= | rg "$test_home" | rg -v 'rg '; then
+            remaining_processes="$(ps -axo pid=,command= | rg "$test_home" | rg -v 'rg ' || true)"
+            if [ -n "$remaining_processes" ]; then
+              echo "Runtime smoke left processes for $team:" >&2
+              printf '%s\n' "$remaining_processes" >&2
               exit 1
             fi
-            test "$(find "$test_home/cache/runtime/$team/runs" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null | wc -l | tr -d ' ')" = 0
+            remaining_runs="$(find "$test_home/cache/runtime/$team/runs" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null || true)"
+            if [ -n "$remaining_runs" ]; then
+              echo "Runtime smoke left run state for $team:" >&2
+              printf '%s\n' "$remaining_runs" >&2
+              exit 1
+            fi
             rm -rf "$run_dir"
           done
