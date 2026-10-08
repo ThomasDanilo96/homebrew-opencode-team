@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: public release `v0.1.29`.
+Status: release `v0.1.31`.
 
 ## Goal
 
@@ -60,6 +60,15 @@ Profiles:
 - `BEST`: general multi-agent OpenCode profile with the certified BEST router.
 - `GO`: OpenCode Go profile with the certified GO OMO patches.
 - `OPENAI`: OpenAI-only orchestration profile with Codex and Serena integration.
+
+## Completion notifications
+
+All profiles send a macOS notification when the root chat finishes a response.
+Clicking it brings the terminal running that tmux session to the foreground and
+returns to the matching chat. On first use, allow notifications for
+`terminal-notifier` in macOS. To keep them visible until clicked, set its alert
+style to **Alerts** in System Settings → Notifications; macOS automatically
+hides notifications using the **Banners** style.
 
 ## Development
 

@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["@OMO_PLUGIN@"],
+  "plugin": ["@OMO_PLUGIN@", "@PACKAGE_ROOT@/shared/mac-notifications/plugin.js"],
   "model": "opencode-go/mimo-v2.5",
   "small_model": "opencode-go/mimo-v2.5",
   "default_agent": "OpenCode-Builder",

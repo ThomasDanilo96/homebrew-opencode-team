@@ -22,7 +22,8 @@
   "plugin": [
     "@OMO_PLUGIN@",
     "@PACKAGE_ROOT@/teams/openai/config/opencode/openai-team-tools.js",
-    "@PACKAGE_ROOT@/teams/openai/config/opencode/openai-authorship-guard.js"
+    "@PACKAGE_ROOT@/teams/openai/config/opencode/openai-authorship-guard.js",
+    "@PACKAGE_ROOT@/shared/mac-notifications/plugin.js"
   ],
   "agent": {
     "openai_orchestrator": {

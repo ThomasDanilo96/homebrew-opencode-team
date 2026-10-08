@@ -2,7 +2,8 @@
   "$schema": "https://opencode.ai/config.json",
   "plugin": [
     "@OMO_PLUGIN@",
-    "@PACKAGE_ROOT@/teams/best/best-router-plugin.js"
+    "@PACKAGE_ROOT@/teams/best/best-router-plugin.js",
+    "@PACKAGE_ROOT@/shared/mac-notifications/plugin.js"
   ],
   "model": "openai/gpt-6-luna",
   "small_model": "opencode-go/mimo-v2.5",
@@ -14,7 +15,7 @@
   },
   "agent": {
     "OpenCode-Builder": {
-      "prompt_append": "When BEST routing guidance contains <BEST_ROUTER_ROUTE>, obey it before any analysis: issue the exact native task call(s) named by the guidance with subagent_type and run_in_background=true. EXPLORE and LIBRARIAN require exactly one matching task and no general substitute or retry; BOTH requires exactly one explore task and exactly one librarian task. Do not call call_omo_agent or use repository/research tools before those route tasks.",
+      "prompt_append": "When BEST routing guidance contains <BEST_ROUTER_ROUTE>, obey it before any analysis: issue the exact native task call(s) named by the guidance with subagent_type and run_in_background=true. EXPLORE and LIBRARIAN require exactly one matching task; BOTH requires exactly one explore task and one librarian task; FOUR requires exactly one each of explore, librarian, openai-architect, and openai-reviewer, launched in parallel. Do not substitute agents, retry, launch duplicates, call call_omo_agent, or use repository/research tools before the required tasks are launched.",
       "permission": {
         "task": "allow",
         "call_omo_agent": "deny",
@@ -62,6 +63,50 @@
         "serena_find_referencing_symbols": "allow",
         "serena_get_diagnostics_for_file": "allow",
         "serena_search_for_pattern": "allow",
+        "serena_replace_content": "deny",
+        "serena_replace_in_files": "deny",
+        "serena_replace_symbol_body": "deny",
+        "serena_insert_before_symbol": "deny",
+        "serena_insert_after_symbol": "deny",
+        "serena_rename_symbol": "deny",
+        "serena_safe_delete_symbol": "deny",
+        "serena_write_memory": "deny",
+        "serena_edit_memory": "deny",
+        "serena_delete_memory": "deny",
+        "serena_rename_memory": "deny"
+      }
+    },
+    "openai-architect": {
+      "mode": "subagent",
+      "model": "openai/gpt-6-luna",
+      "prompt": "Analyze the requested complex implementation independently. Inspect relevant code and return a concise implementation plan, affected components, constraints, and risks. Do not edit files.",
+      "permission": {
+        "task": "deny",
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
+        "serena_replace_content": "deny",
+        "serena_replace_in_files": "deny",
+        "serena_replace_symbol_body": "deny",
+        "serena_insert_before_symbol": "deny",
+        "serena_insert_after_symbol": "deny",
+        "serena_rename_symbol": "deny",
+        "serena_safe_delete_symbol": "deny",
+        "serena_write_memory": "deny",
+        "serena_edit_memory": "deny",
+        "serena_delete_memory": "deny",
+        "serena_rename_memory": "deny"
+      }
+    },
+    "openai-reviewer": {
+      "mode": "subagent",
+      "model": "openai/gpt-6-luna",
+      "prompt": "Independently review the requested implementation requirements. Identify edge cases, compatibility concerns, and focused behavior checks. Do not edit files.",
+      "permission": {
+        "task": "deny",
+        "bash": "deny",
+        "edit": "deny",
+        "write": "deny",
         "serena_replace_content": "deny",
         "serena_replace_in_files": "deny",
         "serena_replace_symbol_body": "deny",

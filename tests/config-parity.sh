@@ -45,7 +45,7 @@ same(best.model, "openai/gpt-6-luna", "BEST model");
 same(best.small_model, "opencode-go/mimo-v2.5", "BEST small_model");
 same(best.default_agent, "OpenCode-Builder", "BEST default_agent");
 same(best.tools.call_omo_agent, false, "BEST profile legacy delegation tool");
-same(Object.keys(best.agent).sort(), ["OpenCode-Builder", "explore", "librarian"], "BEST agents");
+same(Object.keys(best.agent).sort(), ["OpenCode-Builder", "explore", "librarian", "openai-architect", "openai-reviewer"], "BEST agents");
 same(best.agent["OpenCode-Builder"].permission.task, "allow", "BEST Builder permission");
 same(best.agent["OpenCode-Builder"].permission.call_omo_agent, "deny", "BEST Builder legacy delegation permission");
 same(best.agent["OpenCode-Builder"].tools.call_omo_agent, false, "BEST Builder legacy delegation tool");
@@ -62,7 +62,7 @@ assert(bestOmo.browser_automation_engine?.playwright_mcp_args?.some((value) => v
 assert(best.mcp?.serena?.enabled === true, "BEST Serena MCP missing");
 assert(path.isAbsolute(best.mcp.serena.command[0]) && (best.mcp.serena.command[0].startsWith(path.join(home, "data")) || best.mcp.serena.command[0].startsWith(dependencyRoot)), "BEST Serena path invalid");
 assert(best.provider?.["opencode-go"]?.options?.timeout === 300000, "BEST provider options missing");
-assert(best.plugin.length === 2 && path.isAbsolute(best.plugin[0]), "BEST plugin order/path invalid");
+assert(best.plugin.length === 3 && path.isAbsolute(best.plugin[0]), "BEST plugin order/path invalid");
 
 const go = read("go");
 same(go.model, "opencode-go/mimo-v2.5", "GO model");
@@ -78,7 +78,7 @@ assert(go.disabled_providers.includes("openai"), "GO provider policy missing");
 assert(go.mcp?.serena?.enabled === true, "GO Serena MCP missing");
 assert(path.isAbsolute(go.mcp.serena.command[0]) && (go.mcp.serena.command[0].startsWith(path.join(home, "data")) || go.mcp.serena.command[0].startsWith(dependencyRoot)), "GO Serena path invalid");
 assert(go.provider?.["opencode-go"]?.options?.max_tokens === 32768, "GO provider options missing");
-assert(go.plugin.length === 1 && path.isAbsolute(go.plugin[0]), "GO plugin order/path invalid");
+assert(go.plugin.length === 2 && path.isAbsolute(go.plugin[0]), "GO plugin order/path invalid");
 
 const openai = read("openai");
 const openaiOmo = JSON.parse(fs.readFileSync(path.join(home, "config", "openai", "xdg-config", "opencode", "oh-my-openagent.jsonc"), "utf8"));
@@ -92,7 +92,7 @@ assert(openaiOmo.browser_automation_engine?.provider === "playwright", "OPENAI P
 assert(openaiOmo.browser_automation_engine?.playwright_mcp_args?.some((value) => value.endsWith("/openai/playwright/output")), "OPENAI Playwright output path missing");
 assert(openai.mcp?.serena?.enabled === true, "OPENAI Serena MCP missing");
 assert(path.isAbsolute(openai.mcp.serena.command[0]) && (openai.mcp.serena.command[0].startsWith(path.join(home, "data")) || openai.mcp.serena.command[0].startsWith(dependencyRoot)), "OPENAI Serena path invalid");
-assert(openai.plugin.length === 3 && openai.plugin.every(path.isAbsolute), "OPENAI plugin paths invalid");
+assert(openai.plugin.length === 4 && openai.plugin.every(path.isAbsolute), "OPENAI plugin paths invalid");
 
 const daily = read("daily");
 const dailyOmo = JSON.parse(fs.readFileSync(path.join(home, "config", "daily", "xdg-config", "opencode", "oh-my-openagent.jsonc"), "utf8"));
@@ -106,7 +106,7 @@ assert(dailyOmo.browser_automation_engine?.provider === "playwright", "DAILY Pla
 assert(dailyOmo.browser_automation_engine?.playwright_mcp_args?.some((value) => value.endsWith("/daily/playwright/output")), "DAILY Playwright output path missing");
 assert(daily.mcp?.serena?.enabled === true, "OPENAI DAILY Serena MCP missing");
 assert(path.isAbsolute(daily.mcp.serena.command[0]) && (daily.mcp.serena.command[0].startsWith(path.join(home, "data")) || daily.mcp.serena.command[0].startsWith(dependencyRoot)), "OPENAI DAILY Serena path invalid");
-assert(daily.plugin.length === 3 && daily.plugin.every(path.isAbsolute), "OPENAI DAILY plugin paths invalid");
+assert(daily.plugin.length === 4 && daily.plugin.every(path.isAbsolute), "OPENAI DAILY plugin paths invalid");
 assert(daily.plugin[1].endsWith("/teams/openai/config/opencode/openai-team-tools.js"), "OPENAI DAILY shared tools path invalid");
 
 const serenaMutationPatterns = ["serena_replace_*", "serena_insert_*", "serena_rename_*", "serena_delete_*", "serena_write_*", "serena_safe_delete_*", "serena_edit_*"];
@@ -217,6 +217,7 @@ for (const team of ["openai", "daily"]) {
 for (const team of ["best", "go", "openai", "daily"]) {
   const config = read(team);
   const serialized = JSON.stringify(config);
+  assert(config.plugin.some((plugin) => plugin === path.join(root, "shared", "mac-notifications", "plugin.js")), `${team} shared macOS notification plugin missing`);
   assert(!serialized.includes(".opencode-" + "team-staging"), `${team} staging fallback`);
   assert(!serialized.includes("go-" + "final-ux-v1"), `${team} historical fallback`);
 }

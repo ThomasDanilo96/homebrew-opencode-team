@@ -12,7 +12,8 @@ const LOG = process.env.BEST_ROUTER_LOG ?? join(STATE_ROOT, "opencode-team", "be
 const ROUTES = new Set([
   "<BEST_ROUTER_ROUTE>EXPLORE</BEST_ROUTER_ROUTE>",
   "<BEST_ROUTER_ROUTE>LIBRARIAN</BEST_ROUTER_ROUTE>",
-  "<BEST_ROUTER_ROUTE>BOTH</BEST_ROUTER_ROUTE>"
+  "<BEST_ROUTER_ROUTE>BOTH</BEST_ROUTER_ROUTE>",
+  "<BEST_ROUTER_ROUTE>FOUR</BEST_ROUTER_ROUTE>"
 ]);
 const ROUTE_STATE = new Map();
 const PENDING_TASKS = new Map();
@@ -56,7 +57,8 @@ export const memoryCircuitOpen = () => {
 const ROUTE_GUIDANCE = {
   EXPLORE: "BEST ROUTE EXPLORE: FIRST and ONLY route-satisfying action: issue exactly one native task(subagent_type=\"explore\", run_in_background=true). The task schema requires both fields; do not omit run_in_background. Do not use general, do not retry, do not launch a duplicate explore task, do not attempt semantic repository tools first, and do not attempt call_omo_agent.",
   LIBRARIAN: "BEST ROUTE LIBRARIAN: FIRST and ONLY route-satisfying action: issue exactly one native task(subagent_type=\"librarian\", run_in_background=true). The task schema requires both fields; do not omit run_in_background. Do not use general, do not retry, do not launch a duplicate librarian task, do not attempt documentation tools first, and do not attempt call_omo_agent.",
-  BOTH: "BEST ROUTE BOTH: FIRST and ONLY route-satisfying actions: issue exactly two native task calls, one task(subagent_type=\"explore\", run_in_background=true) and one task(subagent_type=\"librarian\", run_in_background=true). The task schema requires both fields; do not use general, do not retry, do not launch duplicates, do not attempt repository or documentation tools first, and do not attempt call_omo_agent."
+  BOTH: "BEST ROUTE BOTH: FIRST and ONLY route-satisfying actions: issue exactly two native task calls, one task(subagent_type=\"explore\", run_in_background=true) and one task(subagent_type=\"librarian\", run_in_background=true). The task schema requires both fields; do not use general, do not retry, do not launch duplicates, do not attempt repository or documentation tools first, and do not attempt call_omo_agent.",
+  FOUR: "BEST ROUTE FOUR: FIRST and ONLY route-satisfying actions: launch exactly four native tasks in parallel: \"explore\" and \"librarian\" on Go, plus \"openai-architect\" and \"openai-reviewer\" on OpenAI, each with run_in_background=true. Give explore the task of locating relevant code and existing patterns; librarian the task of checking relevant official guidance; openai-architect the task of proposing an implementation plan and risks; openai-reviewer the task of independently reviewing requirements and likely edge cases. Do not begin direct repository work until all four task calls have been launched. Do not use general; do not retry; do not launch duplicate tasks; do not call call_omo_agent."
 };
 
 export const routeGuidanceFor = (route) => ROUTE_GUIDANCE[route] || "";
@@ -195,7 +197,7 @@ export default async function bestRouterPlugin(input) {
         return;
       }
 
-      if (textParts.some((part) => /<BEST_ROUTER_ROUTE>(EXPLORE|LIBRARIAN|BOTH)<\/BEST_ROUTER_ROUTE>/.test(part.text))) {
+      if (textParts.some((part) => /<BEST_ROUTER_ROUTE>(EXPLORE|LIBRARIAN|BOTH|FOUR)<\/BEST_ROUTER_ROUTE>/.test(part.text))) {
         log({ event: "chat.message", session_id: sessionID, agent, classification: "ALREADY_TAGGED", route_appended: false });
         return;
       }
@@ -209,7 +211,7 @@ export default async function bestRouterPlugin(input) {
         log({ event: "chat.message", session_id: sessionID, agent, classification: "ROUTER_ERROR", route_appended: false });
         return;
       }
-      const classification = ROUTES.has(route) ? route.match(/<BEST_ROUTER_ROUTE>(EXPLORE|LIBRARIAN|BOTH)<\/BEST_ROUTER_ROUTE>/)[1] : "DIRECT";
+      const classification = ROUTES.has(route) ? route.match(/<BEST_ROUTER_ROUTE>(EXPLORE|LIBRARIAN|BOTH|FOUR)<\/BEST_ROUTER_ROUTE>/)[1] : "DIRECT";
       if (!ROUTES.has(route)) {
         log({ event: "chat.message", session_id: sessionID, agent, classification, route_appended: false });
         return;
@@ -227,7 +229,11 @@ export default async function bestRouterPlugin(input) {
          text: `${ROUTE_GUIDANCE[classification]}\n${route}`,
         synthetic: true
       });
-      const required_agents = classification === "BOTH" ? ["explore", "librarian"] : [classification.toLowerCase()];
+      const required_agents = classification === "BOTH"
+        ? ["explore", "librarian"]
+        : classification === "FOUR"
+          ? ["explore", "librarian", "openai-architect", "openai-reviewer"]
+          : [classification.toLowerCase()];
       ROUTE_STATE.set(sessionID, { route: classification, required_agents, pending_agents: [], launched_agents: [] });
       log({ event: "route_registered", session_id: sessionID, agent, route: classification, required_agents, pending_agents: [], launched_agents: [], gate_action: "armed" });
       log({ event: "chat.message", session_id: sessionID, agent, classification, route_appended: true });

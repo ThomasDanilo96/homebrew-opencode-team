@@ -12,6 +12,6 @@ PRE_SERVER_HOOK=@DATA_ROOT@/best/hooks/patch-omo-hook-timeout.sh
 XDG_CONFIG_HOME_OVERRIDE=@CONFIG_ROOT@/best/xdg-config
 RUNTIME_ENV_HOOK=@PACKAGE_ROOT@/teams/best/runtime-env.sh
 CLAUDE_CONFIG_DIR_OVERRIDE=@CONFIG_ROOT@/best/claude-config
-NATIVE_UI_ONLY_AGENTS=explore,librarian
+NATIVE_UI_ONLY_AGENTS=explore,librarian,openai-architect,openai-reviewer
 RESUME_ALLOWED_AGENTS=OpenCode-Builder,compaction
 BRIDGE_MODE=tmux

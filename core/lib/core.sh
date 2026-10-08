@@ -654,6 +654,7 @@ start_attach() {
 export_env() {
   export OPENCODE_CONFIG="$OPENCODE_CONFIG"
   export OPENCODE_BIN OPENCODE_TEAM_PYTHON
+  export TMUX_BIN="$(command -v tmux)"
   export OPENCODE_CONFIG_DIR="$(dirname "$OPENCODE_CONFIG")"
   export OPENCODE_DISABLE_PROJECT_CONFIG=1
   export OPENCODE_DISABLE_CLAUDE_CODE=1
@@ -670,6 +671,7 @@ export_env() {
   export XDG_CACHE_HOME="$SANDBOX/cache"
   export XDG_STATE_HOME="$SANDBOX/state"
   export RUNTIME_ROOT PERSISTENT_DATA_ROOT
+  export RUN_ID TEAM_NAME TMUX_PREFIX
   export RUNTIME_RUN_STATE_DIR="$RUN_STATE_DIR"
   export BRIDGE_MODE="$BRIDGE_MODE"
   if [ -n "${CLAUDE_CONFIG_DIR_OVERRIDE:-}" ]; then

@@ -294,7 +294,7 @@ test("BEST primary failure makes no alternate model attempts", () => {
 test("BEST safe root inspection allows bounded diagnosis and denies broad or mutating tools", async () => {
   const routeDir = mkdtempSync(join(tmpdir(), "best-router-route-"));
   const routeScript = join(routeDir, "route.sh");
-  writeFileSync(routeScript, 'input=$(cat); if printf "%s" "$input" | grep -q direct; then printf "%s\\n" "DIRECT"; elif printf "%s" "$input" | grep -q both; then printf "%s\\n" "<BEST_ROUTER_ROUTE>BOTH</BEST_ROUTER_ROUTE>"; elif printf "%s" "$input" | grep -q official; then printf "%s\\n" "<BEST_ROUTER_ROUTE>LIBRARIAN</BEST_ROUTER_ROUTE>"; else printf "%s\\n" "<BEST_ROUTER_ROUTE>EXPLORE</BEST_ROUTER_ROUTE>"; fi\n');
+  writeFileSync(routeScript, 'input=$(cat); if printf "%s" "$input" | grep -q direct; then printf "%s\\n" "DIRECT"; elif printf "%s" "$input" | grep -q four; then printf "%s\\n" "<BEST_ROUTER_ROUTE>FOUR</BEST_ROUTER_ROUTE>"; elif printf "%s" "$input" | grep -q both; then printf "%s\\n" "<BEST_ROUTER_ROUTE>BOTH</BEST_ROUTER_ROUTE>"; elif printf "%s" "$input" | grep -q official; then printf "%s\\n" "<BEST_ROUTER_ROUTE>LIBRARIAN</BEST_ROUTER_ROUTE>"; else printf "%s\\n" "<BEST_ROUTER_ROUTE>EXPLORE</BEST_ROUTER_ROUTE>"; fi\n');
   process.env.BEST_ROUTER_PATH = routeScript;
   process.env.BEST_ROUTER_LOG = join(routeDir, "router.log");
   const { default: bestRouterPlugin, isSafeRootInspection } = await import("../teams/best/best-router-plugin.js");
@@ -374,6 +374,16 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   await both.after("both-librarian");
   await both.before("bash", { command: "git status" });
   await both.before("serena_find_symbol", {});
+
+  const four = await routeSession("ses-four", "four complex implementation tasks across modules");
+  assert.match(four.output.parts.at(-1).text, /exactly four native tasks in parallel/);
+  const fourAgents = ["explore", "librarian", "openai-architect", "openai-reviewer"];
+  for (const agent of fourAgents) {
+    await four.before("task", { subagent_type: agent, run_in_background: true }, `four-${agent}`);
+  }
+  await assert.rejects(() => four.before("task", { subagent_type: "explore", run_in_background: true }, "four-duplicate"), /BEST ROUTING GATE/);
+  for (const agent of fourAgents) await four.after(`four-${agent}`);
+  await four.before("serena_find_symbol", {});
 
   rmSync(routeDir, { recursive: true, force: true });
 });
