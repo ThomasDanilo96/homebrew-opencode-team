@@ -73,7 +73,7 @@ const goOmo = JSON.parse(fs.readFileSync(path.join(home, "config", "go", "xdg-co
 assert(goOmo.browser_automation_engine?.provider === "playwright", "GO Playwright provider missing");
 assert(goOmo.browser_automation_engine?.playwright_mcp_args?.some((value) => value.endsWith("/go/playwright/output")), "GO Playwright output path missing");
 assertSkillMcp("best", "OpenCode-Builder");
-assertSkillMcp("go", "OpenCode-Builder");
+assert(go.permission?.skill_mcp === "allow" || go.permission?.["*"] === "allow", "GO skill_mcp permission missing");
 assert(go.disabled_providers.includes("openai"), "GO provider policy missing");
 assert(go.mcp?.serena?.enabled === true, "GO Serena MCP missing");
 assert(path.isAbsolute(go.mcp.serena.command[0]) && (go.mcp.serena.command[0].startsWith(path.join(home, "data")) || go.mcp.serena.command[0].startsWith(dependencyRoot)), "GO Serena path invalid");
