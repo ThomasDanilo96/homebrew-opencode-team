@@ -207,6 +207,20 @@ jobs:
             if [ -n "$remaining_runs" ]; then
               echo "Runtime smoke left run state for $team:" >&2
               printf '%s\n' "$remaining_runs" >&2
+              echo "Runtime log for $team:" >&2
+              cat "$log" >&2
+              while IFS= read -r run_state_dir; do
+                [ -n "$run_state_dir" ] || continue
+                echo "Runtime state files for $team ($run_state_dir):" >&2
+                for state_file in state status failure_reason; do
+                  if [ -f "$run_state_dir/$state_file" ]; then
+                    printf '%s: ' "$state_file" >&2
+                    tr '\n' ' ' < "$run_state_dir/$state_file" >&2
+                    printf '\n' >&2
+                  fi
+                done
+                node "$package_root/core/lib/runtime-manifest.mjs" "$run_state_dir" status >&2 || true
+              done <<< "$remaining_runs"
               exit 1
             fi
             rm -rf "$run_dir"
