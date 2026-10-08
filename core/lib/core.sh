@@ -635,7 +635,8 @@ start_bridge() {
 # --- Attach (foreground exec, certified GO behavior) ---
 start_attach() {
   log "Attaching TUI to session $PARENT_SESSION_ID"
-  bash -c '
+  local oc_exit=0
+  if bash -c '
     pid=$$
     raw=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null)
     start=$(LC_ALL=C date -j -f "%a %b %d %T %Y" "$raw" "+%s" 2>/dev/null)
@@ -646,8 +647,17 @@ start_attach() {
     printf "%s\\n" "$pid" > "$1/attach.pid"
     exec "$OPENCODE_BIN" attach "$2" --session "$3"
   ' bash "$RUN_STATE_DIR" "http://127.0.0.1:$PORT" "$PARENT_SESSION_ID" "$RUN_ID"
-  local oc_exit=$?
+  then
+    oc_exit=0
+  else
+    oc_exit=$?
+  fi
   log "TUI exited (code=$oc_exit)"
+  # OpenCode reports intentional terminal interruption as 128 + signal number.
+  case "$oc_exit" in
+    129|130|143) return 0 ;;
+    *) return "$oc_exit" ;;
+  esac
 }
 
 # --- Export environment ---
