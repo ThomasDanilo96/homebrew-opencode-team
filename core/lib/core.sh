@@ -187,7 +187,7 @@ print_resume_command() {
 
 # --- Cleanup (certified GO order) ---
 cleanup_run() {
-  local exit_code=$?
+  local exit_code="${1:-$?}"
   [ "$CLEANED" -eq 1 ] && return
   CLEANED=1
 
@@ -263,7 +263,7 @@ cleanup_run() {
 }
 
 cleanup_and_exit() {
-  cleanup_run
+  cleanup_run 0
   exit 0
 }
 
