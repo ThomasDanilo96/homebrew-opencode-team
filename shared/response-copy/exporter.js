@@ -169,7 +169,7 @@ export function exportLatestResponse({ parentSession, messages, parts, sessions 
   if (children.some((child) => child.busy)) return { status: "busy", text: "", user, children };
 
   const final = finalTexts.filter((text, index, all) => !parentTexts.includes(text) && all.indexOf(text) === index);
-  if (!final.length && parentTexts.length) final.push(parentTexts[parentTexts.length - 1]);
+  if (!finalTexts.length && !final.length && parentTexts.length) final.push(parentTexts[parentTexts.length - 1]);
   const text = formatTranscript({
     parent: { ...parentSession, lastMessage: assistants.at(-1) },
     parentVisible: parentTexts,
