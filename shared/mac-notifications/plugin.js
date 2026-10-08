@@ -49,7 +49,13 @@ export function createMacNotificationPlugin({ env = process.env, spawnProcess = 
     event: async ({ event }) => {
       const runStateDir = env.RUNTIME_RUN_STATE_DIR;
       if (!runStateDir) return;
-      const rootSessionID = readFileSync(join(runStateDir, "parent_session_id"), "utf8").trim();
+      let rootSessionID;
+      try {
+        rootSessionID = readFileSync(join(runStateDir, "parent_session_id"), "utf8").trim();
+      } catch (error) {
+        if (error.code === "ENOENT") return;
+        throw error;
+      }
       if (!isRootSessionIdleEvent(event, rootSessionID)) return;
 
       const { TEAM_NAME: teamName, RUN_ID: runID, TMUX_PREFIX: tmuxPrefix, TMUX_BIN: tmuxBin } = env;

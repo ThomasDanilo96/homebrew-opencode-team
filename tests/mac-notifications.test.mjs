@@ -50,6 +50,20 @@ test("completion hook sends a clickable notification only for the root chat", as
   rmSync(directory, { recursive: true, force: true });
 });
 
+test("completion hook skips notification when the run root session is not initialized", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "opencode-notification-uninitialized-"));
+  const calls = [];
+  const plugin = createMacNotificationPlugin({
+    env: { RUNTIME_RUN_STATE_DIR: directory, TEAM_NAME: "best", RUN_ID: "a1b2c3d4", TMUX_PREFIX: "oc-best", TMUX_BIN: "/opt/homebrew/bin/tmux" },
+    spawnProcess: (...args) => calls.push(args),
+    logger: { error: (message) => assert.fail(message) },
+  });
+
+  await assert.doesNotReject(plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_root123" } } }));
+  assert.equal(calls.length, 0);
+  rmSync(directory, { recursive: true, force: true });
+});
+
 test("tmux client lookup and process ancestry support arbitrary terminal app bundles", () => {
   const clients = parseTmuxClients("oc-best-a1b2c3d4|120|/dev/ttys004\nother|122|/dev/ttys005", "oc-best-a1b2c3d4");
   assert.deepEqual(clients, [{ session: "oc-best-a1b2c3d4", pid: 120, tty: "/dev/ttys004" }]);
