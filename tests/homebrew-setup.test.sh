@@ -16,6 +16,7 @@ make_stub_bin() {
   ln -s "$path_bin/opencode" "$path_bin/bin/opencode"
   printf '%s\n' '#!/usr/bin/env bash' \
     'if [ "${1:-}" = "--prefix" ]; then' \
+    '  if [ "${2:-}" = terminal-notifier ]; then printf "%s\\n" "$BREW_STUB_BIN"; exit 0; fi' \
     '  if [ "${2:-}" = opencode ]; then' \
     '    opencode_prefix="${BREW_STUB_OPENCODE_PREFIX:-${BREW_STUB_PREFIX:-$BREW_STUB_BIN}}"' \
     '    [ -x "$opencode_prefix/bin/opencode" ] || exit 1' \
@@ -49,18 +50,27 @@ make_stub_bin() {
   chmod 755 "$path_bin/brew"
   printf '%s\n' '#!/usr/bin/env bash' 'if [ "${1:-}" = isexcluded ]; then printf "%s\n" "[Excluded]"; fi' 'exit 0' >"$path_bin/tmutil"
   chmod 755 "$path_bin/tmutil"
+  mkdir -p "$path_bin/terminal-notifier.app/Contents/MacOS"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' >"$path_bin/terminal-notifier.app/Contents/MacOS/terminal-notifier"
+  chmod 755 "$path_bin/terminal-notifier.app/Contents/MacOS/terminal-notifier"
+  ln -s "$path_bin/terminal-notifier.app/Contents/MacOS/terminal-notifier" "$path_bin/terminal-notifier"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "%s\\n" "$*" >>"$OPEN_STUB_LOG"' 'exit 0' >"$path_bin/open"
+  chmod 755 "$path_bin/open"
 }
 
 run_setup() {
   local home="$1" dependency_root="$2" stub_bin="$3" output="$4" brew_prefix="${5:-}" opencode_prefix="${6:-}"
   local rc
+  mkdir -p "$home/user-home"
   set +e
   PATH="$stub_bin/path:/usr/bin:/bin" \
+    HOME="$home/user-home" \
     BREW_STUB_BIN="$stub_bin/path" \
     BREW_STUB_LOG="$stub_bin/path/brew.log" \
     BREW_STUB_PREFIX="$brew_prefix" \
     BREW_STUB_OPENCODE_PREFIX="$opencode_prefix" \
     BROKEN_PYTHON_LOG="$stub_bin/path/broken-python.log" \
+    OPEN_STUB_LOG="$stub_bin/path/open.log" \
     OPENCODE_TEAM_HOME="$home" \
     OPENCODE_TEAM_DEPENDENCY_ROOT="$dependency_root" \
     bash "$ROOT/bin/opencode-team" setup >"$output" 2>&1
@@ -111,6 +121,9 @@ make_stub_bin "$success_bin"
 run_setup "$success_home" "$success_dependencies" "$success_bin" "$TEST_ROOT/success.out"
 rg -q '^cleanup=1 args=install --cask codex$' "$success_bin/path/brew.log"
 rg -q 'Setup complete\. No runtime was started\.' "$TEST_ROOT/success.out"
+test -x "$success_home/user-home/Applications/terminal-notifier.app/Contents/MacOS/terminal-notifier"
+rg -q -- '-a .*terminal-notifier.app' "$success_bin/path/open.log"
+rg -q 'macOS notifications[[:space:]]+OK \(registered; notification permission requested\)' "$TEST_ROOT/success.out"
 for team in best go openai daily; do
   test -f "$success_home/config/$team/team-runtime.conf"
   test -f "$success_home/config/$team/opencode.jsonc"
@@ -241,6 +254,7 @@ make_stub_bin "$fresh_opencode_failure_bin"
 rm -f "$fresh_opencode_failure_bin/path/opencode"
 test ! -e "$fresh_opencode_failure_bin/path/opencode"
 set +e
+HOME="$fresh_opencode_failure_home" \
 BREW_STUB_BIN="$fresh_opencode_failure_bin/path" \
   BREW_STUB_LOG="$fresh_opencode_failure_bin/path/brew.log" \
   BREW_STUB_OPENCODE_PREFIX="$fresh_opencode_failure_prefix" \
@@ -284,6 +298,7 @@ failure_dependencies="$success_dependencies"
 failure_bin="$TEST_ROOT/failure-bin"
 make_stub_bin "$failure_bin"
 set +e
+HOME="$failure_home" \
 PATH="$failure_bin/path:/usr/bin:/bin" \
   BREW_STUB_BIN="$failure_bin/path" \
   BREW_STUB_FAIL=1 \
@@ -303,6 +318,7 @@ make_stub_bin "$plist_failure_bin"
 printf '%s\n' '#!/usr/bin/env bash' 'exit 41' >"$plist_failure_bin/path/plutil"
 chmod 755 "$plist_failure_bin/path/plutil"
 set +e
+HOME="$plist_failure_home" \
 PATH="$plist_failure_bin/path:/usr/bin:/bin" \
   BREW_STUB_BIN="$plist_failure_bin/path" \
   BREW_STUB_LOG="$plist_failure_bin/path/brew.log" \
@@ -319,6 +335,7 @@ rename_failure_bin="$TEST_ROOT/rename-failure-bin"
 make_stub_bin "$rename_failure_bin"
 make_rename_failure_mv "$rename_failure_bin"
 set +e
+HOME="$rename_failure_home" \
 PATH="$rename_failure_bin/path:/usr/bin:/bin" \
   BREW_STUB_BIN="$rename_failure_bin/path" \
   BREW_STUB_LOG="$rename_failure_bin/path/brew.log" \

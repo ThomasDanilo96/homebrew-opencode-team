@@ -1,7 +1,7 @@
 class OpencodeTeam < Formula
   desc "Portable runtime foundation for OpenCode Team"
   homepage "https://github.com/ThomasDanilo96/homebrew-opencode-team"
-  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.36.tar.gz"
+  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.37.tar.gz"
   sha256 "31eab70b1160bda4db957869819ac33ee01b9ae02fd3f805cd64d941db2e73c8"
   license "MIT"
 
@@ -30,10 +30,12 @@ class OpencodeTeam < Formula
   end
 
   test do
-    assert_match "OpenCode Team 0.1.36", shell_output("#{bin}/opencode-team version")
+    assert_match "OpenCode Team 0.1.37", shell_output("#{bin}/opencode-team version")
     assert_match "opencode-team start", shell_output("#{bin}/opencode-team --help")
     assert_predicate libexec/"core/lib/runtime-lifecycle.mjs", :file?
     assert_predicate libexec/"core/lib/runtime-reaper.sh", :file?
+    ENV["HOME"] = (testpath/"user-home").to_s
+    (testpath/"user-home").mkpath
     shared = testpath/"shared-dependencies"
     first = testpath/"home-a"
     second = testpath/"home-b"

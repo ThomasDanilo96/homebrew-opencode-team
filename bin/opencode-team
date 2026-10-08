@@ -288,6 +288,7 @@ doctor() {
   require_command curl || failed=1
   require_command uv || failed=1
   require_command rg || failed=1
+  require_command terminal-notifier || failed=1
   setup_roots
   if managed_python_healthy; then
     OPENCODE_TEAM_PYTHON="$PYTHON_BIN"
@@ -902,10 +903,47 @@ install_time_machine_exclusions() {
   fi
 }
 
+install_terminal_notifier() {
+  [ "$(uname -s)" = Darwin ] || return 0
+
+  local prefix source_app target_app notifier_bin first_install=0
+  prefix="$(brew --prefix terminal-notifier 2>/dev/null)" || {
+    printf 'Cannot locate the Homebrew terminal-notifier installation\n' >&2
+    return 1
+  }
+  source_app="$prefix/terminal-notifier.app"
+  target_app="$HOME/Applications/terminal-notifier.app"
+  notifier_bin="$target_app/Contents/MacOS/terminal-notifier"
+  if [ ! -x "$source_app/Contents/MacOS/terminal-notifier" ]; then
+    printf 'terminal-notifier app bundle is missing: %s\n' "$source_app" >&2
+    return 1
+  fi
+  if [ -e "$target_app" ] && [ ! -d "$target_app/Contents/MacOS" ]; then
+    printf 'Refusing to replace an unrelated path: %s\n' "$target_app" >&2
+    return 1
+  fi
+  [ -d "$target_app" ] || first_install=1
+  mkdir -p "$HOME/Applications"
+  ditto "$source_app" "$target_app" || return 1
+  if ! open -a "$target_app" >/dev/null 2>&1; then
+    printf '  macOS notifications: Launch Services registration failed; check System Settings → Notifications.\n' >&2
+  fi
+  export OPENCODE_TEAM_TERMINAL_NOTIFIER="$notifier_bin"
+  if [ "$first_install" -eq 1 ]; then
+    if "$notifier_bin" -title "OpenCode Team" -message "Le notifiche di OpenCode Team sono pronte."; then
+      printf '  %-18s OK (registered; notification permission requested)\n' "macOS notifications"
+    else
+      printf '%s\n' '  macOS notifications: enable terminal-notifier in System Settings → Notifications.' >&2
+    fi
+  else
+    printf '  %-18s OK (registered)\n' "macOS notifications"
+  fi
+}
+
 setup() {
   require_command npm >/dev/null || { printf 'npm is required for setup\n' >&2; return 1; }
   check_node >/dev/null || { printf 'A compatible Node.js runtime is required for setup\n' >&2; return 1; }
-  for command_name in git jq tmux uv rg curl; do
+  for command_name in git jq tmux uv rg curl terminal-notifier; do
     require_command "$command_name" >/dev/null || { printf '%s is required for setup\n' "$command_name" >&2; return 1; }
   done
   setup_roots
@@ -913,6 +951,7 @@ setup() {
     printf 'A supported Homebrew OpenCode installation is required for setup\n' >&2
     return 1
   }
+  install_terminal_notifier || return 1
   export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
   mkdir -p "$CONFIG_ROOT" "$DATA_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$RUNTIME_ROOT" "$DEPENDENCY_ROOT"
   chmod 700 "$CONFIG_ROOT" "$DATA_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$RUNTIME_ROOT" "$DEPENDENCY_ROOT"

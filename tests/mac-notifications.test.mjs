@@ -35,7 +35,7 @@ test("completion hook sends a clickable notification only for the root chat", as
     return child;
   };
   const plugin = createMacNotificationPlugin({
-    env: { RUNTIME_RUN_STATE_DIR: stateDir, TEAM_NAME: "best", RUN_ID: "a1b2c3d4", TMUX_PREFIX: "oc-best", TMUX_BIN: "/opt/homebrew/bin/tmux" },
+    env: { RUNTIME_RUN_STATE_DIR: stateDir, TEAM_NAME: "best", RUN_ID: "a1b2c3d4", TMUX_PREFIX: "oc-best", TMUX_BIN: "/opt/homebrew/bin/tmux", OPENCODE_TEAM_TERMINAL_NOTIFIER: "/Users/test/Applications/terminal-notifier.app/Contents/MacOS/terminal-notifier" },
     spawnProcess,
     logger: { error: (message) => assert.fail(message) },
   });
@@ -44,7 +44,7 @@ test("completion hook sends a clickable notification only for the root chat", as
   assert.equal(calls.length, 0);
   await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_root123" } } });
   assert.equal(calls.length, 1);
-  assert.equal(calls[0].command, "terminal-notifier");
+  assert.equal(calls[0].command, "/Users/test/Applications/terminal-notifier.app/Contents/MacOS/terminal-notifier");
   assert.ok(calls[0].args.includes("-execute"));
   assert.ok(calls[0].args.at(-1).includes(`'${stateDir}'`));
   rmSync(directory, { recursive: true, force: true });

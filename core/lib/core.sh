@@ -690,6 +690,9 @@ export_env() {
     unset CLAUDE_CONFIG_DIR
   fi
   export NATIVE_UI_ONLY_AGENTS="${NATIVE_UI_ONLY_AGENTS:-}"
+  if [ -x "$HOME/Applications/terminal-notifier.app/Contents/MacOS/terminal-notifier" ]; then
+    export OPENCODE_TEAM_TERMINAL_NOTIFIER="$HOME/Applications/terminal-notifier.app/Contents/MacOS/terminal-notifier"
+  fi
 }
 
 persist_opencode_runtime_preferences() {

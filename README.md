@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: release `v0.1.36`.
+Status: release `v0.1.37`.
 
 ## Goal
 
@@ -65,10 +65,12 @@ Profiles:
 
 All profiles send a macOS notification when the root chat finishes a response.
 Clicking it brings the terminal running that tmux session to the foreground and
-returns to the matching chat. On first use, allow notifications for
-`terminal-notifier` in macOS. To keep them visible until clicked, set its alert
-style to **Alerts** in System Settings → Notifications; macOS automatically
-hides notifications using the **Banners** style.
+returns to the matching chat. Setup registers Homebrew's `terminal-notifier` app
+in `~/Applications` and sends one test notification to request macOS permission.
+Approve the system prompt; macOS does not allow setup to grant notification
+permission on the user's behalf. To keep notifications visible until clicked,
+set the alert style to **Alerts** in System Settings → Notifications; macOS
+automatically hides notifications using the **Banners** style.
 
 ## Development
 

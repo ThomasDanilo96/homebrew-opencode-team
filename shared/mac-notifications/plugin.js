@@ -34,9 +34,9 @@ export function notificationArgs({ teamName, runID, sessionID, runStateDir, tmux
   ];
 }
 
-function notify(args, spawnProcess = spawn) {
+function notify(args, spawnProcess = spawn, notifierPath = process.env.OPENCODE_TEAM_TERMINAL_NOTIFIER || "terminal-notifier") {
   return new Promise((resolve, reject) => {
-    const child = spawnProcess("terminal-notifier", args, { stdio: "ignore" });
+    const child = spawnProcess(notifierPath, args, { stdio: "ignore" });
     child.once("error", reject);
     child.once("close", (code) => code === 0
       ? resolve()
@@ -58,7 +58,7 @@ export function createMacNotificationPlugin({ env = process.env, spawnProcess = 
       }
 
       try {
-        await notify(notificationArgs({ teamName, runID, sessionID: rootSessionID, runStateDir, tmuxPrefix, tmuxBin }), spawnProcess);
+        await notify(notificationArgs({ teamName, runID, sessionID: rootSessionID, runStateDir, tmuxPrefix, tmuxBin }), spawnProcess, env.OPENCODE_TEAM_TERMINAL_NOTIFIER || "terminal-notifier");
       } catch (error) {
         logger.error(`[mac-notifications] ${error.message}`);
       }
