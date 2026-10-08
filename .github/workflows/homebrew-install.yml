@@ -192,6 +192,44 @@ jobs:
               cat "$log" >&2
               exit 1
             fi
+            run_state_dir="$(find "$test_home/cache/runtime/$team/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
+            if [ -z "$run_state_dir" ]; then
+              echo "Runtime smoke for $team reached READY without a run-state directory" >&2
+              tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
+              exit 1
+            fi
+            run_id="$(cat "$run_state_dir/run_id")"
+            launcher_pid="$(cat "$run_state_dir/launcher.pid")"
+            launcher_identity="$run_state_dir/launcher.identity"
+            if [ -z "$run_id" ] || [ -z "$launcher_pid" ] || [ ! -f "$launcher_identity" ]; then
+              echo "Runtime smoke cannot verify the $team launcher identity" >&2
+              tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
+              exit 1
+            fi
+            identity_pid="$(awk -F= '$1 == "pid" { print $2 }' "$launcher_identity")"
+            identity_run_id="$(awk -F= '$1 == "run_id" { print $2 }' "$launcher_identity")"
+            identity_start_epoch="$(awk -F= '$1 == "start_epoch" { print $2 }' "$launcher_identity")"
+            launcher_start="$(LC_ALL=C ps -p "$launcher_pid" -o lstart= 2>/dev/null || true)"
+            launcher_start_epoch="$(LC_ALL=C date -j -f "%a %b %d %T %Y" "$launcher_start" "+%s" 2>/dev/null || true)"
+            if [ "$identity_pid" != "$launcher_pid" ] || [ "$identity_run_id" != "$run_id" ] || [ "$identity_start_epoch" != "$launcher_start_epoch" ]; then
+              echo "Runtime smoke refused to signal an unverified $team launcher" >&2
+              tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
+              exit 1
+            fi
+            if ! kill -TERM "$launcher_pid"; then
+              echo "Runtime smoke could not signal the verified $team launcher $launcher_pid" >&2
+              tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
+              exit 1
+            fi
+            runtime_stopped=0
+            for _ in $(seq 1 30); do
+              if [ ! -d "$run_state_dir" ]; then runtime_stopped=1; break; fi
+              sleep 1
+            done
+            if [ "$runtime_stopped" -ne 1 ]; then
+              echo "Runtime smoke did not cleanly stop $team launcher $launcher_pid" >&2
+              cat "$log" >&2
+            fi
             tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
             for _ in $(seq 1 15); do
               if ! ps -axo pid=,command= | rg "$test_home" | rg -v 'rg ' >/dev/null; then break; fi
@@ -223,5 +261,6 @@ jobs:
               done <<< "$remaining_runs"
               exit 1
             fi
+            if [ "$runtime_stopped" -ne 1 ]; then exit 1; fi
             rm -rf "$run_dir"
           done
