@@ -63,8 +63,10 @@ export const validCodexHandoff = (handoff) => {
     Number.isInteger(handoff.fallback_count) && handoff.fallback_count >= 0 &&
     typeof handoff.fallback_eligible === "boolean" && Number.isInteger(handoff.cooldown_seconds) && handoff.cooldown_seconds >= 0 &&
     Number.isInteger(handoff.mutation_count) && handoff.mutation_count >= 0 && typeof handoff.journal_incomplete === "boolean" &&
-    handoff.termination_sealed === true && typeof handoff.journal_scan_complete === "boolean" &&
-    safeIdentifier(handoff.sealed_run_id) && handoff.sealed_run_id === handoff.codex_run_id &&
+     typeof handoff.termination_sealed === "boolean" && typeof handoff.journal_scan_complete === "boolean" &&
+     (handoff.termination_sealed === false
+       ? handoff.sealed_run_id === null
+       : safeIdentifier(handoff.sealed_run_id) && handoff.sealed_run_id === handoff.codex_run_id) &&
     safeIdentifier(handoff.sealed_lease_id, { nullable: true }) &&
     validTokens(handoff.token_usage);
 };

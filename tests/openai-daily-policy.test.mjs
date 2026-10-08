@@ -4,7 +4,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertDailyProviderModel, dailyCost, dailyFanout, dailyModelIdentity, dailySearchDecision, dailyInvestigationLimits, DAILY_AGENT_MODELS, DAILY_PRICING, shouldStopDaily } from "../teams/daily/daily-policy.mjs";
-import { allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, isStopText, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
+import { admitDurableFanout, allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, isStopText, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
 import { analyzeObjective, objectiveRequestsLocalCommit, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
@@ -274,7 +274,7 @@ test("Daily template enables only orchestrator shell access and runtime forwards
   assert.match(template, /"edit": "deny"/);
   assert.match(template, /"write": "deny"/);
   assert.match(template, /"skill_mcp": "deny"/);
-  assert.match(template, /CodeGraph and skill_mcp are unavailable/);
+  assert.match(template, /CodeGraph remains unavailable in DAILY; browser work may load the Playwright skill/);
   assert.match(template, /"openai_run_codex": false/);
   assert.match(template, /NORMAL repository work is never direct: repository mutations must use exactly one codex_executor child first, and read-only repository objectives must use exactly one openai_explore child first/);
   assert.match(template, /do not launch a second repository child/);
@@ -282,7 +282,7 @@ test("Daily template enables only orchestrator shell access and runtime forwards
   assert.match(premium, /"bash": "deny"/);
   assert.match(premium, /"interactive_bash": "deny"/);
   assert.match(premium, /"skill_mcp": "deny"/);
-  assert.match(premium, /CodeGraph and skill_mcp are unavailable/);
+  assert.match(premium, /CodeGraph remains unavailable in OPENAI; browser work may load the Playwright skill/);
   const runtime = await readFile(new URL("../core/bin/team-runtime", import.meta.url), "utf8");
   assert.match(runtime, /OPENCODE_AUTH_SOURCE OPENAI_CODEX_AUTH_SOURCE SSH_AUTH_SOCK SSH_AGENT_PID/);
   assert.match(runtime, /\[\s*"\$\{!auth_var\+x\}"\s*=\s*x\s*\]/);
@@ -608,9 +608,9 @@ test("Daily and OpenAI templates expose Codex executor as a native subagent", as
 });
 
 test("Daily uses OpenAI-only model tiers", () => {
-  assert.equal(DAILY_AGENT_MODELS.openai_orchestrator, "openai/gpt-5.6-luna");
-  assert.equal(DAILY_AGENT_MODELS.reviewer, "openai/gpt-5.6-terra");
-  assert.equal(DAILY_AGENT_MODELS.reviewer_critical, "openai/gpt-5.6-sol");
+  assert.equal(DAILY_AGENT_MODELS.openai_orchestrator, "openai/gpt-6-luna");
+  assert.equal(DAILY_AGENT_MODELS.reviewer, "openai/gpt-6-terra");
+  assert.equal(DAILY_AGENT_MODELS.reviewer_critical, "openai/gpt-6-sol");
   assert.ok(Object.values(DAILY_AGENT_MODELS).every((model) => model.startsWith("openai/")));
 });
 
@@ -659,40 +659,65 @@ test("Root authority survives sequential Explore completion before Codex admissi
 });
 
 test("Daily provider boundary accepts only the frozen OpenAI model matrix", () => {
-  assert.deepEqual(dailyModelIdentity("openai/gpt-5.6-luna"), { provider: "openai", model: "gpt-5.6-luna" });
-  for (const model of ["openai/gpt-5.6-luna", "openai/gpt-5.6-terra", "openai/gpt-5.6-sol"]) {
+  assert.deepEqual(dailyModelIdentity("openai/gpt-6-luna"), { provider: "openai", model: "gpt-6-luna" });
+  for (const model of ["openai/gpt-6-luna", "openai/gpt-6-terra", "openai/gpt-6-sol"]) {
     assert.doesNotThrow(() => assertDailyProviderModel({ model }));
   }
   for (const model of ["opencode-go/minimax-m3", "opencode-go/minimax-m2.7", "openai/minimax-m3", "openai/gpt-6-astra"]) {
     assert.throws(() => assertDailyProviderModel({ model }), /OPENAI_DAILY_(?:PROVIDER|MODEL)_FORBIDDEN/);
   }
-  assert.throws(() => assertDailyProviderModel({ provider: "opencode-go", model: "gpt-5.6-luna" }), (error) => error.code === "OPENAI_DAILY_PROVIDER_FORBIDDEN");
+  assert.throws(() => assertDailyProviderModel({ provider: "opencode-go", model: "gpt-6-luna" }), (error) => error.code === "OPENAI_DAILY_PROVIDER_FORBIDDEN");
 });
 
 test("Daily Codex fallback remains OpenAI-only and fails closed on forbidden models", () => {
   assert.deepEqual(resolveCodexModels("quick", {
     OPENAI_DAILY_PROFILE: "1",
-    OPENAI_CODEX_QUICK_PRIMARY: "gpt-5.6-luna",
-    OPENAI_CODEX_QUICK_FALLBACK: "gpt-5.6-terra",
-  }), { profile: "quick", requested_model: "gpt-5.6-luna", fallback_model: "gpt-5.6-terra" });
+    OPENAI_CODEX_QUICK_PRIMARY: "gpt-6-luna",
+    OPENAI_CODEX_QUICK_FALLBACK: "gpt-6-terra",
+  }), { profile: "quick", requested_model: "gpt-6-luna", fallback_model: "gpt-6-terra" });
   for (const forbidden of ["minimax-m3", "minimax-m2.7"]) {
     assert.throws(() => resolveCodexModels("quick", {
       OPENAI_DAILY_PROFILE: "1",
-      OPENAI_CODEX_QUICK_PRIMARY: "gpt-5.6-luna",
+      OPENAI_CODEX_QUICK_PRIMARY: "gpt-6-luna",
       OPENAI_CODEX_QUICK_FALLBACK: forbidden,
     }), /OPENAI_DAILY_MODEL_FORBIDDEN/);
   }
 });
 
-test("Daily config removes OMO routing from the child dispatch path", async () => {
+test("Daily config loads OMO for browser skill routing without changing provider policy", async () => {
   const template = await readFile(new URL("../teams/daily/opencode.jsonc.template", import.meta.url), "utf8");
-  assert.doesNotMatch(template, /@OMO_PLUGIN@/);
+  assert.match(template, /@OMO_PLUGIN@/);
   assert.match(template, /enabled_providers": \["openai"\]/);
 });
 
 test("Daily fanout is bounded and complexity-aware", () => {
   assert.deepEqual([dailyFanout("TRIVIAL"), dailyFanout("NORMAL"), dailyFanout("COMPLEX"), dailyFanout("HEAVY"), dailyFanout("EXTREME")], [0, 1, 2, 3, 3]);
   assert.deepEqual(dailyInvestigationLimits("NORMAL"), { minutes: 8, toolCalls: 12 });
+});
+
+test("Daily durable fanout admits three unique lanes, rejects duplicates and a fourth", () => {
+  const state = { daily: true, limits: { delegations: 3 } };
+  const options = { parentSessionID: "root", rootObjectiveSHA: "root-sha" };
+  const packets = [];
+  for (const scope of ["architecture", "tests", "documentation"]) {
+    assert.equal(admitDurableFanout(state, scope, packets, options).scope, scope);
+    packets.push({ parent_session_id: "root", root_objective_sha256: "root-sha", agent: "openai_explore", delegation_scope: scope });
+  }
+  assert.throws(() => admitDurableFanout(state, "architecture rephrased", packets, options), /DUPLICATE_DELEGATION_SCOPE/);
+  assert.throws(() => admitDurableFanout(state, "runtime", packets, options), /DELEGATION_LIMIT/);
+});
+
+test("Daily durable fanout retries only missing scopes and makes replay a no-op", () => {
+  const state = { daily: true, limits: { delegations: 3 } };
+  const options = { parentSessionID: "root", rootObjectiveSHA: "root-sha" };
+  const packets = [
+    { parent_session_id: "root", root_objective_sha256: "root-sha", agent: "openai_explore", delegation_scope: "architecture" },
+    { parent_session_id: "root", root_objective_sha: "root-sha", agent: "openai_librarian", delegation_scope: "tests" },
+  ];
+  assert.equal(admitDurableFanout(state, "documentation", packets, options).remaining, 1);
+  packets.push({ parent_session_id: "root", root_objective_sha256: "root-sha", agent: "openai_ops", delegation_scope: "documentation" });
+  assert.throws(() => admitDurableFanout(state, "architecture", packets, options), /DUPLICATE_DELEGATION_SCOPE/);
+  assert.throws(() => admitDurableFanout(state, "documentation", packets, options), /DUPLICATE_DELEGATION_SCOPE/);
 });
 
 test("Daily search policy rejects noisy discovery and duplicate evidence", () => {
@@ -721,7 +746,7 @@ test("Daily trivial lookups stay direct and bounded", () => {
 });
 
 test("Daily pricing is optional observability math", () => {
-  assert.equal(dailyCost({ model: "gpt-5.6-luna", input: 4000, cached: 0, output: 1000 }), 0.002);
+  assert.equal(dailyCost({ model: "gpt-6-luna", input: 4000, cached: 0, output: 1000 }), 0.002);
   assert.equal(dailyCost({ model: "unknown", input: 4000, cached: 0, output: 1000 }), null);
   assert.equal(DAILY_PRICING.effective_date, "2026-09-16");
 });
@@ -1068,6 +1093,18 @@ test("Objective recovery selects the latest root user message and safely follows
   assert.deepEqual(resolved, { objective: "Review the current fixture", parentSessionID: "root", rootSessionID: "root" });
 });
 
+test("Objective recovery ignores an internal continuation prompt", async () => {
+  const client = { session: {
+    get: async () => ({ data: { id: "root", parentID: null } }),
+    messages: async () => ({ data: [
+      { info: { role: "user" }, parts: [{ type: "text", text: "Mutate the fixture" }] },
+      { info: { role: "user" }, parts: [{ type: "text", text: "Resume the authoritative recovery packet for this same objective." }] },
+    ] }),
+  } };
+  const resolved = await resolveInitialObjectiveFromClient(client, "root");
+  assert.equal(resolved.objective, "Mutate the fixture");
+});
+
 test("Objective recovery falls back on lookup failure and breaks parent loops", async () => {
   const failing = { session: { get: async () => { throw new Error("unavailable"); }, messages: async () => ({ data: [{ info: { role: "user" }, parts: [{ type: "text", text: "Review synthetic child" }] }] }) } };
   assert.equal(await resolveInitialObjectiveFromClient(failing, "child"), null);
@@ -1270,8 +1307,8 @@ test("Daily admission stress keeps 1, 2, and 3 siblings bounded", () => {
 
 test("Daily report accounts for cached and uncached work-packet tokens once", () => {
   const report = summarizeDailyPackets([
-    { outcome: "completed", parent_session_id: "parent-1", executed_model: "gpt-5.6-luna", complexity: "NORMAL", duration_ms: 100, codex_input_tokens: 1000, codex_cached_input_tokens: 200, codex_output_tokens: 300, codex_reasoning_tokens: 40, retry_count: 1, compaction_count: 2 },
-    { outcome: "completed", parent_session_id: "parent-1", executed_model: "gpt-5.6-terra", complexity: "COMPLEX", duration_ms: 200, codex_input_tokens: 500, codex_cached_input_tokens: 100, codex_output_tokens: 100, codex_reasoning_tokens: 10, retry_count: 0, compaction_count: 0 },
+    { outcome: "completed", parent_session_id: "parent-1", executed_model: "gpt-6-luna", complexity: "NORMAL", duration_ms: 100, codex_input_tokens: 1000, codex_cached_input_tokens: 200, codex_output_tokens: 300, codex_reasoning_tokens: 40, retry_count: 1, compaction_count: 2 },
+    { outcome: "completed", parent_session_id: "parent-1", executed_model: "gpt-6-terra", complexity: "COMPLEX", duration_ms: 200, codex_input_tokens: 500, codex_cached_input_tokens: 100, codex_output_tokens: 100, codex_reasoning_tokens: 10, retry_count: 0, compaction_count: 0 },
   ]);
   assert.equal(report.completed_tasks, 2);
   assert.equal(report.uncached_input_tokens, 1200);

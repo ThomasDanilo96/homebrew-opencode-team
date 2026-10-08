@@ -15,4 +15,6 @@ if (typeof entry !== "string") {
 }
 
 const plugin = await import(pathToFileURL(join(packageRoot, entry)).href);
+const { Effect } = await import(pathToFileURL(join(dependencyRoot, "node_modules", "effect", "dist", "index.js")).href);
 export const tool = plugin.tool;
+export const runHostEffect = (value) => value && typeof value === "object" ? Effect.runPromise(value) : Promise.resolve(value);

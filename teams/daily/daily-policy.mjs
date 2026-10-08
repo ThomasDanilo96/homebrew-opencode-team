@@ -42,22 +42,22 @@ export const shouldStopDaily = ({ answerSupported = false, materialContradiction
   answerSupported === true && materialContradiction !== true && remainingEvidence === "confirmatory";
 
 export const DAILY_AGENT_MODELS = Object.freeze({
-  openai_orchestrator: "openai/gpt-5.6-luna",
-  openai_explore: "openai/gpt-5.6-luna",
-  openai_librarian: "openai/gpt-5.6-luna",
-  openai_ops: "openai/gpt-5.6-luna",
-  tester: "openai/gpt-5.6-luna",
-  reviewer: "openai/gpt-5.6-terra",
-  reviewer_critical: "openai/gpt-5.6-sol",
-  specialist: "openai/gpt-5.6-terra",
-  codex_executor: "openai/gpt-5.6-luna",
+  openai_orchestrator: "openai/gpt-6-luna",
+  openai_explore: "openai/gpt-6-luna",
+  openai_librarian: "openai/gpt-6-luna",
+  openai_ops: "openai/gpt-6-luna",
+  tester: "openai/gpt-6-luna",
+  reviewer: "openai/gpt-6-terra",
+  reviewer_critical: "openai/gpt-6-sol",
+  specialist: "openai/gpt-6-terra",
+  codex_executor: "openai/gpt-6-luna",
 });
 
 export const DAILY_ALLOWED_PROVIDER = "openai";
 export const DAILY_ALLOWED_MODELS = Object.freeze([
-  "gpt-5.6-luna",
-  "gpt-5.6-terra",
-  "gpt-5.6-sol",
+  "gpt-6-luna",
+  "gpt-6-terra",
+  "gpt-6-sol",
 ]);
 
 export const dailyModelIdentity = (model = "") => {
@@ -85,9 +85,9 @@ export const DAILY_PRICING = Object.freeze({
   effective_date: "2026-09-16",
   source: "https://platform.openai.com/docs/pricing",
   models: Object.freeze({
-    "gpt-5.6-luna": tier("gpt-5.6-luna", 0.2, 0.02, 1.2),
-    "gpt-5.6-terra": tier("gpt-5.6-terra", 2, 0.2, 12),
-    "gpt-5.6-sol": tier("gpt-5.6-sol", 4, 0.4, 20),
+    "gpt-6-luna": tier("gpt-6-luna", 0.2, 0.02, 1.2),
+    "gpt-6-terra": tier("gpt-6-terra", 2, 0.2, 12),
+    "gpt-6-sol": tier("gpt-6-sol", 4, 0.4, 20),
   }),
 });
 

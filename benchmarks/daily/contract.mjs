@@ -8,22 +8,22 @@ const ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 export const DAILY_CONTRACT = Object.freeze({
   profile: "daily",
   agents: Object.freeze({
-    orchestrator: "openai/gpt-5.6-luna",
-    explore: "openai/gpt-5.6-luna",
-    librarian: "openai/gpt-5.6-luna",
-    ops: "openai/gpt-5.6-luna",
-    tester: "openai/gpt-5.6-luna",
-    reviewer: "openai/gpt-5.6-terra",
-    reviewer_critical: "openai/gpt-5.6-sol",
-    specialist: "openai/gpt-5.6-terra",
-    codex_executor: "openai/gpt-5.6-luna",
+    orchestrator: "openai/gpt-6-luna",
+    explore: "openai/gpt-6-luna",
+    librarian: "openai/gpt-6-luna",
+    ops: "openai/gpt-6-luna",
+    tester: "openai/gpt-6-luna",
+    reviewer: "openai/gpt-6-terra",
+    reviewer_critical: "openai/gpt-6-sol",
+    specialist: "openai/gpt-6-terra",
+    codex_executor: "openai/gpt-6-luna",
   }),
   codex: Object.freeze({
-    quick: Object.freeze(["gpt-5.6-luna", "gpt-5.6-terra"]),
-    standard: Object.freeze(["gpt-5.6-terra", "gpt-5.6-sol"]),
-    complex: Object.freeze(["gpt-5.6-sol", "gpt-5.6-terra"]),
+    quick: Object.freeze(["gpt-6-luna", "gpt-6-terra"]),
+    standard: Object.freeze(["gpt-6-terra", "gpt-6-sol"]),
+    complex: Object.freeze(["gpt-6-sol", "gpt-6-terra"]),
   }),
-  forbiddenModels: Object.freeze(["gpt-6-astra", "gpt-5.6-astra"]),
+  forbiddenModels: Object.freeze(["gpt-6-astra", "gpt-6-astra"]),
 });
 
 export const OPENAI_CONTRACT = Object.freeze({

@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "openai/gpt-5.6-sol",
-  "small_model": "openai/gpt-5.6-luna-fast",
+  "model": "openai/gpt-6-sol",
+  "small_model": "openai/gpt-6-luna-fast",
   "default_agent": "openai_orchestrator",
   "subagent_depth": 1,
   "enabled_providers": ["openai"],
@@ -13,7 +13,12 @@
   ],
   "share": "disabled",
   "autoupdate": "notify",
+  "permission": { "*": "allow", "external_directory": "allow", "doom_loop": "allow" },
   "compaction": { "auto": true, "prune": true, "reserved": 10000 },
+  "browser_automation_engine": {
+    "provider": "playwright",
+    "playwright_mcp_args": ["--headless", "--isolated", "--output-dir", "@DATA_ROOT@/openai/playwright/output"]
+  },
   "plugin": [
     "@OMO_PLUGIN@",
     "@PACKAGE_ROOT@/teams/openai/config/opencode/openai-team-tools.js",
@@ -23,40 +28,40 @@
     "openai_orchestrator": {
       "mode": "primary",
       "description": "Adaptive OpenAI-only master orchestrator.",
-      "model": "openai/gpt-5.6-sol",
-      "permission": { "task": "allow", "bash": "deny", "edit": "deny", "write": "deny", "skill": "deny", "skill_mcp": "deny", "codegraph_*": "deny" },
+      "model": "openai/gpt-6-sol",
+      "permission": { "task": "allow", "bash": "deny", "edit": "deny", "write": "deny", "skill": "allow", "skill_mcp": "allow", "codegraph_*": "deny" },
       "tools": { "task": true, "bash": false, "interactive_bash": false, "openai_remote_read": false, "openai_run_codex": false, "call_omo_agent": false },
-       "prompt_append": "You are the OpenAI Super Team orchestrator. A TASK_CACHE_HIT payload is a completed result: return its result_summary and do not retry or delegate it. Use the analyzeObjective outcomes supplied by the router. Route remote infrastructure read-only objectives with task(subagent_type=\"openai_ops\"). When a high-risk Codex terminal response lists reviewer and tester, launch both in one parallel task batch against its exact packet_id; when a critical-risk response lists reviewer_critical and tester, launch that pair instead. Reviewer objectives include review_task_id=<64hex> and tester objectives include test_task_id=<64hex>. Wait for both gate results before reporting final success; approval alone is pending verification and tester success alone is pending review. Use tester for other verification-only tasks. When discovery_agents contains both openai_explore and openai_librarian, launch both task calls in one assistant message/parallel batch, merge their evidence once, and retry only a failed lane. Codex terminal next_agents and reasons are authoritative: do not add a reasoning/tool round-trip to decide delegation. Never use Codex or generic bash for remote operations. Never use task(category=...) for this team. Every native task call must specify exactly one approved subagent_type. Coding changes use codex_executor as the first and only coding delegation. Never call openai_run_codex directly, never call call_omo_agent, and never use detached shells. Never use non-OpenAI providers. CodeGraph and skill_mcp are unavailable in OPENAI; use the normal read-only repository tools instead.\nROUTER CONTEXT: If a <OPENAI_ROUTER_ROUTE> tag is present, obey it, but do not spawn workers when the route is DIRECT."
+        "prompt_append": "You are the OpenAI Super Team orchestrator. A TASK_CACHE_HIT payload is a completed result: return its result_summary and do not retry or delegate it. Use the analyzeObjective outcomes supplied by the router. Route remote infrastructure read-only objectives with task(subagent_type=\"openai_ops\"). When a high-risk Codex terminal response lists reviewer and tester, launch both in one parallel task batch against its exact packet_id; when a critical-risk response lists reviewer_critical and tester, launch that pair instead. Reviewer objectives include review_task_id=<64hex> and tester objectives include test_task_id=<64hex>. Wait for both gate results before reporting final success; approval alone is pending verification and tester success alone is pending review. Use tester for other verification-only tasks. When discovery_agents contains both openai_explore and openai_librarian, launch both task calls in one assistant message/parallel batch, merge their evidence once, and retry only a failed lane. Codex terminal next_agents and reasons are authoritative: do not add a reasoning/tool round-trip to decide delegation. Never use Codex or generic bash for remote operations. Never use task(category=...) for this team. Every native task call must specify exactly one approved subagent_type. Coding changes use codex_executor as the first and only coding delegation. Never call openai_run_codex directly, never call call_omo_agent, and never use detached shells. Never use non-OpenAI providers. CodeGraph remains unavailable in OPENAI; browser work may load the Playwright skill and call its skill_mcp server without granting repository, Codex, or remote-mutation authority.\nROUTER CONTEXT: If a <OPENAI_ROUTER_ROUTE> tag is present, obey it, but do not spawn workers when the route is DIRECT."
     },
     "openai_explore": {
       "description": "Fast read-only semantic repository explorer.",
-      "model": "openai/gpt-5.6-luna-fast",
-      "permission": { "edit": "deny", "write": "deny", "skill_mcp": "deny", "codegraph_*": "deny", "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny" },
+      "model": "openai/gpt-6-luna-fast",
+      "permission": { "edit": "deny", "write": "deny", "skill": "allow", "skill_mcp": "allow", "codegraph_*": "deny", "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false },
-      "prompt_append": "For semantic code navigation, use Serena first and read-only. Use grep for exact text, glob for paths, and read for known bounded files. Do not invoke CodeGraph or skill_mcp; use the normal read-only repository tools."
+        "prompt_append": "For semantic code navigation, use Serena first and read-only. Use grep for exact text, glob for paths, and read for known bounded files. Do not invoke CodeGraph; browser work may use the loaded Playwright skill through skill_mcp without changing repository or remote-mutation permissions."
     },
     "openai_librarian": {
       "description": "OpenAI-only documentation and research worker.",
-      "model": "openai/gpt-5.6-luna",
+      "model": "openai/gpt-6-luna",
       "permission": { "serena_*": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false }
     },
     "openai_ops": {
       "description": "OpenAI-only read-only remote infrastructure investigator.",
       "mode": "subagent",
-      "model": "openai/gpt-5.6-luna",
+      "model": "openai/gpt-6-luna",
       "permission": { "edit": "deny", "write": "deny", "bash": "deny", "task": "deny", "skill": "deny", "serena_*": "deny" },
       "tools": { "openai_remote_read": true, "openai_run_codex": false, "call_omo_agent": false, "bash": false, "interactive_bash": false, "task": false, "skill": false }
     },
     "tester": {
       "description": "Test, verification, and regression worker.",
-      "model": "openai/gpt-5.6-terra",
+      "model": "openai/gpt-6-terra",
       "permission": { "apply_patch": "deny", "edit": "deny", "write": "deny", "delete": "deny", "rename": "deny", "file_create": "deny", "file_delete": "deny", "file_rename": "deny", "create_file": "deny", "remove_file": "deny", "move_file": "deny", "multi_edit": "deny", "write_file": "deny", "patch": "deny", "serena_*": "deny", "bash": "allow", "interactive_bash": "deny", "shell": "deny", "command": "deny", "task": "deny", "skill": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false, "apply_patch": false, "edit": false, "write": false, "delete": false, "rename": false, "file_create": false, "file_delete": false, "file_rename": false, "create_file": false, "remove_file": false, "move_file": false, "multi_edit": false, "write_file": false, "patch": false, "bash": true, "interactive_bash": false, "shell": false, "command": false, "task": false, "skill": false }
     },
     "reviewer": {
       "description": "Read-only correctness, security, and architecture reviewer.",
-      "model": "openai/gpt-5.6-sol",
+      "model": "openai/gpt-6-sol",
       "permission": { "edit": "deny", "write": "deny", "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false }
     },
@@ -75,7 +80,7 @@
     "codex_executor": {
       "description": "Native OpenCode child that executes coding work through the isolated official Codex CLI lane.",
       "mode": "subagent",
-      "model": "openai/gpt-5.6-luna-fast",
+      "model": "openai/gpt-6-luna-fast",
       "permission": {
         "openai_run_codex": "allow",
         "todowrite": "deny",
@@ -93,7 +98,8 @@
         "shell": "deny",
         "command": "deny",
         "task": "deny",
-        "skill": "deny",
+         "skill": "deny",
+         "skill_mcp": "deny",
         "webfetch": "deny",
         "websearch": "deny",
         "web": "deny",

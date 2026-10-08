@@ -71,7 +71,7 @@ PY
 
 collect_diagnostics() {
   mkdir -p "$DIAGNOSTICS_DIR"
-  for name in setup.out runtime.out runtime.err opencode-auth-list.out opencode-auth-list.err runtime-auth-list.out runtime-auth-list.err daily-mutation.out review-gate-evidence.json daily-fanout.out fanout-before.txt fanout-after.txt fanout-new.txt fanout-messages.jsonl sessions-after-fanout.json real-response-copy.txt benchmark-blocker.txt benchmark-compare.out benchmark-validate.out daily-report.json; do
+  for name in setup.out runtime.out runtime.err fixture-git-baseline.out recovery-continuation.out opencode-auth-list.out opencode-auth-list.err runtime-auth-list.out runtime-auth-list.err daily-mutation.out review-gate-evidence.json daily-fanout.out fanout-before.txt fanout-after.txt fanout-new.txt fanout-messages.jsonl sessions-after-fanout.json real-response-copy.txt benchmark-blocker.txt benchmark-compare.out benchmark-validate.out daily-report.json; do
     copy_bounded "$TEST_ROOT/$name" "$DIAGNOSTICS_DIR/$name"
   done
   for name in OPENCODE_AUTH REAL_DAILY_RESPONSE_COPY REAL_BOUNDED_FANOUT parent-session-id child-session-id opencode-auth-metadata.json codex-auth-metadata.json opencode-destination-metadata.json packet-schema.json; do
@@ -169,16 +169,16 @@ run_with_timeout() {
 }
 
 post_session_message() {
-  local output="$1" prompt="$2" body before_count status count
-  body="$(jq -n --arg text "$prompt" '{agent:"openai_orchestrator",parts:[{type:"text",text:$text}]}')"
-  before_count="$(curl -fsS --max-time 10 "http://127.0.0.1:$port/session/$parent_session/message" | jq 'length')"
-  run_with_timeout 20 "$output" curl -fsS --max-time 15 -X POST "http://127.0.0.1:$port/session/$parent_session/prompt_async" \
+  local output="$1" prompt="$2" session="${3:-$parent_session}" agent="${4:-openai_orchestrator}" body before_count status count
+  body="$(jq -n --arg text "$prompt" --arg agent "$agent" '{agent:$agent,parts:[{type:"text",text:$text}]}')"
+  before_count="$(curl -fsS --max-time 10 "http://127.0.0.1:$port/session/$session/message" | jq 'length')"
+  run_with_timeout 20 "$output" curl -fsS --max-time 15 -X POST "http://127.0.0.1:$port/session/$session/prompt_async" \
     -H 'Content-Type: application/json' --data "$body" >/dev/null || return 1
   for _ in $(seq 1 300); do
-    status="$(curl -fsS --max-time 10 "http://127.0.0.1:$port/session/status" | jq -r --arg id "$parent_session" '.[$id].type // "unknown"')" || return 1
-    count="$(curl -fsS --max-time 10 "http://127.0.0.1:$port/session/$parent_session/message" | jq 'length')" || return 1
+    status="$(curl -fsS --max-time 10 "http://127.0.0.1:$port/session/status" | jq -r --arg id "$session" '.[$id].type // "unknown"')" || return 1
+    count="$(curl -fsS --max-time 10 "http://127.0.0.1:$port/session/$session/message" | jq 'length')" || return 1
     if [ "$count" -gt "$before_count" ] && [ "$status" != busy ] && [ "$status" != retry ]; then
-      curl -fsS --max-time 10 "http://127.0.0.1:$port/session/$parent_session/message" >"$output"
+      curl -fsS --max-time 10 "http://127.0.0.1:$port/session/$session/message" >"$output"
       if jq -e 'any(.[]; (.info.role == "assistant" or .role == "assistant") and ((.info.finish // .finish) == "stop" or (.info.finish // .finish) == "length" or (.info.finish // .finish) == "content-filter") and ([.parts[]?.text // empty] | join("\n") | length > 0))' "$output" >/dev/null 2>&1; then
         return 0
       fi
@@ -298,7 +298,7 @@ wait_for_runtime_state() {
       count="$(find "$run_root" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
       if [ "$count" = 1 ]; then
         run_dir="$(find "$run_root" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
-        [ -f "$run_dir/port" ] && [ -f "$run_dir/server.pid" ] && [ -f "$run_dir/parent_session_id" ] && [ -f "$run_dir/bridge.identity" ] && {
+        [ -f "$run_dir/port" ] && [ -f "$run_dir/server.pid" ] && [ -f "$run_dir/bridge.identity" ] && {
           printf '%s\n' "$run_dir"
           return 0
         }
@@ -350,17 +350,28 @@ const fail = (message) => {
 if (config.default_agent !== "openai_orchestrator") fail("daily default agent mismatch");
 if (!Array.isArray(config.enabled_providers) || config.enabled_providers.join(",") !== "openai") fail("daily provider policy mismatch");
 if (!Array.isArray(config.plugin) || !config.plugin.some((plugin) => plugin.endsWith("/teams/openai/config/opencode/openai-team-tools.js"))) fail("daily tool plugin missing");
-if (config.model !== "openai/gpt-5.6-luna" || config.small_model !== "openai/gpt-5.6-luna") fail("daily model mismatch");
+if (config.model !== "openai/gpt-6-luna" || config.small_model !== "openai/gpt-6-luna") fail("daily model mismatch");
 NODE
 
 fixture="$TEST_ROOT/fixture"
 mkdir -p "$fixture"
 printf '%s\n' 'function add(a, b) { return a + b; }' 'module.exports = { add };' >"$fixture/calculator.js"
 printf '%s\n' "const { add } = require('./calculator.js');" 'if (add(2, 3) !== 5) throw new Error("add failed");' 'console.log("calculator tests passed");' >"$fixture/calculator.test.js"
+printf '%s\n' '.serena/' '.omo/' '.codegraph/' >"$fixture/.gitignore"
 node "$fixture/calculator.test.js" >"$TEST_ROOT/fixture-baseline.out"
+git -C "$fixture" init -q
+git -C "$fixture" config user.email opencode-daily-cert@example.invalid
+git -C "$fixture" config user.name opencode-daily-cert
+git -C "$fixture" add .gitignore calculator.js calculator.test.js
+git -C "$fixture" -c commit.gpgSign=false commit -qm "fixture baseline"
+[ -z "$(git -C "$fixture" status --porcelain)" ] || block "fixture baseline is dirty"
+  [ "$(git -C "$fixture" check-ignore -q .serena/project.yml; printf '%s' "$?")" = 0 ] || block "runtime .serena metadata is not explicitly ignored"
+  [ "$(git -C "$fixture" check-ignore -q .omo/run-continuation/placeholder; printf '%s' "$?")" = 0 ] || block "runtime .omo metadata is not explicitly ignored"
+  [ "$(git -C "$fixture" check-ignore -q .codegraph/placeholder; printf '%s' "$?")" = 0 ] || block "runtime .codegraph metadata is not explicitly ignored"
+printf '%s\n' 'BASELINE_DIRTY=false' >"$TEST_ROOT/fixture-git-baseline.out"
 
 cd "$fixture"
-TEAM_RUNTIME_HEADLESS=1 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" OPENCODE_AUTH_SOURCE="$opencode_auth_source" \
+env -u RESUME_SESSION_ID -u PARENT_SESSION_ID -u RUN_ID -u TEAM_RUNTIME_INNER -u SESSION_MODE TEAM_RUNTIME_HEADLESS=1 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" OPENCODE_AUTH_SOURCE="$opencode_auth_source" \
   OPENAI_CODEX_AUTH_SOURCE="$codex_auth_source" "$ROOT/bin/opencode-team" daily >"$TEST_ROOT/runtime.out" 2>"$TEST_ROOT/runtime.err" &
 RUNTIME_PID=$!
 run_dir="$(wait_for_runtime_state)" || block "daily runtime did not publish bounded run state"
@@ -371,7 +382,11 @@ BRIDGE_PID="$(< "$run_dir/bridge.pid")"
 [ -f "$run_dir/watchdog.pid" ] && WATCHDOG_PID="$(< "$run_dir/watchdog.pid")"
 [ -f "$run_dir/reaper.pid" ] && REAPER_PID="$(< "$run_dir/reaper.pid")"
 port="$(< "$run_dir/port")"
-parent_session="$(< "$run_dir/parent_session_id")"
+parent_session=""
+for _ in $(seq 1 30); do
+  [ -f "$run_dir/parent_session_id" ] && parent_session="$(< "$run_dir/parent_session_id")" && [ -n "$parent_session" ] && break
+  sleep 1
+done
 [ -n "$parent_session" ] || block "daily parent session was not created"
 kill -0 "$server_pid" >/dev/null 2>&1 || block "daily server pid is not alive"
 curl -fsS --max-time 5 "http://127.0.0.1:$port/" >/dev/null || block "daily server API not ready"
@@ -388,13 +403,70 @@ printf '%s\n' PASS >"$TEST_ROOT/OPENCODE_AUTH"
 mutation_prompt='Inspect this fixture first using the appropriate repository worker. The orchestrator MUST delegate the implementation to exactly one codex_executor, codex_executor MUST edit only calculator.js and calculator.test.js, and the tester MUST execute node calculator.test.js before completion. Require a reviewer gate after the tester passes; the automatic reviewer continuation MUST admit exactly one reviewer and wait for its terminal APPROVE result before the final response. Add multiply(a, b) to calculator.js, add a focused test, execute the test, and give a concise final summary. Do not only describe edits: make the files change. Work only inside this fixture.'
 request_output="$TEST_ROOT/daily-mutation.out"
 if ! post_session_message "$request_output" "$mutation_prompt"; then
-  block "real Daily parent request failed; see $request_output"
+  recovery_observed=false
+  for _ in $(seq 1 60); do
+    recovery_observed="$(jq -s 'any(.[]; .agent == "codex_executor" and (.recovery_state == "RECOVERY_REQUIRED" or .recovery_state == "RECOVERY_CONTINUATION_REQUIRED" or .recovery_continuation == true))' "$TEAM_HOME/data/daily/state/team/work-packets"/*.json 2>/dev/null || printf false)"
+    [ "$recovery_observed" = true ] && break
+    sleep 1
+  done
+  [ "$recovery_observed" = true ] || block "real Daily parent request failed; see $request_output"
+fi
+for _ in $(seq 1 60); do
+  recovery_required_now="$(jq -s 'any(.[]; .agent == "codex_executor" and (.recovery_state == "RECOVERY_REQUIRED" or .recovery_state == "RECOVERY_CONTINUATION_REQUIRED"))' "$TEAM_HOME/data/daily/state/team/work-packets"/*.json 2>/dev/null || printf false)"
+  rg -q 'multiply' "$fixture/calculator.js" && rg -q 'multiply' "$fixture/calculator.test.js" && break
+  [ "$recovery_required_now" = true ] && break
+  sleep 1
+done
+if [ "$recovery_required_now" = true ]; then
+  recovery_continuation_exists="$(jq -s 'any(.[]; .agent == "codex_executor" and .recovery_continuation == true and (.recovery_source_packet_id // "") != "")' "$TEAM_HOME/data/daily/state/team/work-packets"/*.json 2>/dev/null || printf false)"
+  if [ "$recovery_continuation_exists" != true ]; then
+    recovery_prompt='Resume the authoritative recovery packet for this same objective. You are the orchestrator and must first call the native task tool exactly once with subagent_type=codex_executor and run_in_background=false to create the distinct recovery continuation child. Do not call openai_run_codex yourself from this orchestrator session. The new codex_executor child must call openai_run_codex exactly once with the persisted recovery authority, return its structured terminal result, and must not inspect or modify the repository outside that authority. Do not create a discovery task or any duplicate Codex task. After the continuation reaches terminal success, admit exactly one required tester and one reviewer gate as already specified by the original objective.'
+    recovery_body="$(jq -n --arg text "$recovery_prompt" '{agent:"openai_orchestrator",parts:[{type:"text",text:$text}]}')"
+    curl -fsS --max-time 15 -X POST "http://127.0.0.1:$port/session/$parent_session/prompt_async" -H 'Content-Type: application/json' --data "$recovery_body" >/dev/null || true
+  fi
+  for _ in $(seq 1 120); do
+    rg -q 'multiply' "$fixture/calculator.js" && rg -q 'multiply' "$fixture/calculator.test.js" && break
+    sleep 1
+  done
 fi
 assert_file "$fixture/calculator.js"
 assert_file "$fixture/calculator.test.js"
 rg -q 'multiply' "$fixture/calculator.js" || block "Daily did not add multiply"
 rg -q 'multiply' "$fixture/calculator.test.js" || block "Daily did not add multiply test"
 node "$fixture/calculator.test.js" >"$TEST_ROOT/daily-mutation-verification.out"
+
+recovery_required="$(jq -s 'any(.[]; .agent == "codex_executor" and (.recovery_state == "RECOVERY_REQUIRED" or .recovery_state == "RECOVERY_CONTINUATION_REQUIRED"))' "$TEAM_HOME/data/daily/state/team/work-packets"/*.json 2>/dev/null || printf false)"
+recovery_continuation_exists="$(jq -s 'any(.[]; .agent == "codex_executor" and .recovery_continuation == true and (.recovery_source_packet_id // "") != "")' "$TEAM_HOME/data/daily/state/team/work-packets"/*.json 2>/dev/null || printf false)"
+if [ "$recovery_required" = true ] && [ "$recovery_continuation_exists" != true ]; then
+  recovery_prompt='Resume the authoritative recovery packet for this same objective. You are the orchestrator and must first call the native task tool exactly once with subagent_type=codex_executor and run_in_background=false to create the distinct recovery continuation child. Do not call openai_run_codex yourself from this orchestrator session. The new codex_executor child must call openai_run_codex exactly once with the persisted recovery authority, return its structured terminal result, and must not inspect or modify the repository outside that authority. Do not create a discovery task or any duplicate Codex task. After the continuation reaches terminal success, admit exactly one required tester and one reviewer gate as already specified by the original objective.'
+  recovery_body="$(jq -n --arg text "$recovery_prompt" '{agent:"openai_orchestrator",parts:[{type:"text",text:$text}]}')"
+  curl -fsS --max-time 15 -X POST "http://127.0.0.1:$port/session/$parent_session/prompt_async" -H 'Content-Type: application/json' --data "$recovery_body" >/dev/null || true
+fi
+if [ "$recovery_required" = true ] || [ "$recovery_continuation_exists" = true ]; then
+  recovery_terminal=0
+  for _ in $(seq 1 180); do
+    recovery_terminal="$(jq -s 'any(.[]; .agent == "codex_executor" and .recovery_continuation == true and (.recovery_source_packet_id // "") != "" and (.child_session_id // "") != "" and .codex_outcome == "success" and (.phase == "pending_verification" or .phase == "codex_terminal" or .phase == "foreground_completion"))' "$TEAM_HOME/data/daily/state/team/work-packets"/*.json 2>/dev/null || printf false)"
+    [ "$recovery_terminal" = true ] && break
+    sleep 1
+  done
+  [ "$recovery_terminal" = true ] || block "recovery continuation did not reach terminal Codex success"
+fi
+
+review_ready=0
+for review_wait in $(seq 1 90); do
+  if jq -s 'any(.[]; .agent == "reviewer" and .outcome == "completed")' "$TEAM_HOME/data/daily/state/team/work-packets"/*.json 2>/dev/null | rg -q '^true$'; then
+    review_ready=1
+    break
+  fi
+  sleep 2
+done
+if [ "$review_ready" -ne 1 ]; then
+  recovery_failure="$(jq -r -s '[.[] | select(.agent == "codex_executor" and .recovery_state != "RECOVERY_VERIFIED_COMPLETE" and (.recovery_state == "RECOVERY_BLOCKED_UNSAFE" or .error_code == "baseline_was_dirty" or .error_code == "repository_delta_requires_continuation")) | [.packet_id, .recovery_state, .error_code] | @tsv] | .[0] // empty' "$TEAM_HOME/data/daily/state/team/work-packets"/*.json 2>/dev/null)"
+  if [ -n "$recovery_failure" ]; then
+    block "RECOVERY_GATE_FAILURE: $recovery_failure"
+  fi
+  block "REVIEWER_GATE_FAILURE: reviewer did not reach terminal completion"
+fi
 
 curl -fsS --max-time 5 "http://127.0.0.1:$port/session" >"$TEST_ROOT/sessions-after-mutation.json"
 child_ids="$TEST_ROOT/mutation-child-ids.txt"
@@ -436,7 +508,8 @@ for (const session of sessions.filter((candidate) => candidate.parentID === pare
   });
 }
 const counts = Object.fromEntries(["codex_executor", "tester", "reviewer", "reviewer_critical"].map((agent) => [agent, children.filter((child) => child.agent === agent).length]));
-const gate = packets.find((packet) => packet.parent_session_id === parent && packet.review_required === true);
+const gate = packets.find((packet) => packet.parent_session_id === parent && packet.review_required === true && packet.tester_status === "passed" && packet.review_status === "approved")
+  || packets.find((packet) => packet.parent_session_id === parent && packet.review_required === true);
 const reviewer = children.find((child) => child.agent === "reviewer");
 const evidence = {
   root_session_id: parent,
@@ -446,13 +519,13 @@ const evidence = {
 };
 fs.writeFileSync(process.env.NODE_OUTPUT, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
 const fail = (message) => { console.error(message); process.exit(1); };
-if (counts.codex_executor !== 1) fail(`expected one codex child, found ${counts.codex_executor}`);
+if (![1, 2].includes(counts.codex_executor)) fail(`expected one initial codex child plus at most one recovery child, found ${counts.codex_executor}`);
 if (counts.tester !== 1) fail(`expected one tester child, found ${counts.tester}`);
 if (counts.reviewer !== 1) fail(`expected one reviewer child, found ${counts.reviewer}`);
 if (counts.reviewer_critical !== 0) fail("normal reviewer scenario admitted critical reviewer");
 if (!children.filter((child) => ["codex_executor", "tester", "reviewer"].includes(child.agent)).every((child) => child.provider === "openai")) fail("gate child provider was not OpenAI");
-if (children.find((child) => child.agent === "tester")?.executed_model !== "gpt-5.6-luna") fail("tester model mismatch");
-if (reviewer?.executed_model !== "gpt-5.6-terra") fail("reviewer model mismatch");
+if (children.find((child) => child.agent === "tester")?.executed_model !== "gpt-6-luna") fail("tester model mismatch");
+if (reviewer?.executed_model !== "gpt-6-terra") fail("reviewer model mismatch");
 if (!reviewer?.terminal) fail("reviewer did not reach terminal completion");
 if (!gate || gate.tester_status !== "passed" || gate.review_status !== "approved" || gate.outcome !== "completed") fail("review gate did not settle to approved");
 NODE
@@ -468,6 +541,7 @@ const api = {
   route: { current: { name: "session", params: { sessionID: process.env.NODE_PARENT } } },
   client: { session: {
     get: ({ sessionID }) => get(`/session/${sessionID}`),
+    list: () => get("/session"),
     messages: ({ sessionID }) => get(`/session/${sessionID}/message`),
     status: () => get("/session/status"),
   } },

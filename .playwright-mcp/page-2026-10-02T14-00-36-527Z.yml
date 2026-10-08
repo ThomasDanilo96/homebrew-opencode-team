@@ -1,0 +1,3 @@
+- generic [ref=e1]:
+  - button "Enable" [active] [ref=e2]
+  - status [ref=e3]: clicked

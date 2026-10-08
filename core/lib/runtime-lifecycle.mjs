@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative, resolve } from "node:path";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 
 const command = process.argv[2];
 const packageRoot = resolve(process.env.PACKAGE_ROOT || join(dirname(new URL(import.meta.url).pathname), "..", ".."));
@@ -23,6 +23,10 @@ const readText = (path) => {
 
 const readJson = (path) => {
   try { return JSON.parse(readFileSync(path, "utf8")); } catch { return null; }
+};
+
+const readJsonValue = (value) => {
+  try { return JSON.parse(value); } catch { return null; }
 };
 
 const print = (value) => process.stdout.write(`${typeof value === "string" ? value : JSON.stringify(value, null, 2)}\n`);
@@ -74,6 +78,72 @@ const identityState = (runDir, role, runID) => {
 };
 
 const lsof = (args) => spawnSync(process.env.OPENCODE_TEAM_LSOF || "/usr/sbin/lsof", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
+
+const hostPathActivity = (path) => {
+  if (!existsSync(path)) return { state: "missing", count: 0 };
+  const result = spawnSync(process.env.OPENCODE_TEAM_LSOF || "/usr/sbin/lsof", ["-nP", "+D", path], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 3000 });
+  if (result.status === 0) return { state: "active", count: Math.max(0, result.stdout.trim().split(/\r?\n/).length - 1) };
+  if (result.status === 1) return { state: "clear", count: 0 };
+  return { state: "uncertain", count: 0 };
+};
+
+const hostChromeCloneRoots = () => {
+  const roots = new Set();
+  const tempParent = resolve(dirname(tmpdir()));
+  const configured = String(process.env.OPENCODE_TEAM_CHROME_CLONE_ROOTS || "").split(",").map((path) => path.trim()).filter(Boolean).map((path) => resolve(path));
+  for (const root of [tempParent, resolve(tmpdir()), join(tempParent, "X"), ...configured]) {
+    if (basename(root) === "com.google.Chrome.code_sign_clone" && realInside(root, dirname(root))) { roots.add(root); continue; }
+    let entries = [];
+    try { entries = readdirSync(root, { withFileTypes: true }); } catch { continue; }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name !== "com.google.Chrome.code_sign_clone") continue;
+      const path = join(root, entry.name);
+      if (realInside(path, root)) roots.add(path);
+    }
+  }
+  return [...roots];
+};
+
+const hostChromeCloneUnits = (root) => {
+  try {
+    const children = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && !entry.isSymbolicLink())
+      .map((entry) => join(root, entry.name));
+    return children.length ? children : [root];
+  } catch { return [root]; }
+};
+
+const dockerStoragePaths = () => [
+  join(homedir(), "Library", "Containers", "com.docker.docker", "Data", "vms"),
+  join(homedir(), "Library", "Group Containers", "group.com.docker", "Data", "vms"),
+].filter((path, index, paths) => paths.indexOf(path) === index);
+
+const hostStorageAccounting = () => {
+  const chromePaths = hostChromeCloneRoots().flatMap(hostChromeCloneUnits);
+  const chrome = chromePaths.map((path) => {
+    const size = sizeOf(path, 100_000);
+    const activity = hostPathActivity(path);
+    let owner = "uncertain";
+    let old = false;
+    const retentionHours = Math.min(Math.max(Number(process.env.OPENCODE_CHROME_CLONE_RETENTION_HOURS || 24), 1), 24 * 30);
+    try { old = Date.now() - lstatSync(path).mtimeMs >= retentionHours * 60 * 60 * 1000; } catch {}
+    try { owner = typeof process.getuid === "function" && lstatSync(path).uid === process.getuid() ? "user" : "uncertain"; } catch {}
+    const active = activity.state === "active";
+    const reclaimable = owner === "user" && !active && old && !size.truncated;
+    return { path, ...size, owner, activity: activity.state, active, old, reclaimable, gc: reclaimable ? "bounded-stale" : "preserve-uncertain" };
+  });
+  const docker = dockerStoragePaths().map((path) => {
+    const size = sizeOf(path, 20_000);
+    const activity = hostPathActivity(path);
+     return { path, ...size, logical_bytes: size.bytes, allocated_bytes: size.allocated_bytes, owner: "docker-desktop", activity: activity.state, active: activity.state === "active", reclaimable: false, gc: "report-only", direct_delete: "forbidden" };
+  });
+  const dockerCli = spawnSync("docker", ["system", "df", "--format", "{{json .}}"], { encoding: "utf8", timeout: 3000 });
+  const dockerRows = dockerCli.status === 0 ? dockerCli.stdout.trim().split(/\r?\n/).filter(Boolean).map((line) => readJsonValue(line)).filter(Boolean) : [];
+  return {
+    "chrome-code-sign-clone": { bytes: chrome.reduce((sum, item) => sum + item.bytes, 0), entries: chrome.reduce((sum, item) => sum + item.entries, 0), paths: chrome, policy: "bounded-stale-only" },
+    "docker-storage": { bytes: docker.reduce((sum, item) => sum + item.bytes, 0), logical_bytes: docker.reduce((sum, item) => sum + item.logical_bytes, 0), allocated_bytes: docker.reduce((sum, item) => sum + item.allocated_bytes, 0), entries: docker.reduce((sum, item) => sum + item.entries, 0), paths: docker, docker_available: dockerCli.status === 0, docker_reclaimable: [], docker_df: dockerRows, policy: "report-only" },
+  };
+};
 
 const pathHasOpenFiles = (path) => {
   if (!existsSync(path)) return { state: "clear", count: 0 };
@@ -247,6 +317,7 @@ const terminalHistory = () => {
 
 const sizeOf = (root, limit = 50_000) => {
   let bytes = 0;
+  let allocatedBytes = 0;
   let entries = 0;
   const walk = (path) => {
     if (entries >= limit || !existsSync(path)) return;
@@ -254,12 +325,12 @@ const sizeOf = (root, limit = 50_000) => {
     try { info = lstatSync(path); } catch { return; }
     entries += 1;
     if (info.isSymbolicLink()) return;
-    if (info.isFile()) { bytes += info.size; return; }
+    if (info.isFile()) { bytes += info.size; allocatedBytes += Number(info.blocks || 0) * 512; return; }
     if (!info.isDirectory()) return;
     for (const entry of readdirSync(path)) walk(join(path, entry));
   };
   walk(root);
-  return { bytes, entries, truncated: entries >= limit };
+  return { bytes, allocated_bytes: allocatedBytes, entries, truncated: entries >= limit };
 };
 
 const sumSizes = (roots, limit = 50_000) => roots.reduce((total, root) => total + sizeOf(root, limit).bytes, 0);
@@ -276,11 +347,21 @@ const storageAccounting = () => {
     "profile-cache": sumSizes(teams.map((team) => join(cacheRoot, team))),
     "profile-opencode-data": sumSizes(teams.map((team) => join(dataRoot, team, "data"))),
     "tool-output": { bytes: 0, entries: 0, truncated: false },
+    "playwright-output": { bytes: 0, entries: 0, truncated: false, paths: {} },
+    "playwright-cache": { bytes: 0, entries: 0, truncated: false, paths: {} },
     logs: sizeOf(join(stateRoot, "maintenance", "logs")),
     "db-wal": { bytes: 0, entries: 0, truncated: false, files: {} },
     "shared-team-dependencies": sizeOf(dependencyRoot),
   };
+  const hostStorage = hostStorageAccounting();
+  categories["chrome-code-sign-clone"] = hostStorage["chrome-code-sign-clone"];
+  categories["docker-storage"] = hostStorage["docker-storage"];
   for (const team of teams) {
+    const playwright = sizeOf(join(dataRoot, team, "playwright", "output"));
+    categories["playwright-output"].bytes += playwright.bytes;
+    categories["playwright-output"].entries += playwright.entries;
+    categories["playwright-output"].truncated ||= playwright.truncated;
+    categories["playwright-output"].paths[team] = { path: join(dataRoot, team, "playwright", "output"), ...playwright, owner: "package", regenerable: true };
     const tool = sizeOf(join(dataRoot, team, "data", "opencode", "tool-output"));
     categories["tool-output"].bytes += tool.bytes;
     categories["tool-output"].entries += tool.entries;
@@ -298,10 +379,17 @@ const storageAccounting = () => {
       }
     }
   }
-  const current = Object.fromEntries(Object.entries(categories).map(([key, value]) => [key, value.bytes]));
+  for (const path of [join(homedir(), "Library", "Caches", "ms-playwright-mcp"), join(homedir(), "Library", "Caches", "ms-playwright")]) {
+    const cache = sizeOf(path);
+    categories["playwright-cache"].bytes += cache.bytes;
+    categories["playwright-cache"].entries += cache.entries;
+    categories["playwright-cache"].truncated ||= cache.truncated;
+    categories["playwright-cache"].paths[path] = { path, ...cache, owner: "upstream", regenerable: true, gc: "report-only" };
+  }
+  const current = Object.fromEntries(Object.entries(categories).map(([key, value]) => [key, key === "docker-storage" ? value.allocated_bytes : value.bytes]));
   const practicalPeak = {
-    "current-bytes": Object.values(current).reduce((sum, value) => sum + value, 0),
-    "peak-checkpoint-bytes": Object.values(current).reduce((sum, value) => sum + value, 0) + Number(process.env.OPENCODE_TEAM_PEAK_HEADROOM_BYTES || 0),
+    "current-bytes": Object.values(current).reduce((sum, value) => sum + Number(value || 0), 0),
+    "peak-checkpoint-bytes": Object.values(current).reduce((sum, value) => sum + Number(value || 0), 0) + Number(process.env.OPENCODE_TEAM_PEAK_HEADROOM_BYTES || 0),
   };
   const codegraphRoot = resolve(process.env.OPENCODE_TEAM_CODEGRAPH_ROOT || join(homedir(), ".omo", "codegraph"));
   const backupRoot = resolve(process.env.OPENCODE_TEAM_BACKUP_ROOT || join(homedir(), ".config", "opencode", "backups"));
@@ -329,6 +417,16 @@ const storageAccounting = () => {
     const thresholdBytes = threshold * 1_000_000_000;
     if (disposableBytes >= thresholdBytes) warnings.push({ code: `DISPOSABLE_GROWTH_${threshold}GB`, bytes: disposableBytes, threshold_bytes: thresholdBytes });
   }
+  const growthThresholds = {
+    CHROME_CODE_SIGN_CLONE_GROWTH: Number(process.env.OPENCODE_TEAM_CHROME_CLONE_WARNING_BYTES || 10_000_000_000),
+    PLAYWRIGHT_CACHE_GROWTH: Number(process.env.OPENCODE_TEAM_PLAYWRIGHT_CACHE_WARNING_BYTES || 10_000_000_000),
+    DOCKER_DISK_GROWTH: Number(process.env.OPENCODE_TEAM_DOCKER_DISK_WARNING_BYTES || 40_000_000_000),
+  };
+  for (const [code, threshold] of Object.entries(growthThresholds)) {
+    const category = code === "CHROME_CODE_SIGN_CLONE_GROWTH" ? "chrome-code-sign-clone" : code === "PLAYWRIGHT_CACHE_GROWTH" ? "playwright-cache" : "docker-storage";
+    const bytes = code === "DOCKER_DISK_GROWTH" ? Number(categories[category]?.allocated_bytes || 0) : Number(categories[category]?.bytes || 0);
+    if (bytes >= threshold) warnings.push({ code, bytes, threshold_bytes: threshold });
+  }
   return {
     categories,
     current,
@@ -339,6 +437,8 @@ const storageAccounting = () => {
     OPENAI_DB_WAL_FINDING: "package-controlled OpenCode DB/WAL is reported separately; live DBs are not checkpointed by runtime accounting",
     CODEGRAPH_GROWTH_FINDING: { path: codegraphRoot, bytes: sizeOf(codegraphRoot, 20_000).bytes, ownership: "report-only-unverified" },
     BACKUPS_FINDING: { path: backupRoot, bytes: sizeOf(backupRoot, 20_000).bytes, ownership: "upstream-report-only" },
+    PLAYWRIGHT_STORAGE_PATHS: Object.values(categories["playwright-output"].paths).concat(Object.values(categories["playwright-cache"].paths)),
+    HOST_STORAGE_PATHS: Object.values(hostStorage).flatMap((category) => category.paths || []),
   };
 };
 
@@ -448,15 +548,30 @@ const classifyLegacy = () => {
 };
 
 const excludeTimeMachine = (apply, check = false) => {
-  const roots = [runtimeRoot, dependencyRoot].filter((root) => existsSync(root) || apply || check);
+  const tmutil = (args) => spawnSync("tmutil", args, { encoding: "utf8", timeout: Number(process.env.OPENCODE_TEAM_TMUTIL_TIMEOUT_MS || 5000) });
+  const systemTempPath = (root) => {
+    const path = resolve(root);
+    return path.startsWith("/private/var/folders/") || path.startsWith("/var/folders/");
+  };
+  const roots = [
+    runtimeRoot,
+    dependencyRoot,
+    ...teams.map((team) => join(dataRoot, team, "playwright", "output")),
+    ...hostChromeCloneRoots(),
+    ...dockerStoragePaths(),
+  ].filter((root) => existsSync(root));
   const results = [];
   for (const root of roots) {
     if (!existsSync(root)) {
       results.push({ root, root_excluded: false, child_covered: false, mode: apply ? "apply" : check ? "check" : "dry-run", status: 1, error: "missing_root" });
       continue;
     }
+    if (systemTempPath(root)) {
+      results.push({ root, root_excluded: true, child_covered: true, mode: "system-temp-not-backed-up", status: 0, time_machine_domain: "system_temp_not_backed_up" });
+      continue;
+    }
     const args = ["addexclusion", root];
-    const result = apply ? spawnSync("tmutil", args, { encoding: "utf8" }) : { status: 0, stdout: "", stderr: "" };
+    const result = apply ? tmutil(args) : { status: 0, stdout: "", stderr: "" };
     let childCovered = !apply && !check;
     let rootExcluded = !apply && !check;
     if ((apply && result.status === 0) || check) {
@@ -467,8 +582,8 @@ const excludeTimeMachine = (apply, check = false) => {
           writeFileSync(probe, "probe\n", { mode: 0o600 });
           createdProbe = true;
         }
-        const rootCheck = spawnSync("tmutil", ["isexcluded", root], { encoding: "utf8" });
-        const childCheck = spawnSync("tmutil", ["isexcluded", probe], { encoding: "utf8" });
+        const rootCheck = tmutil(["isexcluded", root]);
+        const childCheck = tmutil(["isexcluded", probe]);
         rootExcluded = rootCheck.status === 0 && /excluded/i.test(rootCheck.stdout || "");
         childCovered = childCheck.status === 0 && /excluded/i.test(childCheck.stdout || "");
       } finally {
@@ -480,7 +595,7 @@ const excludeTimeMachine = (apply, check = false) => {
   return results;
 };
 
-const timeMachinePassed = (results) => results.length === 2 && results.every((result) => result.status === 0 && result.root_excluded && result.child_covered);
+const timeMachinePassed = (results) => results.length >= 2 && results.every((result) => result.status === 0 && ((result.root_excluded && result.child_covered) || result.time_machine_domain === "system_temp_not_backed_up"));
 
 if (command === "gc") {
   const apply = process.argv.includes("--apply");

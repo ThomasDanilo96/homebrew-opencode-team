@@ -1,0 +1,9 @@
+{
+  "name": "opencode-team-openai-runtime",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@opencode-ai/plugin": "1.18.25",
+    "oh-my-openagent": "4.19.4"
+  }
+}

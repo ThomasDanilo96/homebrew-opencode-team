@@ -37,7 +37,9 @@ async function copyResponse(api) {
     return;
   }
   const parentStatus = graph.statuses.get(sessionID);
-  if (parentStatus?.type === "busy" || parentStatus?.type === "retry") {
+  const parentMessages = graph.messages instanceof Map ? (graph.messages.get(sessionID) || []) : [];
+  const parentTerminal = parentMessages.some((message) => message?.role === "assistant" && ["stop", "length", "content-filter"].includes(message?.finish));
+  if ((parentStatus?.type === "busy" || parentStatus?.type === "retry") && !parentTerminal) {
     api.ui.toast({ variant: "info", message: "Response is still running" });
     return;
   }

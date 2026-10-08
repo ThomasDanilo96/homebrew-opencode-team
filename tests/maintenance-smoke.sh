@@ -18,7 +18,7 @@ export OPENCODE_TEAM_EXECUTABLE=/opt/homebrew/bin/opencode-team
 "$CLI" setup >/tmp/opencode-team-maintenance-setup.out
 
 agent_root="$TEST_ROOT/state/maintenance/launchagents"
-for task in best-tool-output-gc best-retention openai-retention runtime-gc; do
+for task in best-tool-output-gc best-retention openai-retention runtime-gc playwright-gc host-storage-gc; do
   plist="$agent_root/it.danilodantoni.opencode-team.$task.plist"
   test -f "$plist"
   plutil -lint "$plist"
@@ -227,6 +227,32 @@ wait "$openai_pid"
 
 "$CLI" maintenance best-tool-output-gc >"$TEST_ROOT/best-empty.out"
 rg -q 'SKIP_NO_BEST_TOOL_OUTPUT_STORE' "$TEST_ROOT/best-empty.out"
+mkdir -p "$TEST_ROOT/data/best/playwright/output"
+TEST_PLAYWRIGHT_OUTPUT="$TEST_ROOT/data/best/playwright/output/stale.json" python3 - <<'PY'
+import os
+import pathlib
+import time
+
+path = pathlib.Path(os.environ["TEST_PLAYWRIGHT_OUTPUT"])
+path.write_text("stale\n")
+old = time.time() - 2 * 86400
+os.utime(path, (old, old))
+PY
+OPENCODE_PLAYWRIGHT_GC_RETENTION_HOURS=1 OPENCODE_PLAYWRIGHT_GC_TEST_IGNORE_ACTIVITY=1 \
+  "$CLI" maintenance playwright-gc >"$TEST_ROOT/playwright-gc-first.out"
+jq -e '.bytes_removed > 0 and .entries_removed == 1' "$TEST_ROOT/playwright-gc-first.out" >/dev/null
+OPENCODE_PLAYWRIGHT_GC_RETENTION_HOURS=1 OPENCODE_PLAYWRIGHT_GC_TEST_IGNORE_ACTIVITY=1 \
+  "$CLI" maintenance playwright-gc >"$TEST_ROOT/playwright-gc-second.out"
+jq -e '.bytes_removed == 0 and .entries_removed == 0' "$TEST_ROOT/playwright-gc-second.out" >/dev/null
+mkdir -p "$TEST_ROOT/chrome-temp/com.google.Chrome.code_sign_clone"
+printf '%s\n' stale >"$TEST_ROOT/chrome-temp/com.google.Chrome.code_sign_clone/stale"
+touch -t 202001010000 "$TEST_ROOT/chrome-temp/com.google.Chrome.code_sign_clone" "$TEST_ROOT/chrome-temp/com.google.Chrome.code_sign_clone/stale"
+OPENCODE_TEAM_CHROME_CLONE_ROOTS="$TEST_ROOT/chrome-temp" OPENCODE_TEAM_LSOF=/usr/sbin/lsof OPENCODE_CHROME_CLONE_RETENTION_HOURS=1 \
+  "$CLI" maintenance host-storage-gc >"$TEST_ROOT/host-storage-gc-first.out"
+jq -e '.CHROME_CODE_SIGN_CLONE_REMOVED_BYTES > 0' "$TEST_ROOT/host-storage-gc-first.out" >/dev/null
+OPENCODE_TEAM_CHROME_CLONE_ROOTS="$TEST_ROOT/chrome-temp" OPENCODE_TEAM_LSOF=/usr/sbin/lsof \
+  "$CLI" maintenance host-storage-gc >"$TEST_ROOT/host-storage-gc-second.out"
+jq -e '.CHROME_CODE_SIGN_CLONE_REMOVED_BYTES == 0' "$TEST_ROOT/host-storage-gc-second.out" >/dev/null
 "$CLI" maintenance best-retention >/dev/null
 "$CLI" maintenance openai-retention >/dev/null
 "$CLI" maintenance runtime-gc >"$TEST_ROOT/runtime-gc-maintenance.out"

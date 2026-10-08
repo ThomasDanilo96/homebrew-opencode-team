@@ -2,9 +2,9 @@
 // without loading the OpenCode plugin.
 import { assertDailyProviderModel } from "../../../daily/daily-policy.mjs";
 const profiles = {
-  quick: ["OPENAI_CODEX_QUICK_PRIMARY", "OPENAI_CODEX_QUICK_FALLBACK", "gpt-5.3-codex-spark", "gpt-5.6-terra"],
-  standard: ["OPENAI_CODEX_STANDARD_PRIMARY", "OPENAI_CODEX_STANDARD_FALLBACK", "gpt-5.6-terra", "gpt-5.6-sol"],
-  complex: ["OPENAI_CODEX_COMPLEX_PRIMARY", "OPENAI_CODEX_COMPLEX_FALLBACK", "gpt-5.6-sol", "gpt-5.6-terra"],
+  quick: ["OPENAI_CODEX_QUICK_PRIMARY", "OPENAI_CODEX_QUICK_FALLBACK", "gpt-6-luna-fast", "gpt-6-terra"],
+  standard: ["OPENAI_CODEX_STANDARD_PRIMARY", "OPENAI_CODEX_STANDARD_FALLBACK", "gpt-6-terra", "gpt-6-sol"],
+  complex: ["OPENAI_CODEX_COMPLEX_PRIMARY", "OPENAI_CODEX_COMPLEX_FALLBACK", "gpt-6-sol", "gpt-6-terra"],
 };
 export const resolveCodexModels = (codexProfile, env = process.env) => {
   const profile = profiles[codexProfile] ? codexProfile : "standard";

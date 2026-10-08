@@ -193,34 +193,56 @@ export const bootstrapCodexPolicy = async (pluginInput, sessionID, agent) => {
       cursor = next;
     }
     parentIDs.add(rootID);
+    const existingPolicy = await readPolicy(sessionID);
     const eligibleCandidates = (packets) => (Array.isArray(packets) ? packets : []).filter((packet) =>
         packet?.agent === "codex_executor" && parentIDs.has(packet.parent_session_id) &&
         packet.objective_sha256 === objective_sha256 &&
-        ["admitted", "codex_running", "foreground_bound", "running"].includes(String(packet.phase || "").toLowerCase()) &&
+        ["admitted", "codex_running", "foreground_bound", "background_bound", "running"].includes(String(packet.phase || "").toLowerCase()) &&
         ["pending", "running"].includes(String(packet.outcome || "").toLowerCase()) &&
         (packet.child_session_id == null || packet.child_session_id === sessionID));
     let packet;
     if (marker.present) {
       packet = await (pluginInput.readWorkPacketByID || readWorkPacketByID)(marker.packetID);
-      if (!packet || packet.objective_sha256 !== objective_sha256 || packet.parent_session_id !== rootID || packet.agent !== "codex_executor" || !["admitted", "codex_running", "foreground_bound", "running"].includes(String(packet.phase || "").toLowerCase()) || !["pending", "running"].includes(String(packet.outcome || "").toLowerCase()) || (packet.child_session_id && packet.child_session_id !== sessionID)) return blocked(CODEX_BOOTSTRAP_REASONS.CANDIDATE_COUNT);
+      if (!packet || packet.objective_sha256 !== objective_sha256 || packet.parent_session_id !== rootID || packet.agent !== "codex_executor" || !["admitted", "codex_running", "foreground_bound", "background_bound", "running"].includes(String(packet.phase || "").toLowerCase()) || !["pending", "running"].includes(String(packet.outcome || "").toLowerCase()) || (packet.child_session_id && packet.child_session_id !== sessionID)) return blocked(CODEX_BOOTSTRAP_REASONS.CANDIDATE_COUNT);
     } else {
       let candidates = eligibleCandidates(await listPackets());
       const deadline = Date.now() + candidateWaitMs();
       while (candidates.length === 0 && Date.now() < deadline) {
-        await delay(Math.min(candidatePollMs(), deadline - Date.now()));
-        candidates = eligibleCandidates(await listPackets());
+         await delay(Math.min(candidatePollMs(), deadline - Date.now()));
+         candidates = eligibleCandidates(await listPackets());
+      }
+      if (candidates.length === 0 && existingPolicy?.packet_id) {
+        const recoveryCandidates = (await listPackets()).filter((candidate) =>
+          candidate?.packet_id === existingPolicy.packet_id
+          && candidate?.agent === "codex_executor"
+          && candidate?.recovery_continuation === true
+          && parentIDs.has(candidate.parent_session_id)
+          && candidate.child_session_id === sessionID
+          && ["admitted", "codex_running", "foreground_bound", "background_bound", "running"].includes(String(candidate.phase || "").toLowerCase())
+          && ["pending", "running"].includes(String(candidate.outcome || "").toLowerCase()),
+        );
+        if (recoveryCandidates.length === 1) candidates = recoveryCandidates;
       }
       if (candidates.length !== 1) return blocked(CODEX_BOOTSTRAP_REASONS.CANDIDATE_COUNT);
       packet = candidates[0];
     }
+    const recoverySourcePacket = packet.recovery_continuation && packet.recovery_source_packet_id
+      ? await (pluginInput.readWorkPacketByID || readWorkPacketByID)(packet.recovery_source_packet_id)
+      : null;
+    const authorityPacket = recoverySourcePacket && existingPolicy?.packet_id !== packet.packet_id ? recoverySourcePacket : packet;
     const task = await (pluginInput.readTask || readTask)(packet.task_fingerprint);
+    const authorityTask = authorityPacket !== packet
+      ? await (pluginInput.readTask || readTask)(authorityPacket.task_fingerprint)
+      : task;
     const lease = packet.task_lease_id || packet.lease_id;
-    if (!task) return blocked(CODEX_BOOTSTRAP_REASONS.TASK_MISSING);
+    if (!task || !authorityTask) return blocked(CODEX_BOOTSTRAP_REASONS.TASK_MISSING);
     if (task.agent !== "codex_executor" || task.parent_session_id !== packet.parent_session_id ||
-      task.packet_id !== packet.packet_id || task.attempt !== packet.attempt || task.lease_id !== lease) {
+      task.packet_id !== packet.packet_id || task.attempt !== packet.attempt || task.lease_id !== lease ||
+      (authorityPacket !== packet && (authorityTask.agent !== "codex_executor" || authorityTask.packet_id !== authorityPacket.packet_id || authorityTask.lease_id !== authorityPacket.task_lease_id))) {
       return blocked(CODEX_BOOTSTRAP_REASONS.TASK_IDENTITY);
     }
-    if (task.task_fingerprint !== packet.task_fingerprint || !["CLAIMED", "ADMITTED", "BOUND", "RUNNING", "PENDING_REVIEW", "PENDING_VERIFICATION"].includes(task.state)) {
+    if (task.task_fingerprint !== packet.task_fingerprint || !["CLAIMED", "ADMITTED", "BOUND", "RUNNING", "PENDING_REVIEW", "PENDING_VERIFICATION"].includes(task.state) ||
+      (authorityPacket !== packet && !["CLAIMED", "ADMITTED", "BOUND", "RUNNING", "PENDING_REVIEW", "PENDING_VERIFICATION", "FAILED"].includes(authorityTask.state))) {
       return blocked(CODEX_BOOTSTRAP_REASONS.TASK_STATE);
     }
     if (task.child_session_id && task.child_session_id !== sessionID) return blocked(CODEX_BOOTSTRAP_REASONS.CHILD_CONFLICT);
@@ -233,11 +255,12 @@ export const bootstrapCodexPolicy = async (pluginInput, sessionID, agent) => {
     } else if (!task.child_session_id || task.child_session_id !== sessionID) return blocked(CODEX_BOOTSTRAP_REASONS.CHILD_CONFLICT);
     const expectedPolicy = {
       agent: task.agent, master_parent_session_id: packet.parent_session_id,
-      task_fingerprint: task.task_fingerprint, packet_id: task.packet_id,
-      task_call_id: packet.task_call_id || packet.packet_id, attempt: task.attempt,
-      task_lease_id: task.lease_id, objective_sha256,
+      task_fingerprint: task.task_fingerprint, packet_id: packet.packet_id,
+      task_call_id: existingPolicy?.packet_id === packet.packet_id && existingPolicy.task_call_id
+        ? existingPolicy.task_call_id
+        : packet.task_call_id || packet.packet_id, attempt: task.attempt,
+      task_lease_id: task.lease_id, objective_sha256: packet.objective_sha256,
     };
-    const existingPolicy = await readPolicy(sessionID);
     if (existingPolicy && Object.entries(expectedPolicy).some(([key, value]) => existingPolicy[key] != null && existingPolicy[key] !== value)) return blocked(CODEX_BOOTSTRAP_REASONS.PROVISIONAL_POLICY_CONFLICT);
     const boundPacket = await (pluginInput.updateWorkPacketByID || updateWorkPacketByID)(packet.packet_id, { child_session_id: sessionID, phase: "foreground_bound", outcome: "running" });
     if (!boundPacket?.child_session_id || boundPacket.child_session_id !== sessionID) return blocked(CODEX_BOOTSTRAP_REASONS.PACKET_BIND);
@@ -261,12 +284,27 @@ const validateExistingCodexPolicy = async (pluginInput, sessionID, policy) => {
     if (marker.present && !marker.valid) return false;
     const objective = marker.present ? objectiveBeforeMarker(prompt) : prompt;
     const hash = createHash("sha256").update(objective).digest("hex");
-    const packet = marker.present
-      ? await (pluginInput.readWorkPacketByID || readWorkPacketByID)(marker.packetID)
-      : (await (pluginInput.listWorkPackets || listWorkPackets)()).find((entry) => entry.packet_id === policy.packet_id && entry.child_session_id === sessionID && entry.agent === "codex_executor" && entry.objective_sha256 === hash && ["pending", "running"].includes(String(entry.outcome || "").toLowerCase()) && (entry.parent_session_id === parentID || entry.parent_session_id === policy.master_parent_session_id));
+     const packets = await (pluginInput.listWorkPackets || listWorkPackets)();
+     const packet = marker.present
+       ? await (pluginInput.readWorkPacketByID || readWorkPacketByID)(marker.packetID)
+       : (packets.find((entry) => entry.packet_id === policy.packet_id && entry.child_session_id === sessionID && entry.agent === "codex_executor" && entry.recovery_continuation === true && ["pending", "running"].includes(String(entry.outcome || "").toLowerCase()) && ["admitted", "codex_running", "foreground_bound", "background_bound", "running"].includes(String(entry.phase || "").toLowerCase()) && (entry.parent_session_id === parentID || entry.parent_session_id === policy.master_parent_session_id))
+         || packets.find((entry) => entry.packet_id === policy.packet_id && entry.child_session_id === sessionID && entry.agent === "codex_executor" && entry.objective_sha256 === hash && ["pending", "running"].includes(String(entry.outcome || "").toLowerCase()) && (entry.parent_session_id === parentID || entry.parent_session_id === policy.master_parent_session_id)));
     if (marker.present && (!packet || packet.packet_id !== policy.packet_id || packet.parent_session_id !== (policy.master_parent_session_id || parentID))) return false;
     const task = packet ? await readTask(packet.task_fingerprint) : null;
-    return Boolean(packet && task && ["admitted", "codex_running", "foreground_bound", "running"].includes(String(packet.phase || "").toLowerCase()) && packet.task_lease_id === task.lease_id && packet.attempt === task.attempt && packet.task_call_id === policy.task_call_id && task.agent === "codex_executor" && task.parent_session_id === packet.parent_session_id && task.packet_id === packet.packet_id && task.attempt === policy.attempt && task.lease_id === policy.task_lease_id && task.child_session_id === sessionID && ["CLAIMED", "ADMITTED", "BOUND", "RUNNING", "PENDING_REVIEW", "PENDING_VERIFICATION"].includes(task.state) && policy.task_fingerprint === task.task_fingerprint && policy.objective_sha256 === hash);
+    const sourcePacket = packet?.recovery_continuation && packet.recovery_source_packet_id
+      ? await readWorkPacketByID(packet.recovery_source_packet_id)
+      : null;
+    const authorityPacket = sourcePacket && policy.packet_id !== packet.packet_id ? sourcePacket : packet;
+    const authorityTask = authorityPacket ? await readTask(authorityPacket.task_fingerprint) : null;
+    const packetPhaseValid = ["admitted", "codex_running", "foreground_bound", "background_bound", "running"].includes(String(packet?.phase || "").toLowerCase());
+    const taskStateValid = ["CLAIMED", "ADMITTED", "BOUND", "RUNNING", "PENDING_REVIEW", "PENDING_VERIFICATION"].includes(task?.state);
+    const authorityStateValid = packet?.recovery_continuation && authorityTask?.state === "FAILED"
+      ? true
+      : ["CLAIMED", "ADMITTED", "BOUND", "RUNNING", "PENDING_REVIEW", "PENDING_VERIFICATION"].includes(authorityTask?.state);
+    const authorityChildValid = packet?.recovery_continuation
+      ? authorityTask?.child_session_id === authorityPacket?.child_session_id
+      : authorityTask?.child_session_id === sessionID;
+    return Boolean(packet && task && authorityPacket && authorityTask && packetPhaseValid && packet.task_lease_id === task.lease_id && packet.attempt === task.attempt && task.agent === "codex_executor" && task.parent_session_id === packet.parent_session_id && task.packet_id === packet.packet_id && task.child_session_id === sessionID && taskStateValid && authorityStateValid && authorityTask.parent_session_id === authorityPacket.parent_session_id && authorityTask.packet_id === authorityPacket.packet_id && authorityChildValid && policy.packet_id === packet.packet_id && policy.task_fingerprint === task.task_fingerprint && policy.task_lease_id === task.lease_id && policy.attempt === task.attempt && policy.objective_sha256 === packet.objective_sha256 && (packet.recovery_continuation || policy.task_call_id === (packet.task_call_id || packet.packet_id)));
   } catch { return false; }
 };
 

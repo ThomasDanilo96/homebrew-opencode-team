@@ -4,10 +4,10 @@ import { appendFile, chmod, copyFile, lstat, mkdir, mkdtemp, readFile, readdir, 
 import { createHash, randomUUID } from "node:crypto";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { tool } from "./plugin-api.js";
+import { runHostEffect, tool } from "./plugin-api.js";
 import { bindExactChildReservation, childSessionIdFromAfter, foregroundChildSessionID, resolveTesterChildSessionID, reservationEligibleForSessionCreated, resolveCorrelatedTesterReservation, selectForegroundTesterReservation, sessionCreatedCorrelationDecision } from "./reservation-correlation.js";
 import { handoffMatchesInvocation, handoffPathFromStdout, removeConsumedArtifacts, safeHandoffID, safeInvocationID } from "./openai-handoff.js";
-import { readRecovery, removeRecovery, removeRecoveryAndHome, removeRecoveryHome, recoveryHomeRoot, registerCodexHome, clearCodexHomePointer, RecoveryConflictError } from "./codex-recovery.js";
+import { readRecovery, reconcileRecovery, removeRecovery, removeRecoveryAndHome, removeRecoveryHome, recoveryHomeRoot, registerCodexHome, clearCodexHomePointer, RecoveryConflictError } from "./codex-recovery.js";
 import { openCodexCircuit, readCodexCircuitGeneration } from "./codex-circuit.js";
 import { resolveCodexModels } from "./codex-models.js";
 import { createRemoteReadTool } from "./openai-remote-ops.js";
@@ -15,12 +15,13 @@ import { analyzeObjective, objectiveRequestsLocalCommit, routeDelegatedAgent, se
 import { parseVerificationEvidence, postExecutionPolicy, verificationCommandCategory, isAllowlistedVerificationCommand } from "./execution-policy.js";
 import { DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, runProcessAsync } from "./process-async.js";
 import { createCodexProgressParser, createCodexProgressTracker } from "./codex-progress.js";
+import { reconcileRepositoryRecovery } from "./codex-recovery-reconcile.js";
 import { addWorkPacketTokensByID, createWorkPacket, incrementWorkPacketByID, listWorkPackets, readWorkPacketByID, pruneWorkPackets, tokenEventHash, updateWorkPacket, updateWorkPacketByID, updateWorkPacketByIDIfCurrent } from "./work-packet.js";
 import { TaskStateError, claimTask, completeTask, readTask, transitionTask } from "./task-state.js";
 import { workspaceFingerprint } from "./read-cache.js";
 import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
 import { gateTerminalPacketPatch, lifecycleCleanupOptions } from "./gate-state.js";
-import { GuardrailPolicyError, admitDelegation, admitToolCall, allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision, writeStopLatch } from "./openai-guardrails.js";
+import { GuardrailPolicyError, admitDelegation, admitDurableFanout, admitToolCall, allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, durableFanoutScope, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision, writeStopLatch } from "./openai-guardrails.js";
 import { guardToolExecution } from "../../../../shared/tool-output-guard.js";
 import { assertDailyProviderModel, dailySearchDecision } from "../../../daily/daily-policy.mjs";
 import { appendTaskPacketMarker, extractTaskPacketMarker, objectiveBeforeMarker } from "./correlation-marker.js";
@@ -67,6 +68,48 @@ export const retainParentCallReservation = (reservationMap, reservation, outcome
   if (!(reservationMap instanceof Map) || outcome !== "success" || gatesPending !== true || !reservation?.task_call_id) return false;
   reservationMap.set(reservation.task_call_id, { ...reservation, token: null });
   return true;
+};
+
+export const codexExecutorWrapperFallbackDecision = (pending) => {
+  if (!pending || pending.role !== "codex_executor") return { action: "skip", reason: "not_codex_executor" };
+  if (pending.codex_terminal) return { action: "skip", reason: "codex_terminal" };
+  if (pending.wrapper_fallback_in_flight) return { action: "defer", reason: "wrapper_fallback_in_flight" };
+  if (pending.codex_tool_in_flight === true || Number(pending.codex_tool_call_count || 0) > 0) {
+    return { action: "defer", reason: "codex_tool_call_in_progress" };
+  }
+  return { action: "run", reason: "missing_codex_tool_call" };
+};
+
+export const codexDispatchDecision = (packets, rootParent, rootObjectiveSHA) => {
+  const candidates = (Array.isArray(packets) ? packets : []).filter((candidate) =>
+    candidate?.agent === "codex_executor"
+    && candidate?.parent_session_id === rootParent
+    && candidate?.root_objective_sha256 === rootObjectiveSHA
+    && candidate?.packet_id,
+  );
+  if (candidates.length === 0) return { decision: "ALLOW", packet: null };
+  const recoveryRank = (candidate) => {
+    if (candidate.recovery_continuation === true && ["pending", "running"].includes(String(candidate.outcome || "").toLowerCase())) return 5;
+    if (candidate.recovery_state === "RECOVERY_CONTINUATION_REQUIRED") return 4;
+    if (candidate.recovery_state === "RECOVERY_VERIFIED_COMPLETE") return 3;
+    if (candidate.recovery_state === "RECOVERY_REQUIRED" || candidate.recovery_state === "RECOVERY_RECONCILING" || candidate.verification_status === "pending_manual_recovery_review" || candidate.error_code === "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED") return 2;
+    return candidate.recovery_continuation === true ? 1 : 0;
+  };
+  candidates.sort((left, right) => recoveryRank(right) - recoveryRank(left)
+    || (Number(right.attempt) || 0) - (Number(left.attempt) || 0)
+    || String(right.updated_at || "").localeCompare(String(left.updated_at || "")));
+  const packet = candidates[0];
+  const topRank = recoveryRank(packet);
+  const topAttempt = Number(packet.attempt) || 0;
+  const ambiguous = candidates.filter((candidate) => recoveryRank(candidate) === topRank && (Number(candidate.attempt) || 0) === topAttempt);
+  if (ambiguous.length > 1 && topRank >= 2) return { decision: "AMBIGUOUS_CODEX_RECOVERY_AUTHORITY", packet: null, candidates: ambiguous };
+  if (packet.recovery_state === "RECOVERY_CONTINUATION_REQUIRED") return { decision: "RECOVERY_CONTINUATION", packet };
+  if (packet.recovery_state === "RECOVERY_VERIFIED_COMPLETE") return { decision: "RECOVERY_VERIFIED_COMPLETE", packet };
+  const recoveryRequired = packet.recovery_state === "RECOVERY_REQUIRED"
+    || packet.recovery_state === "RECOVERY_RECONCILING"
+    || packet.verification_status === "pending_manual_recovery_review"
+    || packet.error_code === "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED";
+  return { decision: recoveryRequired ? "RECOVERY_REQUIRED" : "DUPLICATE", packet };
 };
 
 
@@ -209,8 +252,8 @@ export const terminalCodexFailureForRootObjective = (
     && packet?.retryable === false
   ) || null;
 };
-const PREMIUM_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-sol", openai_explore: "openai/gpt-5.6-luna-fast", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-terra", reviewer: "openai/gpt-5.6-sol", reviewer_critical: "openai/gpt-6-astra", specialist: "openai/gpt-6-astra", codex_executor: "openai/gpt-5.6-luna-fast" };
-const DAILY_AGENT_MODELS = { openai_orchestrator: "openai/gpt-5.6-luna", openai_explore: "openai/gpt-5.6-luna", openai_librarian: "openai/gpt-5.6-luna", openai_ops: "openai/gpt-5.6-luna", tester: "openai/gpt-5.6-luna", reviewer: "openai/gpt-5.6-terra", reviewer_critical: "openai/gpt-5.6-sol", specialist: "openai/gpt-5.6-terra", codex_executor: "openai/gpt-5.6-luna" };
+const PREMIUM_AGENT_MODELS = { openai_orchestrator: "openai/gpt-6-sol", openai_explore: "openai/gpt-6-luna-fast", openai_librarian: "openai/gpt-6-luna", openai_ops: "openai/gpt-6-luna", tester: "openai/gpt-6-terra", reviewer: "openai/gpt-6-sol", reviewer_critical: "openai/gpt-6-astra", specialist: "openai/gpt-6-astra", codex_executor: "openai/gpt-6-luna-fast" };
+const DAILY_AGENT_MODELS = { openai_orchestrator: "openai/gpt-6-luna", openai_explore: "openai/gpt-6-luna", openai_librarian: "openai/gpt-6-luna", openai_ops: "openai/gpt-6-luna", tester: "openai/gpt-6-luna", reviewer: "openai/gpt-6-terra", reviewer_critical: "openai/gpt-6-sol", specialist: "openai/gpt-6-terra", codex_executor: "openai/gpt-6-luna" };
 export const agentModelsForEnv = (env = process.env) =>
   env.OPENAI_DAILY_PROFILE === "1"
     ? DAILY_AGENT_MODELS
@@ -316,6 +359,9 @@ export const codexCompatibilityHintIsBound = (authoritativeObjective, hint) => {
   const candidate = String(hint || "").trim();
   if (!authority || !candidate) return false;
   if (normalizedObjectiveEquality(authority) === normalizedObjectiveEquality(candidate)) return true;
+  const normalizedAuthority = normalizedObjectiveEquality(authority);
+  const normalizedCandidate = normalizedObjectiveEquality(candidate);
+  if (normalizedAuthority.includes(normalizedCandidate) || normalizedCandidate.includes(normalizedAuthority)) return true;
   const authorityScope = delegationScope(authority);
   const hintScope = delegationScope(candidate);
   return Boolean(
@@ -386,6 +432,13 @@ export const latestUserObjective = (messages = []) => {
   const text = (latest?.parts || []).filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n").trim();
   return text || null;
 };
+const initialUserObjective = (messages = []) => {
+  const entries = Array.isArray(messages) ? messages : Array.isArray(messages?.messages) ? messages.messages : [];
+  const candidates = entries.filter((message) => message?.info?.role === "user").map((message) =>
+    (message?.parts || []).filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n").trim(),
+  ).filter((text) => text && !isInternalContinuation(text));
+  return candidates.at(-1) || null;
+};
 export const resolveInitialObjectiveFromClient = async (client, sessionID, seen = new Set(), cache = new Map()) => {
   if (!sessionID || seen.has(sessionID)) return null;
   if (cache.has(sessionID)) return cache.get(sessionID);
@@ -406,7 +459,7 @@ export const resolveInitialObjectiveFromClient = async (client, sessionID, seen 
   const readLatest = async (id) => {
     try {
       const response = await client?.session?.messages({ path: { id } });
-      return latestUserObjective(response?.data);
+      return initialUserObjective(response?.data) || latestUserObjective(response?.data);
     } catch { return null; }
   };
   const text = await readLatest(sessionID);
@@ -455,6 +508,11 @@ const freshCodexHome = async (recovery = null) => {
         dirname(home) === root && dirname(realHome) === realRoot && realHome === join(realRoot, basename(home)) &&
         basename(home).startsWith("codex-home-") && (info.mode & 0o077) === 0 &&
         (typeof process.getuid !== "function" || info.uid === process.getuid()) && recovery.codex_home_identity === home) {
+        // An interrupted native lane can leave Codex's coordination lock in
+        // the sealed recovery home. The recovery record proves the previous
+        // writer is terminal, so clear only that stale lock before resume.
+        await rm(join(home, "thread-writer-locks"), { recursive: true, force: true });
+        await mkdir(join(home, "thread-writer-locks"), { recursive: true, mode: 0o700 });
         await chmod(home, 0o700); return home;
       }
     } catch {}
@@ -484,7 +542,7 @@ const advanceTask = async (reservation, state, patch = {}) => {
   return record;
 };
 const manualRecoveryPacketPatch = ({ recovery = {}, packet = {}, metadata = {} } = {}) => {
-  const testerRequired = packet?.tester_required === true;
+  const testerRequired = packet?.tester_required === true || packet?.classification === "MUTATING";
   const critical = packet?.risk === "critical";
   const mutationCount = Number.isInteger(recovery?.mutation_count) && recovery.mutation_count >= 0
     ? recovery.mutation_count
@@ -492,6 +550,7 @@ const manualRecoveryPacketPatch = ({ recovery = {}, packet = {}, metadata = {} }
   const reviewer = critical ? "reviewer_critical" : "reviewer";
   return {
     phase: "PENDING_VERIFICATION", outcome: "pending", verification_status: "pending_manual_recovery_review",
+    recovery_state: "RECOVERY_REQUIRED", recovery_result: "pending_manual_review",
     mutation_count: mutationCount, journal_incomplete: recovery?.journal_incomplete === true,
     // Manual recovery is escalated to a reviewable risk lane.  This keeps the
     // existing reviewer authorization fence intact for noncritical work.
@@ -674,6 +733,7 @@ export const findPendingMandatoryTesterGate = async (rootSessionID, deps = {}) =
 const mandatoryTesterDispatchFailures = new Set();
 const observedMandatoryTesterContinuations = new Set();
 const mandatoryReviewerDispatches = new Set();
+const observedMandatoryReviewerContinuations = new Set();
 export const observeMandatoryTesterContinuation = (rootID, packetID, deps = {}) => {
   const key = `${rootID}:${packetID}`;
   observedMandatoryTesterContinuations.add(key);
@@ -689,6 +749,27 @@ export const observeMandatoryTesterContinuation = (rootID, packetID, deps = {}) 
     return result;
   })();
 };
+export const observeMandatoryReviewerContinuation = (rootID, packetID, deps = {}) => {
+  const key = `${rootID}:${packetID}`;
+  observedMandatoryReviewerContinuations.add(key);
+  if (typeof deps.readWorkPacketByID !== "function" || typeof deps.updateWorkPacketByIDIfCurrent !== "function") return true;
+  return (async () => {
+    const packet = await deps.readWorkPacketByID(packetID);
+    const valid = packet?.parent_session_id === rootID
+      && packet.packet_id === packetID
+      && packet.review_required === true
+      && packet.review_status === "pending"
+      && packet.tester_status === "passed"
+      && packet.outcome === "pending";
+    if (!valid) {
+      observedMandatoryReviewerContinuations.delete(key);
+      return { matched: false, packet: packet || null };
+    }
+    const result = await deps.updateWorkPacketByIDIfCurrent(packetID, { parent_session_id: rootID, review_dispatch_state: ["dispatching", "requested"] }, { review_dispatch_state: "observed" });
+    if (!result?.matched && result?.packet?.review_dispatch_state !== "observed") observedMandatoryReviewerContinuations.delete(key);
+    return result;
+  })();
+};
 export const mandatoryTesterDispatchTrigger = (eventType) => eventType === "session.idle";
 export const testerSettlementCanProceed = (eventType, completed = false) => Boolean(completed)
   || eventType === "session.error"
@@ -696,6 +777,19 @@ export const testerSettlementCanProceed = (eventType, completed = false) => Bool
 export const testerSettlementPacketPatch = (passed, failureCode = "TEST_RESULT_INVALID") => passed
   ? { phase: "background_completion", outcome: "completed", tester_status: "passed", verification_status: "passed" }
   : { phase: "background_completion", outcome: "error", tester_status: "failed", verification_status: "failed", error_code: failureCode };
+export const reviewerBindGraceMs = (env = process.env) => {
+  const value = Number(env.OPENAI_REVIEWER_BIND_GRACE_MS);
+  return Number.isInteger(value) ? Math.max(1_000, Math.min(120_000, value)) : 30_000;
+};
+export const reviewerHasExecutionEvidence = (packet) => Boolean(packet?.child_session_id || packet?.provisional_child_session_id || String(packet?.outcome || "").toLowerCase() === "running");
+export const reservationMatchesChild = (reservation, childID) => Boolean(
+  reservation && childID && (reservation.child_session_id === childID || reservation.provisional_child_session_id === childID),
+);
+export const reviewerReservationIsStale = (packet, now = Date.now(), graceMs = reviewerBindGraceMs()) => {
+  if (!packet || reviewerHasExecutionEvidence(packet) || String(packet.outcome || "").toLowerCase() !== "pending") return false;
+  const updatedAt = Date.parse(packet.updated_at || "");
+  return Number.isFinite(updatedAt) && now - updatedAt >= graceMs;
+};
 export const driveMandatoryTesterContinuation = async (rootSessionID, deps = {}) => {
   const gate = await findPendingMandatoryTesterGate(rootSessionID, deps);
   if (!gate) return { status: "noop" };
@@ -741,15 +835,16 @@ export const driveMandatoryTesterContinuation = async (rootSessionID, deps = {})
   const text = `<!-- OMO_INTERNAL_INITIATOR --> MANDATORY_TESTER_GATE test_task_id=${gate.packet_id}\nCall the native task exactly once with subagent_type tester. Do not use Bash. Do not report final success.`;
   try {
     if (typeof deps.enqueue !== "function") throw new Error("MANDATORY_TESTER_ENQUEUE_UNAVAILABLE");
-    const response = await deps.enqueue(rootSessionID, text);
+    const response = await deps.enqueue(rootSessionID, text, gate);
     if (response?.error || response?.failure || response?.status === "error" || response?.status === "failed" || response?.status === "failure") throw new Error("MANDATORY_TESTER_ENQUEUE_FAILED");
     const requested = await (deps.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent)(gate.packet_id, { tester_dispatch_state: "dispatching" }, { tester_dispatch_state: "requested" });
     if (!requested?.matched && requested?.packet?.tester_dispatch_state === "observed") return { status: "observed", packet_id: gate.packet_id };
     if (!requested?.matched) return { status: "waiting", packet_id: gate.packet_id };
     return { status: "requested", packet_id: gate.packet_id };
-  } catch (error) {
-    await (deps.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent)(gate.packet_id, { tester_dispatch_state: "dispatching" }, { tester_dispatch_state: "pending", error_code: "MANDATORY_TESTER_ENQUEUE_FAILED" });
-    await fail("MANDATORY_TESTER_ENQUEUE_FAILED");
+    } catch (error) {
+      const dispatchError = String(error?.code || error?.message || "MANDATORY_TESTER_ENQUEUE_FAILED").match(/^[A-Z][A-Z0-9_]{2,79}/)?.[0] || "MANDATORY_TESTER_ENQUEUE_FAILED";
+      await (deps.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent)(gate.packet_id, { tester_dispatch_state: "dispatching" }, { tester_dispatch_state: "pending", error_code: dispatchError });
+    await fail(dispatchError);
     return { status: "failed", packet_id: gate.packet_id };
   }
 };
@@ -833,8 +928,22 @@ export const handleMandatoryTesterContinuation = async (event, { client, rootFor
   const gate = await findGate(rootID, deps);
   if (!gate || gate.packet_id !== packetID || !["dispatching", "requested", "observed"].includes(gate.tester_dispatch_state)) return { handled: false, text };
   if (gate.tester_dispatch_state === "observed") return { handled: true, text, packetID };
+  if (deps.deferObservation === true) return { handled: false, text, packetID };
   const result = await observe(rootID, packetID, deps);
   return { handled: Boolean(result === true || result?.matched || result?.packet?.tester_dispatch_state === "observed"), text, packetID };
+};
+export const handleMandatoryReviewerContinuation = async (event, { client, rootForSession = (id) => id, observe = observeMandatoryReviewerContinuation, deps = {} } = {}) => {
+  const info = event?.properties?.info || {};
+  if (String(info.role || "").toLowerCase() !== "user") return { handled: false };
+  const text = await resolveUpdatedUserMessageText(event, client);
+  if (!text) return { handled: false, text: null };
+  const marker = text.match(/^\s*<!-- OMO_INTERNAL_INITIATOR -->\s*MANDATORY_REVIEW_GATE\b[\s\S]*?\breview_task_id=([a-f0-9]{64})\b/i);
+  if (!marker) return { handled: false, text };
+  const sessionID = event.properties?.sessionID || info.sessionID;
+  const rootID = rootForSession(sessionID);
+  const packetID = marker[1].toLowerCase();
+  const result = await observe(rootID, packetID, deps);
+  return { handled: Boolean(result === true || result?.matched || result?.packet?.review_dispatch_state === "observed"), text, packetID };
 };
 
 export const exactMandatoryTesterObjective = (parentObjective, testerObjective, gate) => {
@@ -857,16 +966,17 @@ export const taskRouteAdmissionContext = (route, exactMandatoryTesterGate, remot
   localReadOnly: !exactMandatoryTesterGate && route?.classification === "READ_ONLY" && !remoteReadOnly,
 });
 
-export const createMandatoryTesterRootDriver = ({ pluginInput = {}, updateWorkPacketByID: updatePacket = updateWorkPacketByID, reconcileGateTarget, reclaimTester }) => async (rootID, options = {}) => {
+export const createMandatoryTesterRootDriver = ({ pluginInput = {}, updateWorkPacketByID: updatePacket = updateWorkPacketByID, reconcileGateTarget, reclaimTester, nativeAdmission }) => async (rootID, options = {}) => {
   const result = await driveMandatoryTesterContinuation(rootID, {
     listWorkPackets: pluginInput.listWorkPackets || listWorkPackets,
     readTask: pluginInput.readTask || readTask,
     reclaimTester,
     updateWorkPacketByIDIfCurrent: pluginInput.updateWorkPacketByIDIfCurrent || updateWorkPacketByIDIfCurrent,
     failRequested: options.failRequested,
-    enqueue: async (destinationRoot, text) => {
+    enqueue: async (destinationRoot, text, gate) => {
+      if (typeof nativeAdmission === "function") return nativeAdmission(destinationRoot, text, gate);
       const session = pluginInput.client?.session;
-      const prompt = session?.promptAsync;
+       const prompt = session?.promptAsync;
       if (typeof prompt !== "function") throw new Error("MANDATORY_TESTER_ENQUEUE_UNAVAILABLE");
       return prompt.call(session, { path: { id: destinationRoot }, body: { parts: [{ type: "text", text }], agent: "openai_orchestrator" } });
     },
@@ -915,8 +1025,8 @@ export const testerEvidenceFromMessages = (messages, pending = {}) => {
   if (!Array.isArray(messages)) throw new Error("TEST_MESSAGES_UNAVAILABLE");
   const evidence = [];
   const nonemptyArray = (...values) => values.map(parseSerializedArray).find((value) => value.length > 0) || [];
-  const recordedHashes = nonemptyArray(pending.expected_verification_hashes, pending.gate_target?.expected_verification_hashes);
-  const commands = nonemptyArray(pending.verification_commands, pending.gate_target?.verification_commands);
+  const recordedHashes = nonemptyArray(pending.tester_expected_verification_hashes, pending.gate_target?.tester_expected_verification_hashes, pending.expected_verification_hashes, pending.gate_target?.expected_verification_hashes);
+  const commands = nonemptyArray(pending.tester_verification_commands, pending.gate_target?.tester_verification_commands, pending.verification_commands, pending.gate_target?.verification_commands);
   const serializedEvidence = nonemptyArray(pending.verification_evidence, pending.gate_target?.verification_evidence);
   const expectedHashes = new Set((recordedHashes.length ? recordedHashes : [...commands.filter((command) => typeof command === "string" && isAllowlistedVerificationCommand(command)).map((command) => createHash("sha256").update(command).digest("hex")), ...serializedEvidence.map((entry) => entry?.command_hash)])
     .filter((hash) => typeof hash === "string" && /^[a-f0-9]{64}$/i.test(hash)).map((hash) => hash.toLowerCase()));
@@ -926,7 +1036,7 @@ export const testerEvidenceFromMessages = (messages, pending = {}) => {
   for (const message of messages) {
     const info = message?.info || {};
     const sessionID = info.sessionID || info.session_id || message?.sessionID || message?.session_id;
-    const validMessage = sessionID === childSessionID && String(info.role || "").toLowerCase() === "assistant" && String(info.agent || message?.agent || "").toLowerCase() === "tester" && messageTime(info, "created") >= startedAt;
+    const validMessage = (!sessionID || sessionID === childSessionID) && String(info.role || "").toLowerCase() === "assistant" && String(info.agent || message?.agent || "").toLowerCase() === "tester" && messageTime(info, "created") >= startedAt;
     for (const part of Array.isArray(message?.parts) ? message.parts : []) {
       if (String(part?.type || "").toLowerCase() !== "tool" || String(part?.tool || part?.name || "").toLowerCase() !== "bash") continue;
       const state = part.state || {};
@@ -1041,7 +1151,12 @@ export const resolveMandatoryTesterPacketForSession = (sessionID, packets = [], 
       (packet.child_session_id != null && packet.child_session_id !== sessionID) ||
       !["pending", "required"].includes(packet.tester_status)) return null;
     const packetAuthorization = validatedVerificationAuthorization(packet);
-    const reservationAuthorization = validatedVerificationAuthorization({ ...reservation, ...(reservation.gate_target || {}) });
+    const reservationAuthorization = validatedVerificationAuthorization({
+      ...reservation,
+      ...(reservation.gate_target || {}),
+      verification_commands: packet.verification_commands,
+      expected_verification_hashes: packet.expected_verification_hashes,
+    });
     if (!sameAuthorization(packetAuthorization, reservationAuthorization) || packetAuthorization.commands.length === 0) return null;
     return packet.child_session_id ? packet : { ...packet, child_session_id: sessionID };
   }
@@ -1062,10 +1177,14 @@ export const mandatoryTesterCommandOnlyError = () => Object.assign(
   new Error("MANDATORY_TESTER_COMMAND_ONLY: Execute the authorized verification command via Bash."),
   { code: "MANDATORY_TESTER_COMMAND_ONLY", retryable: true },
 );
-export const testerVerificationMetadata = (gateTarget = {}) => ({
-  verification_commands: [...(gateTarget.verification_commands || [])],
-  expected_verification_hashes: [...(gateTarget.expected_verification_hashes || [])],
-});
+export const testerVerificationMetadata = (gateTarget = {}) => {
+  const commands = parseSerializedArray(gateTarget.verification_commands).filter((command) => typeof command === "string");
+  const recorded = new Set(parseSerializedArray(gateTarget.expected_verification_hashes).filter((hash) => typeof hash === "string"));
+  return {
+    verification_commands: commands,
+    expected_verification_hashes: commands.map((command) => createHash("sha256").update(command).digest("hex")).filter((hash) => recorded.size === 0 || recorded.has(hash)),
+  };
+};
 const commandsFromAuthorizedText = (text) => {
   const value = String(text || "");
   const candidates = [...value.matchAll(/`([^`]+)`/g)].map((match) => match[1]);
@@ -1153,6 +1272,29 @@ export const promoteVerificationCommands = (packet = {}, sources = {}) => {
   ].map((value) => String(value || "").trim()).filter(Boolean))];
   return { commands, hashes: commands.map((command) => createHash("sha256").update(command).digest("hex")), criteria };
 };
+const focusVerificationCommands = (commands, objective, repository) => {
+  if (!Array.isArray(commands) || commands.length < 2) return commands || [];
+  const text = String(objective || "").toLowerCase();
+  const taskAliases = new Map([
+    ["two-file-feature", "calculator"], ["safe-helper-refactor", "refactor"],
+    ["state-machine-fix", "state-machine"], ["multi-module-bug", "multi-module"],
+    ["reviewed-policy-change", "policy"], ["tester-reviewer-gated-feature", "gated"],
+    ["critical-authorship-change", "authorship"], ["end-to-end-runtime-recovery", "runtime-recovery"],
+  ]);
+  const changed = (() => {
+    if (typeof repository !== "string" || !repository) return [];
+    try { return execFileSync("git", ["diff", "--name-only"], { cwd: repository, encoding: "utf8" }).split(/\r?\n/).filter(Boolean).map((path) => path.toLowerCase()); } catch { return []; }
+  })();
+  const focused = commands.filter((command) => {
+    const match = String(command).match(/(?:node\s+(?:--test\s+)?)([a-z0-9._/-]+)\.test\.js\b/i);
+    if (!match) return false;
+    const stem = match[1].split("/").at(-1).toLowerCase().replace(/[._-]+/g, " ").trim();
+    const stemToken = stem.replace(/\s+/g, "-");
+    const alias = [...taskAliases].find(([task, fixture]) => text.includes(task) && stem.includes(fixture.replaceAll("-", " ")));
+    return stem && (text.includes(stem) || Boolean(alias) || changed.some((path) => path.includes(`${stemToken}.test.js`) || path.includes(`${stemToken}.js`)));
+  });
+  return focused.length ? focused : commands;
+};
 const eventMetadata = (packet, extra = {}) => ({ task_id: packet?.packet_id || (packet?.task_call_id ? objectiveHash(packet.task_call_id) : null), attempt: packet?.attempt ?? null, classification: packet?.classification || null, complexity: packet?.complexity || null, codex_profile: packet?.codex_profile || null, ...extra });
 const objectiveLogPath = () => join(process.env.OPENAI_TEAM_STATE_ROOT || "/tmp", "logs", "authorship-guard.log");
 const recordObjectiveEvent = async (event, sessionID, parentSessionID, callID, authorityState, action) => {
@@ -1174,6 +1316,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
   telemetryErrorCallback = typeof pluginInput.onTelemetryError === "function" ? pluginInput.onTelemetryError : null;
   const completedMessageIDs = new Set();
   const guardrails = new Map();
+  const nativeTesterCreationRoots = new Set();
+  const fanoutSliceClaims = new Set();
   const guardrailFor = async (sessionID) => {
     if (!sessionID) return null;
     if (!guardrails.has(sessionID)) guardrails.set(sessionID, { ...createGuardrailState(), ...(await readStopLatch(process.env.OPENAI_TEAM_STATE_ROOT, sessionID)) });
@@ -1184,6 +1328,30 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
   // the same durable dedup fence as a directly-bound event.
   const bufferedOpenCodeTokens = new Map();
   const packetCallBySession = new Map();
+  const packetSessionTrace = [];
+  const tracePacketSession = (operation, childSessionID, packetID, details = {}) => {
+    if (process.env.OPENAI_TRACE_PACKET_SESSION !== "1") return;
+    const entry = { timestamp_ms: Date.now(), operation, child_session_id: childSessionID || null, packet_id: packetID || null, ...details };
+    packetSessionTrace.push(entry);
+    if (packetSessionTrace.length > 128) packetSessionTrace.shift();
+    console.error(`[packetCallBySession] ${JSON.stringify(entry)}`);
+  };
+  const packetSessionSet = (childSessionID, packetID, details = {}) => {
+    const oldPacketID = packetCallBySession.get(childSessionID) || null;
+    tracePacketSession("set", childSessionID, packetID, { old_packet_id: oldPacketID, ...details });
+    packetCallBySession.set(childSessionID, packetID);
+  };
+  const packetSessionGet = (childSessionID, details = {}) => {
+    const packetID = packetCallBySession.get(childSessionID) || null;
+    tracePacketSession("get", childSessionID, packetID, details);
+    return packetID;
+  };
+  const packetSessionDelete = (childSessionID, details = {}) => {
+    const oldPacketID = packetCallBySession.get(childSessionID) || null;
+    if (details.expected_packet_id && oldPacketID !== details.expected_packet_id) return;
+    tracePacketSession("delete", childSessionID, oldPacketID, details);
+    packetCallBySession.delete(childSessionID);
+  };
   const finalizing = new Set();
   const reconciliations = new Map();
   const reconciliationTimers = new Map();
@@ -1389,7 +1557,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         record.pending_steps = record.pending_steps.filter((step) => step !== "recovery_home"); await saveReconciliation(key, record);
       }
       if (record.pending_steps.includes("lane_homes")) {
-        const recovery = cleanup.task_fingerprint ? await readRecovery(cleanup.task_fingerprint) : null;
+         const recovery = cleanup.recovery || (cleanup.task_fingerprint ? await readRecovery(cleanup.task_fingerprint) : null);
         const preserved = recovery?.codex_home_identity;
         for (const home of Array.isArray(cleanup.lane_homes) ? cleanup.lane_homes : []) {
           if (home && home !== preserved) { await rm(home, { recursive: true, force: true }); await clearCodexHomePointer(home); }
@@ -1431,7 +1599,11 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       return { code: "RECONCILIATION_REQUIRED", retryable: true, phase: "finalize", task_id: cleanup.task_fingerprint || null, provider_failure: false, pending_steps: record.pending_steps, retry_count: record.retry_count };
     }
     reconciliations.delete(key); await clearReconciliation(key); reservations.delete(key);
-    if (sessionID) { reservations.delete(sessionID); packetCallBySession.delete(sessionID); bufferedOpenCodeTokens.delete(sessionID); }
+    if (sessionID) {
+      if (!cleanup.packet_id || reservations.get(sessionID)?.packet_id === cleanup.packet_id) reservations.delete(sessionID);
+      packetSessionDelete(sessionID, { expected_packet_id: cleanup.packet_id, reason: "session_cleanup" });
+      bufferedOpenCodeTokens.delete(sessionID);
+    }
     return { code: "LIFECYCLE_FINALIZED", retryable: false, phase: "finalize", task_id: cleanup.task_fingerprint || null, provider_failure: false };
   };
   const drainReconciliations = async () => {
@@ -1488,7 +1660,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           packet,
           metadata: { error_code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED" },
         }));
-        await advanceTask(pending, "PENDING_VERIFICATION", { retryable: false, error_code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", result_summary: "pending_manual_recovery_review" });
+         await advanceTask(pending, "PENDING_VERIFICATION", { retryable: false, error_code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", result_summary: "pending_manual_recovery_review" });
         return finalizeReservation(pending, { outcome: "error", result_summary: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", sessionID, terminal: false, packet: false });
        } else if (matching && sealedNoMutationRecovery(recovery, pending)) {
          await advanceTask(pending, "FAILED", { retryable: true, error_code: "SESSION_ERROR_RECOVERY_READY", result_summary: "recovery_ready" });
@@ -1496,7 +1668,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
          const packet = (await listWorkPackets()).find((entry) => entry.task_call_id === pending.task_call_id);
          if (matching) {
             await updateWorkPacketByID(packet.packet_id, manualRecoveryPacketPatch({ recovery, packet, metadata: { error_code: "RECOVERY_TERMINATION_UNSEALED" } }));
-           await advanceTask(pending, "PENDING_VERIFICATION", { retryable: false, error_code: "RECOVERY_TERMINATION_UNSEALED", result_summary: "pending_manual_recovery_review" });
+            await advanceTask(pending, "PENDING_VERIFICATION", { retryable: false, error_code: "RECOVERY_TERMINATION_UNSEALED", result_summary: "pending_manual_recovery_review" });
            return finalizeReservation(pending, { outcome: "error", result_summary: "RECOVERY_TERMINATION_UNSEALED", sessionID, terminal: false, packet: false });
          }
          taskAction = "fail";
@@ -1509,6 +1681,17 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
   };
   const reconcileGateTarget = async (packet) => {
     if (!packet?.task_fingerprint) return packet;
+    const settleRecoverySource = async (target) => {
+      if (!target?.recovery_continuation || !target.recovery_source_packet_id) return;
+      const source = await (pluginInput.readWorkPacketByID || readWorkPacketByID)(target.recovery_source_packet_id);
+      const recovery = source?.task_fingerprint ? await readRecovery(source.task_fingerprint) : null;
+      if (recovery?.journal_incomplete === true || (Array.isArray(recovery?.command_journal) && recovery.command_journal.length > 0)) return;
+      await updateWorkPacketByIDIfCurrent(
+        target.recovery_source_packet_id,
+        { recovery_state: "RECOVERY_CONTINUATION_REQUIRED" },
+        { recovery_state: "RECOVERY_VERIFIED_COMPLETE", recovery_result: "continuation_complete" },
+      );
+    };
     const settle = async () => {
       const task = await readTask(packet.task_fingerprint);
       if (!task || ["COMPLETED", "FAILED"].includes(task.state)) return task;
@@ -1559,18 +1742,20 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
              }
              return task;
            }
-           const reconciled = await finalizeReservation({
-             ...packet, token: "manual-recovery", started_at: Date.now(),
-             task_lease_id: task.lease_id, manual_recovery: true, recovery,
-             sessionID: childSessionID,
-           }, { outcome: "completed", result_summary: "gates_passed", sessionID: childSessionID, terminal: true, packet: true, taskAction: "complete" });
-           if (reconciled.code === "RECONCILIATION_REQUIRED" || reconciled.code === "RECONCILIATION_PERSISTENCE_FAILED") return task;
-           return await readTask(packet.task_fingerprint);
+            const reconciled = await finalizeReservation({
+              ...packet, token: "manual-recovery", started_at: Date.now(),
+              task_lease_id: task.lease_id, manual_recovery: true, recovery,
+              sessionID: childSessionID,
+            }, { outcome: "completed", result_summary: "gates_passed", sessionID: childSessionID, terminal: true, packet: true, taskAction: "complete" });
+            if (reconciled.code === "RECONCILIATION_REQUIRED" || reconciled.code === "RECONCILIATION_PERSISTENCE_FAILED") return task;
+            await settleRecoverySource(packet);
+            return await readTask(packet.task_fingerprint);
         }
-          await updateWorkPacketByID(packet.packet_id, gateTerminalPacketPatch(packet, true));
-          const completed = await completeTask(packet.task_fingerprint, { expectedVersion: task.version, leaseId: task.lease_id, result_summary: "gates_passed" });
-          await settleGatePolicy(packet, completed);
-         return completed;
+           await updateWorkPacketByID(packet.packet_id, gateTerminalPacketPatch(packet, true));
+           const completed = await completeTask(packet.task_fingerprint, { expectedVersion: task.version, leaseId: task.lease_id, result_summary: "gates_passed" });
+           await settleGatePolicy(packet, completed);
+           await settleRecoverySource(packet);
+          return completed;
       }
       return task;
     };
@@ -1615,8 +1800,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
      if (!snapshot || !packet || packet.packet_id !== snapshot.packet_id || packet.parent_session_id !== snapshot.parent_session_id || packet.task_fingerprint !== snapshot.task_fingerprint || Number(packet.attempt) !== Number(snapshot.attempt) || (packet.task_lease_id != null && packet.task_lease_id !== snapshot.task_lease_id) || JSON.stringify(expectedHashes) !== JSON.stringify(snapshot.expected_verification_hashes || []) || !task || task.parent_session_id !== snapshot.parent_session_id || Number(task.attempt) !== Number(snapshot.attempt) || task.lease_id !== snapshot.task_lease_id) return { code: "STALE_GATE_EVENT", packet: null };
      return { code: null, packet };
    };
-   const settleTesterGate = async (pending, childID, lifecycleEventType) => {
-    if (!pending?.test_task_id || !childID || pending.child_session_id !== childID) return { pending: true };
+    const settleTesterGate = async (pending, childID, lifecycleEventType) => {
+     if (!pending?.test_task_id || !reservationMatchesChild(pending, childID)) return { pending: true };
     let messages = [];
     try {
       const response = await pluginInput.client?.session.messages({ path: { id: childID } });
@@ -1630,7 +1815,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       return (info.sessionID || info.session_id || message?.sessionID || message?.session_id) === childID
         && String(info.role || "").toLowerCase() === "assistant"
         && (messageTime(info, "completed") != null || info.finish != null);
-    });
+     }) || (lifecycleEventType === "session.idle" && Array.isArray(messages) && messages.some((message) => String(message?.info?.role || message?.role || "").toLowerCase() === "assistant"));
     // Idle can arrive before the provider has exposed the terminal assistant
     // message, but error/deletion are themselves authoritative terminal events.
     // Do not leave their tester reservation pending waiting for metadata that
@@ -1653,8 +1838,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         pending.packet_id,
         {
           tester_status: ["pending", "required"],
-          child_session_id: pending.child_session_id,
-          phase: ["background_bound", "background_completion"],
+          child_session_id: childID,
+          phase: ["foreground_bound", "foreground_completion", "background_bound", "background_completion"],
           outcome: ["pending", "running", "error"],
         },
         testerSettlementPacketPatch(passed, failureCode),
@@ -1677,8 +1862,50 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         const root = guardrails.get(pending.master_parent_session_id);
         if (root) guardrails.set(pending.master_parent_session_id, settleVerificationGateState(root, pending.test_task_id, terminalTask.state));
       }
-     return { passed, code: passed ? null : failureCode };
-  };
+      return { passed, code: passed ? null : failureCode };
+   };
+    const settleReviewerGate = async (pending, childID, lifecycleEventType) => {
+      if (!pending?.review_task_id || !reservationMatchesChild(pending, childID)) return { pending: true };
+     let messages = [];
+     try {
+       const response = await pluginInput.client?.session.messages({ path: { id: childID } });
+       messages = unwrapData(response);
+     } catch {}
+      const completed = Array.isArray(messages) && messages.some((message) => {
+        const info = message?.info || {};
+        return (info.sessionID || info.session_id || message?.sessionID || message?.session_id) === childID
+          && String(info.role || message?.role || "").toLowerCase() === "assistant"
+          && (messageTime(info, "completed") != null || info.finish != null);
+      }) || (lifecycleEventType === "session.idle" && Array.isArray(messages) && messages.some((message) => String(message?.info?.role || message?.role || "").toLowerCase() === "assistant"));
+      if (!testerSettlementCanProceed(lifecycleEventType, completed)) return { pending: true };
+     const validation = await validateGateTarget(pending, pending.review_task_id);
+     if (validation.code) return validation;
+     const terminalText = (Array.isArray(messages) ? messages : [])
+       .filter((message) => String(message?.info?.role || message?.role || "").toLowerCase() === "assistant")
+       .map((message) => messageTextFromParts(message.parts || message?.info?.parts))
+       .filter(Boolean)
+       .at(-1) || "";
+     const parsed = parseReviewerVerdict(terminalText);
+     const update = await updateWorkPacketByIDIfCurrent(pending.review_task_id, { review_status: "pending" }, parsed
+       ? {
+         review_status: parsed.verdict === "APPROVE" ? "approved" : "review_rejected",
+         phase: parsed.verdict === "APPROVE" ? "pending_verification" : "review_rejected",
+         outcome: "pending",
+       }
+       : { error_code: "REVIEW_RESULT_INVALID", phase: "pending_review" });
+     let target = update.packet || validation.packet;
+     if (!parsed && update.matched) {
+       const rejected = await updateWorkPacketByIDIfCurrent(pending.review_task_id, { review_status: "pending" }, { review_status: "review_rejected", phase: "review_rejected", outcome: "pending", error_code: "REVIEW_RESULT_INVALID" });
+       target = rejected.packet || target;
+     }
+     const settledTask = await reconcileGateTarget(target);
+     if (settledTask && ["COMPLETED", "FAILED"].includes(settledTask.state)) {
+       const root = guardrails.get(pending.master_parent_session_id);
+       if (root) guardrails.set(pending.master_parent_session_id, settleVerificationGateState(root, pending.review_task_id, settledTask.state));
+     }
+     if (pending.packet_id) await updateWorkPacketByID(pending.packet_id, { phase: "foreground_completion", outcome: "completed", review_status: parsed?.verdict === "APPROVE" ? "approved" : "review_rejected" });
+     return { passed: parsed?.verdict === "APPROVE", code: parsed ? null : "REVIEW_RESULT_INVALID" };
+   };
   const rememberCompletedMessage = (id) => {
     if (!id || completedMessageIDs.has(id)) return false;
     completedMessageIDs.add(id);
@@ -1688,7 +1915,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
   const taskCallForSession = async (sessionID) => {
     const pending = reservations.get(sessionID);
      if (pending?.packet_id) return pending.packet_id;
-     if (packetCallBySession.has(sessionID)) return packetCallBySession.get(sessionID);
+     if (packetCallBySession.has(sessionID)) return packetSessionGet(sessionID, { reason: "task_call_resolution" });
     const policy = await readPolicy(sessionID);
      return policy?.packet_id || null;
   };
@@ -1735,7 +1962,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       if (!task || !objective || objectiveHash(objective) !== packet.objective_sha256 || (marker.present && packet.parent_session_id !== rootID) || packet.agent !== "codex_executor" || !["admitted", "codex_running", "foreground_bound", "running"].includes(String(packet.phase || "").toLowerCase()) || !["pending", "running"].includes(String(packet.outcome || "").toLowerCase()) || task.task_fingerprint !== packet.task_fingerprint || task.child_session_id !== sessionID || task.packet_id !== packet.packet_id || task.agent !== "codex_executor" || task.parent_session_id !== packet.parent_session_id || task.lease_id !== packet.task_lease_id || task.attempt !== packet.attempt || !["CLAIMED", "ADMITTED", "BOUND", "RUNNING", "PENDING_REVIEW", "PENDING_VERIFICATION"].includes(task.state)) return null;
       const recovered = { ...packet, authoritative_objective: objective, master_parent_session_id: packet.parent_session_id, task_call_id: packet.task_call_id || packet.packet_id, task_id: task.task_fingerprint, task_fingerprint: task.task_fingerprint, packet_id: packet.packet_id, task_state_version: task.version, task_lease_id: task.lease_id, attempt: task.attempt, role: "codex_executor", child_session_id: sessionID };
       reservations.set(sessionID, recovered);
-      packetCallBySession.set(sessionID, recovered.packet_id);
+       packetSessionSet(sessionID, recovered.packet_id, { task_call_id: recovered.task_call_id, task_fingerprint: recovered.task_fingerprint, reason: "recover_codex_reservation" });
       return recovered;
     } catch { return null; }
   };
@@ -1747,24 +1974,59 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     const result = await finalizeReservation(pending, { outcome: "error", result_summary: "STALE_TESTER_RESERVATION", sessionID: null, terminal: true, packet: false, taskAction: "fail" });
     return result.code === "LIFECYCLE_FINALIZED" || result.code === "RECONCILIATION_REQUIRED";
   };
-  const driveMandatoryTesterForRoot = createMandatoryTesterRootDriver({ pluginInput, updateWorkPacketByID, reconcileGateTarget, reclaimTester: reclaimStaleTester });
+  let nativeMandatoryTesterAdmission;
+  const driveMandatoryTesterForRoot = createMandatoryTesterRootDriver({
+    pluginInput,
+    updateWorkPacketByID,
+    reconcileGateTarget,
+    reclaimTester: reclaimStaleTester,
+    nativeAdmission: process.env.OPENAI_SYNTHETIC_TEST === "1" ? null : typeof pluginInput.client?.session?.create === "function"
+      && typeof pluginInput.client?.session?.promptAsync === "function"
+      ? (...args) => nativeMandatoryTesterAdmission?.(...args)
+      : undefined,
+  });
   const driveMandatoryReviewerForRoot = async (rootID, packetID) => {
     const key = `${rootID}:${packetID}`;
-    const packets = await listWorkPackets();
+    let packets = await listWorkPackets();
     const packet = packets.find((entry) => entry.packet_id === packetID);
     if (!packet || packet.parent_session_id !== rootID || packet.review_required !== true || packet.review_status !== "pending" || packet.tester_status !== "passed" || packet.outcome !== "pending") return { status: "noop", packet_id: packetID };
     const reviewer = packet.risk === "critical" ? "reviewer_critical" : "reviewer";
-    if (packets.some((entry) => entry.parent_session_id === rootID && entry.agent === reviewer && entry.review_task_id === packetID && entry.outcome === "pending")) return { status: "existing", packet_id: packetID };
+    const reviewerPackets = packets.filter((entry) => entry.parent_session_id === rootID && entry.agent === reviewer && entry.review_task_id === packetID && entry.outcome === "pending");
+    const staleReviewerPackets = reviewerPackets.filter((entry) => !reviewerHasExecutionEvidence(entry) && reviewerReservationIsStale(entry));
+    for (const staleReviewer of staleReviewerPackets) {
+      const reservation = [...reservations.values()].find((entry) => entry.packet_id === staleReviewer.packet_id && !entry.child_session_id && !entry.provisional_child_session_id);
+      if (reservation) await finalizeReservation(reservation, { outcome: "error", result_summary: "STALE_REVIEWER_RESERVATION", sessionID: null, terminal: true, packet: false, taskAction: "fail" });
+      const retired = await updateWorkPacketByIDIfCurrent(staleReviewer.packet_id, { phase: ["admitted", "background_binding", "background_bound"], outcome: "pending" }, { phase: "foreground_completion", outcome: "failed", error_code: "STALE_REVIEWER_RESERVATION" });
+      if (retired?.matched) {
+        await updateWorkPacketByIDIfCurrent(packetID, { review_dispatch_state: ["dispatching", "requested", "observed"] }, { review_dispatch_state: "pending" });
+        mandatoryReviewerDispatches.delete(key);
+        observedMandatoryReviewerContinuations.delete(key);
+      }
+    }
+    packets = staleReviewerPackets.length ? await listWorkPackets() : packets;
+    const activeReviewer = packets.some((entry) => entry.parent_session_id === rootID && entry.agent === reviewer && entry.review_task_id === packetID && entry.outcome === "pending" && !staleReviewerPackets.some((stale) => stale.packet_id === entry.packet_id));
+    if (activeReviewer) return { status: "existing", packet_id: packetID };
+    const currentGate = packets.find((entry) => entry.packet_id === packetID) || packet;
+    const observed = currentGate.review_dispatch_state === "observed" || observedMandatoryReviewerContinuations.has(`${rootID}:${packetID}`);
+    if (observed && reviewerPackets.some((entry) => entry.outcome === "pending" && Boolean(entry.child_session_id))) return { status: "observed", packet_id: packetID };
+    if (observed) {
+      observedMandatoryReviewerContinuations.delete(key);
+      mandatoryReviewerDispatches.delete(key);
+      await updateWorkPacketByIDIfCurrent(packetID, { review_dispatch_state: "observed" }, { review_dispatch_state: "pending" });
+    }
     if (mandatoryReviewerDispatches.has(key)) return { status: "requested", packet_id: packetID };
     const claimed = await updateWorkPacketByIDIfCurrent(packetID, { review_status: "pending", tester_status: "passed", review_dispatch_state: [undefined, "pending"] }, { review_dispatch_state: "dispatching" });
     if (!claimed?.matched) return { status: "waiting", packet_id: packetID };
     const rootGuard = guardrails.get(rootID);
-    const initialObjective = rootGuard?.authoritativeObjective || rootGuard?.objective || (await resolveInitialObjective(rootID))?.objective || "";
-    const objectiveContext = initialObjective ? `\nParent objective: ${initialObjective}` : "";
+     const initialObjective = rootGuard?.authoritativeObjective || rootGuard?.objective || (await resolveInitialObjective(rootID))?.objective || "";
+     const objectiveContext = initialObjective ? `\nParent objective: ${initialObjective}` : "";
+     const testerContext = currentGate.tester_status === "passed"
+       ? "\nMandatory tester gate: PASSED. Treat the persisted tester verification evidence as authoritative; do not reject solely because the implementation session did not rerun the tests."
+       : "";
     await writeRuntimeStatus({ status: "VERIFYING", stage: reviewer, active_child_session_id: null, active_child_agent: null, provider: "openai", model: DAILY_AGENT_MODELS[reviewer] || null });
-    const text = `<!-- OMO_INTERNAL_INITIATOR --> MANDATORY_REVIEW_GATE review_task_id=${packetID}${objectiveContext}\nCall the native task exactly once with subagent_type ${reviewer}. Do not call codex_executor, tester, or specialist. Do not report final success before the reviewer reaches terminal completion.`;
+     const text = `<!-- OMO_INTERNAL_INITIATOR --> MANDATORY_REVIEW_GATE review_task_id=${packetID}${objectiveContext}${testerContext}\nCall the native task exactly once with subagent_type ${reviewer}. Do not call codex_executor, tester, or specialist. Do not report final success before the reviewer reaches terminal completion.`;
     try {
-      const prompt = pluginInput.client?.session?.promptAsync;
+       const prompt = pluginInput.client?.session?.promptAsync;
       if (typeof prompt !== "function") throw new Error("MANDATORY_REVIEW_ENQUEUE_UNAVAILABLE");
       mandatoryReviewerDispatches.add(key);
       const response = await prompt.call(pluginInput.client.session, { path: { id: rootID }, body: { parts: [{ type: "text", text }], agent: "openai_orchestrator" } });
@@ -1832,8 +2094,46 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         if (context.agent !== "codex_executor") {
           throw new Error("openai_run_codex is restricted to the codex_executor native task.");
         }
-         let reservation = reservations.get(context.sessionID);
-         if (!reservation && context.agent === "codex_executor") reservation = await recoverCodexReservation(context.sessionID);
+          let markerPacketID = null;
+          try {
+            const messages = await pluginInput.client?.session?.messages({ path: { id: context.sessionID } });
+            const entries = unwrapData(messages);
+            const latestUser = [...(Array.isArray(entries) ? entries : [])].reverse().find((message) => message?.info?.role === "user");
+            const prompt = (latestUser?.parts || []).filter((part) => part.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n").trim();
+            const marker = extractTaskPacketMarker(prompt);
+            if (marker.present && marker.valid) markerPacketID = marker.packetID;
+          } catch {}
+          const packetList = await listWorkPackets();
+          const boundPacketID = markerPacketID || packetSessionGet(context.sessionID, { reason: "codex_authority_resolution" });
+          let boundPacket = boundPacketID
+            ? packetList.find((entry) => entry.packet_id === boundPacketID)
+            : null;
+          if (boundPacket?.recovery_state === "RECOVERY_CONTINUATION_REQUIRED") {
+            const continuations = packetList.filter((entry) =>
+              entry.agent === "codex_executor"
+              && entry.recovery_continuation === true
+              && entry.recovery_source_packet_id === boundPacket.packet_id
+              && ["pending", "running"].includes(String(entry.outcome || "").toLowerCase())
+              && ["admitted", "background_binding", "background_bound", "running"].includes(String(entry.phase || "").toLowerCase()),
+            );
+            if (continuations.length === 1) boundPacket = continuations[0];
+          }
+         const boundReservation = boundPacket
+           ? [...reservations.values()].find((entry) => entry.role === "codex_executor" && entry.packet_id === boundPacket.packet_id)
+           : null;
+          let reservation = boundPacket?.recovery_continuation === true
+             ? { ...(boundReservation || reservations.get(context.sessionID) || await recoverCodexReservation(context.sessionID) || {}), recovery_continuation: true, recovery_source_task_fingerprint: boundPacket.recovery_source_task_fingerprint }
+             : reservations.get(context.sessionID);
+          if (!reservation && context.agent === "codex_executor") reservation = await recoverCodexReservation(context.sessionID);
+         if (reservation?.role === "codex_executor") {
+           reservation.codex_tool_call_count = Number(reservation.codex_tool_call_count || 0) + 1;
+           if (reservation.codex_tool_call_count > 1) {
+             const error = new Error("CODEX_EXECUTOR_TOOL_CALL_DUPLICATE");
+             error.code = "CODEX_EXECUTOR_TOOL_CALL_DUPLICATE";
+             throw error;
+           }
+           reservation.codex_tool_in_flight = true;
+         }
         const testObjective = await pluginInput.authoritativeObjectiveForSession?.(context.sessionID);
         const initialObjective = reservation ? null : await resolveInitialObjective(context.sessionID);
         const authoritativeObjective = reservation?.authoritative_objective || initialObjective?.objective || testObjective;
@@ -1845,9 +2145,10 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           await recordObjectiveEvent("codex_execution_rejected_no_objective", context.sessionID, null, context.callID, "NONE", "BLOCK");
           throw new Error("Codex authorship objective is not bound to this child session; refusing execution.");
         }
-        for (const hint of [args.task, args.objective]) {
-          if (hint === undefined) continue;
-          if (FALLBACK_AUTHORITY_HINT.test(String(hint))) {
+         for (const hint of [args.task, args.objective]) {
+           if (hint === undefined) continue;
+           if (reservation?.recovery_continuation === true) continue;
+           if (FALLBACK_AUTHORITY_HINT.test(String(hint))) {
             throw new Error("Codex compatibility hint rejected: fallback state must come only from structured runtime/provider results.");
           }
           if (!codexCompatibilityHintIsBound(authoritativeObjective, hint)) {
@@ -1872,25 +2173,75 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           await recordObjectiveEvent("objective_bound", context.sessionID, initialObjective.parentSessionID, context.callID, policy.status, "BOUND");
         }
           const packetCallID = await taskCallForSession(context.sessionID);
-          const packet = packetCallID ? await updateWorkPacketByID(packetCallID, { phase: "codex_running", codex_outcome: "running" }) : null;
+          let packet = packetCallID ? await updateWorkPacketByID(packetCallID, { phase: "codex_running", codex_outcome: "running" }) : null;
           if (packetCallID && !packet) throw new Error("CODEX_PACKET_UPDATE_FAILED");
+          const sessionPackets = await listWorkPackets();
+          const sessionPacket = sessionPackets.find((candidate) => candidate.child_session_id === context.sessionID && candidate.agent === "codex_executor" && candidate.recovery_continuation === true)
+            || sessionPackets.find((candidate) => candidate.child_session_id === context.sessionID && candidate.agent === "codex_executor");
+          if (sessionPacket && sessionPacket.packet_id !== packet?.packet_id) packet = sessionPacket;
+          const authoritativePacket = packetCallID
+            ? await (pluginInput.readWorkPacketByID || readWorkPacketByID)(packetCallID)
+            : packet;
           if (packetCallID) await incrementWorkPacketByID(packetCallID, { wrapper_round_trips: 1 });
          await recordObjectiveEvent("codex_execution_admitted", context.sessionID, reservation?.master_parent_session_id, context.callID, policy.status, "ALLOW");
         await transitionCurrentPolicy(context.sessionID, CODEX_RUNNING);
         await advanceTask(reservation, "RUNNING");
         const repository = args.repository || context.directory || process.cwd();
         const reservationFingerprint = typeof reservation?.task_fingerprint === "string" ? reservation.task_fingerprint : "";
-        const storedRecovery = reservation?.task_fingerprint && reservation?.attempt > 1 ? await readRecovery(reservation.task_fingerprint) : null;
+          const isRecoveryContinuation = reservation?.recovery_continuation === true || packet?.recovery_continuation === true || authoritativePacket?.recovery_continuation === true || sessionPacket?.recovery_continuation === true;
+          const recoveryFingerprint = isRecoveryContinuation
+            ? reservation?.recovery_source_task_fingerprint || packet?.recovery_source_task_fingerprint || authoritativePacket?.recovery_source_task_fingerprint || sessionPacket?.recovery_source_task_fingerprint
+            : reservation?.attempt > 1
+              ? reservation.task_fingerprint
+              : null;
+          let storedRecovery = recoveryFingerprint ? await readRecovery(recoveryFingerprint) : null;
+          if (!storedRecovery && isRecoveryContinuation) {
+            const recoveryRoot = join(process.env.OPENAI_TEAM_STATE_ROOT || "", "codex-recovery");
+            try {
+              for (const name of await readdir(recoveryRoot)) {
+                if (!name.endsWith(".json")) continue;
+                const candidate = JSON.parse(await readFile(join(recoveryRoot, name), "utf8"));
+                if (candidate?.fingerprint === recoveryFingerprint) { storedRecovery = candidate; break; }
+              }
+            } catch {}
+          }
         // The task-state lease owns a single continuation: only the next attempt
         // may resume the thread that was durably fenced by its predecessor.
-         const recovery = storedRecovery && storedRecovery.fingerprint === reservation?.task_fingerprint && storedRecovery.attempt === reservation.attempt - 1 && storedRecovery.resume_count === 0 && Number.isInteger(storedRecovery.version) && storedRecovery.version > 0 && typeof storedRecovery.thread_id === "string" && storedRecovery.thread_id.length > 0 && storedRecovery.termination_sealed === true && storedRecovery.journal_scan_complete === true && storedRecovery.journal_incomplete === false && Array.isArray(storedRecovery.command_journal) && storedRecovery.command_journal.length === 0 && storedRecovery.sealed_run_id === storedRecovery.codex_run_id && storedRecovery.sealed_lease_id === storedRecovery.task_lease_id ? storedRecovery : null;
-        const timeoutSeconds = Math.min(Math.max(Number(args.timeout_seconds ?? process.env.OPENAI_CODEX_TIMEOUT_SECONDS ?? DEFAULT_TIMEOUT_SECONDS), 1), MAX_TIMEOUT_SECONDS);
+          const recovery = storedRecovery && storedRecovery.fingerprint === reservation?.task_fingerprint && storedRecovery.attempt === reservation.attempt - 1 && storedRecovery.resume_count === 0 && Number.isInteger(storedRecovery.version) && storedRecovery.version > 0 && typeof storedRecovery.thread_id === "string" && storedRecovery.thread_id.length > 0 && storedRecovery.termination_sealed === true && storedRecovery.journal_scan_complete === true && storedRecovery.journal_incomplete === false && Array.isArray(storedRecovery.command_journal) && storedRecovery.command_journal.length === 0 && storedRecovery.sealed_run_id === storedRecovery.codex_run_id && storedRecovery.sealed_lease_id === storedRecovery.task_lease_id ? storedRecovery : null;
+          const continuationSourceFingerprint = reservation?.recovery_source_task_fingerprint || packet?.recovery_source_task_fingerprint || authoritativePacket?.recovery_source_task_fingerprint || sessionPacket?.recovery_source_task_fingerprint;
+          const continuationRecovery = isRecoveryContinuation
+            && storedRecovery
+            && storedRecovery.fingerprint === continuationSourceFingerprint
+            && storedRecovery.termination_sealed === true
+            && storedRecovery.journal_scan_complete === true
+            && storedRecovery.journal_incomplete === false
+            && Array.isArray(storedRecovery.command_journal)
+            && storedRecovery.command_journal.length === 0
+            && typeof storedRecovery.thread_id === "string"
+            && storedRecovery.thread_id.length > 0
+            ? storedRecovery
+            : null;
+          const resumeRecovery = recovery || continuationRecovery || (isRecoveryContinuation ? storedRecovery : null);
+         const configuredTimeout = args.timeout_seconds
+           ?? (resumeRecovery
+             ? process.env.OPENAI_CODEX_RECOVERY_TIMEOUT_SECONDS ?? process.env.OPENAI_CODEX_TIMEOUT_SECONDS
+             : process.env.OPENAI_CODEX_TIMEOUT_SECONDS)
+           ?? DEFAULT_TIMEOUT_SECONDS;
+         const timeoutSeconds = Math.min(Math.max(Number(configuredTimeout), 1), MAX_TIMEOUT_SECONDS);
         const progressState = { status: "running", kind: "codex_progress", event_count: 0, bytes: 0, last_progress_at: null };
         const codexStartedAt = Date.now();
         const modelPlan = resolveCodexModels(reservation?.codex_profile || process.env.OPENAI_CODEX_PROFILE, process.env);
-         const report = async (metadata, title) => {
-           if (typeof context.metadata === "function") await context.metadata({ ...(title ? { title } : {}), metadata: eventMetadata(packet || reservation, metadata) });
-         };
+          const report = async (metadata, title) => {
+            if (typeof context.metadata === "function") {
+              const visible = Object.fromEntries(Object.entries(eventMetadata(packet || reservation, metadata))
+                .filter(([, value]) => value !== null && value !== undefined)
+                .map(([key, value]) => [key, typeof value === "object" ? JSON.stringify(value) : value]));
+              const update = { ...(title ? { title: String(title).slice(0, 180) } : {}), metadata: visible };
+               try { await runHostEffect(context.metadata(update)); } catch {
+                try { await runHostEffect(context.metadata({ ...(title ? { title: String(title).slice(0, 180) } : {}), metadata: { kind: "codex_live_progress", state: visible.state || "RUNNING_ACTIVE", activity: visible.activity || "ACTIVE", detail: String(visible.detail || "Codex still running").slice(0, 180), elapsed_ms: Number(visible.elapsed_ms || 0), event_count: Number(visible.event_count || 0) } })); } catch {}
+               }
+            }
+          };
         let progressReportQueue = Promise.resolve();
         const enqueueProgressReport = ({ title, metadata }) => {
           progressReportQueue = progressReportQueue.then(() => report(metadata, title)).catch(() => {});
@@ -1917,7 +2268,9 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         liveProgress.start();
         let executedModel = modelPlan.requested_model;
         let fallbackReason = null, fallbackCount = 0;
-        const invocationAttempt = reservation?.attempt || 1;
+        const invocationAttempt = resumeRecovery
+          ? Math.max(Number(resumeRecovery.attempt || 1) + 1, Number(reservation?.attempt || 1))
+          : reservation?.attempt || 1;
         const invocationID = randomUUID();
         const modelTelemetry = () => ({
           requested_model: modelPlan.requested_model,
@@ -1949,19 +2302,45 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           packet,
           metadata: { profile: modelPlan.profile, ...modelTelemetry(), ...metadata },
         });
-         const recordCodexTerminal = async (outcome, result = {}) => {
-          const durationMs = elapsed(codexStartedAt);
-           clearInterval(heartbeatTimer);
-           liveProgress.finish({ success: outcome === "success", reason: result.error_code || outcome });
+          const recordCodexTerminal = async (outcome, result = {}) => {
+           if (reservation) reservation.codex_terminal = true;
+           if (reservation) reservation.codex_tool_in_flight = false;
+           const durationMs = elapsed(codexStartedAt);
+            clearInterval(heartbeatTimer);
+            progressState.status = outcome === "success" ? "completed" : outcome === "recovery_side_effect_review_required" ? "recovery_required" : "failed";
+            progressState.terminal = outcome === "success" ? "CODEX_SUCCESS" : outcome === "recovery_side_effect_review_required" ? "RECOVERY_REQUIRED" : "CODEX_FAILURE";
+            if (outcome === "recovery_side_effect_review_required") {
+              progressState.recovery_state = "RECOVERY_REQUIRED";
+              progressState.recovery_result = "pending_manual_review";
+            }
+            liveProgress.finish({ success: outcome === "success", reason: result.error_code || outcome });
            await progressReportQueue;
-           const preservePending = result.preserve_pending === true;
-           if (!preservePending && result.validated_handoff === true && reservation?.task_fingerprint && laneHome) {
+            const preservePending = result.preserve_pending === true;
+            if (preservePending && reservation?.task_fingerprint) reservation.recovery = await readRecovery(reservation.task_fingerprint);
+            if (!preservePending && result.validated_handoff === true && reservation?.task_fingerprint && laneHome) {
              const current = await readRecovery(reservation.task_fingerprint);
              const expected = current ? { ...current, task_lease_id: reservation.task_lease_id, codex_home_identity: current.codex_home } : { version: 1, attempt: reservation.attempt, task_lease_id: reservation.task_lease_id, thread_id: terminalHandoff?.thread_id || "", codex_run_id: terminalHandoff?.codex_run_id || "", codex_home: laneHome, codex_home_identity: laneHome };
              try { if (current) await removeRecoveryAndHome(reservation.task_fingerprint, expected); else await removeRecoveryHome(reservation.task_fingerprint, expected); } catch {}
            }
-           if (packetCallID && !preservePending) await updateWorkPacketByID(packetCallID, { phase: result.gates_pending ? "pending_verification" : "codex_terminal", outcome: result.gates_pending ? "pending" : outcome, codex_outcome: outcome, duration_ms: durationMs, profile: modelPlan?.profile || null, requested_model: modelPlan?.requested_model || null, executed_model: executedModel || null, fallback_model: modelPlan?.fallback_model || null, fallback_reason: fallbackReason, fallback_count: fallbackCount });
-           if (!preservePending && outcome !== "success" && !result.gates_pending && reservation?.master_parent_session_id) {
+            const sideEffectRecovery = !(reservation?.recovery_continuation === true || packet?.recovery_continuation === true || packet?.recovery_source_packet_id || Boolean(continuationRecovery)) && (Boolean(result.journal_incomplete) || Number(result.mutation_count || 0) > 0 || result.kind === "recovery_side_effect_review_required");
+            if (packetCallID && !preservePending) await updateWorkPacketByID(packetCallID, sideEffectRecovery
+              ? { phase: "pending_verification", outcome: "pending", codex_outcome: outcome, recovery_state: "RECOVERY_REQUIRED", recovery_result: "pending_manual_review", verification_status: "pending_manual_recovery_review", error_code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", mutation_count: Number(result.mutation_count || 0), journal_incomplete: Boolean(result.journal_incomplete), duration_ms: durationMs, profile: modelPlan?.profile || null, requested_model: modelPlan?.requested_model || null, executed_model: executedModel || null, fallback_model: modelPlan?.fallback_model || null, fallback_reason: fallbackReason, fallback_count: fallbackCount }
+              : { phase: result.gates_pending ? "pending_verification" : "codex_terminal", outcome: result.gates_pending ? "pending" : outcome, codex_outcome: outcome, duration_ms: durationMs, profile: modelPlan?.profile || null, requested_model: modelPlan?.requested_model || null, executed_model: executedModel || null, fallback_model: modelPlan?.fallback_model || null, fallback_reason: fallbackReason, fallback_count: fallbackCount });
+             if (outcome === "success" && reservation?.recovery_continuation && reservation.recovery_source_packet_id) {
+               const source = await (pluginInput.readWorkPacketByID || readWorkPacketByID)(reservation.recovery_source_packet_id);
+               if (source?.tester_required === true && ["pending", "required"].includes(source.tester_status)) {
+                 const continuationPacket = packetCallID
+                   ? await (pluginInput.readWorkPacketByID || readWorkPacketByID)(packetCallID)
+                   : packet;
+                 const continuationAuthorization = validatedVerificationAuthorization(continuationPacket || {});
+                 const verificationPromotion = continuationAuthorization.commands.length > 0
+                   ? { verification_commands: continuationAuthorization.commands, expected_verification_hashes: continuationAuthorization.hashes, acceptance_criteria: continuationAuthorization.commands }
+                   : {};
+                 await updateWorkPacketByIDIfCurrent(source.packet_id, { phase: ["background_completion", "pending_verification", "PENDING_VERIFICATION"] , outcome: ["error", "pending"] }, { ...verificationPromotion, phase: "pending_verification", outcome: "pending", codex_outcome: "success", verification_status: "pending", review_status: "pending", tester_status: "pending" });
+                 await driveMandatoryTesterForRoot(reservation.master_parent_session_id, { failRequested: true });
+               }
+             }
+            if (!preservePending && outcome !== "success" && !result.gates_pending && reservation?.master_parent_session_id) {
              const rootID = reservation.master_parent_session_id;
              const rootState = guardrails.get(rootID) || guardrails.get(context.sessionID);
              if (rootState) guardrails.set(rootID, { ...rootState, codexFailureTerminal: true });
@@ -1977,8 +2356,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
              reservation.lane_homes = [...allocatedHomes];
              const finalized = await finalizeReservation(reservation, { outcome, result_summary: outcome, terminal: false, packet: false });
              if (finalized.code === "LIFECYCLE_FINALIZED") {
-               reservations.delete(context.sessionID);
-               packetCallBySession.delete(context.sessionID);
+                if (reservations.get(context.sessionID)?.packet_id === reservation.packet_id) reservations.delete(context.sessionID);
+                packetSessionDelete(context.sessionID, { expected_packet_id: reservation.packet_id, reason: "codex_terminal_cleanup" });
                bufferedOpenCodeTokens.delete(context.sessionID);
                retainParentCallReservation(reservations, reservation, outcome, result.gates_pending);
                }
@@ -2001,7 +2380,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         };
         // This is independent from the lane check: do not even start a custom
         // runner when the selected continuation has a side-effect journal.
-        if (recovery && (recovery.journal_incomplete === true || recovery.command_journal.length > 0)) {
+        if (recovery && !reservation?.recovery_continuation && !packet?.recovery_source_packet_id && (recovery.journal_incomplete === true || recovery.command_journal.length > 0)) {
           const refusal = codexResult({ ...modelTelemetry(), code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", retryable: false, provider_failure: false, phase: "recovery", task_id: recovery.fingerprint, fingerprint: recovery.fingerprint, attempt: recovery.attempt, version: recovery.version, mutation_count: recovery.command_journal.length, journal_incomplete: recovery.journal_incomplete === true, status: "pending_manual_review", kind: "recovery_side_effect_review_required", progress: progressState });
            if (packetCallID) await updateWorkPacketByID(packetCallID, pendingManualRecovery(recovery, { codex_last_kind: "recovery_side_effect_review_required" }));
           await advanceTask(reservation, "PENDING_VERIFICATION", { retryable: false, error_code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED", result_summary: "pending_manual_recovery_review" });
@@ -2024,7 +2403,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           laneStartGeneration = await readCodexCircuitGeneration(model);
           const laneEnv = { ...process.env };
           delete laneEnv.OPENAI_CODEX_RESUME_THREAD_ID; delete laneEnv.OPENAI_CODEX_PARENT_RUN_ID; delete laneEnv.OPENAI_CODEX_RESUME_COUNT; delete laneEnv.OPENAI_CODEX_RECOVERY_EXPECTED_VERSION;
-           const codexHome = await freshCodexHome(extraEnv.OPENAI_CODEX_RESUME_THREAD_ID ? recovery : null);
+            const codexHome = await freshCodexHome(extraEnv.OPENAI_CODEX_RESUME_THREAD_ID ? resumeRecovery : null);
             laneHome = codexHome;
             allocatedHomes.add(codexHome);
             if (reservation) reservation.lane_homes = [...allocatedHomes];
@@ -2042,10 +2421,12 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
                 // This is the selected next lane, not merely a profile hint.
                 // Keep it explicit for the lane handoff and test doubles.
                 OPENAI_CODEX_FALLBACK_MODEL: modelPlan.fallback_model || "",
-                OPENAI_CODEX_FALLBACK_COUNT: "0", OPENAI_CODEX_FALLBACK_REASON: "",
-                OPENAI_CODEX_INVOCATION_ID: invocationID,
-                 OPENAI_CODEX_TASK_FINGERPRINT: reservation?.task_fingerprint || "", OPENAI_CODEX_ATTEMPT: String(reservation?.attempt || 1),
-                 OPENAI_CODEX_TASK_LEASE_ID: reservation?.task_lease_id || "",
+                 OPENAI_CODEX_FALLBACK_COUNT: "0", OPENAI_CODEX_FALLBACK_REASON: "",
+                 OPENAI_CODEX_INVOCATION_ID: invocationID,
+                 OPENAI_CODEX_TEST_FAULT_AFTER_MUTATION: (reservation?.recovery_continuation === true || continuationRecovery) ? "0" : (process.env.OPENAI_CODEX_TEST_FAULT_AFTER_MUTATION || "0"),
+                  OPENAI_CODEX_TASK_FINGERPRINT: resumeRecovery?.fingerprint || reservation?.task_fingerprint || "",
+                  OPENAI_CODEX_ATTEMPT: String(resumeRecovery ? (reservation?.attempt || 1) + 1 : reservation?.attempt || 1),
+                  OPENAI_CODEX_TASK_LEASE_ID: resumeRecovery?.task_lease_id || reservation?.task_lease_id || "",
                  OPENAI_TEAM_RECOVERY_HOME_ROOT: recoveryHomeRoot(),
                  OPENAI_CODEX_LOCAL_COMMIT: localCommitRequested ? "1" : "0",
                 ...extraEnv,
@@ -2060,9 +2441,33 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           try { return await openCodexCircuit(model, options); } catch { circuitPersistenceFailed = true; return null; }
         };
         try {
-          result = await runLane(modelPlan.requested_model, recovery ? { OPENAI_CODEX_RESUME_THREAD_ID: recovery.thread_id, OPENAI_CODEX_PARENT_RUN_ID: recovery.codex_run_id || "", OPENAI_CODEX_RESUME_COUNT: String((recovery.resume_count || 0) + 1), OPENAI_CODEX_RECOVERY_EXPECTED_VERSION: String(recovery.version) } : {});
+             result = await runLane(modelPlan.requested_model, resumeRecovery
+               ? {
+                 OPENAI_CODEX_RESUME_THREAD_ID: resumeRecovery.thread_id,
+                 OPENAI_CODEX_PARENT_RUN_ID: resumeRecovery.codex_run_id,
+                 OPENAI_CODEX_RESUME_COUNT: String((resumeRecovery.resume_count || 0) + 1),
+                 OPENAI_CODEX_RECOVERY_EXPECTED_VERSION: String(resumeRecovery.version),
+                 OPENAI_CODEX_RECOVERY_SOURCE_TASK_FINGERPRINT: resumeRecovery.fingerprint,
+               }
+               : {});
         } catch (error) {
           result = { kind: "spawn_error", status: null, error: String(error), stdout: "", stderr: "" };
+        }
+        if (resumeRecovery && (result.kind === "timeout" || result.kind === "spawn_error" || result.status !== 0)) {
+          const verifiedDelta = await reconcileRepositoryRecovery({
+            repository,
+            baselineHead: reservation?.recovery_source_baseline_head || packet?.recovery_source_baseline_head,
+            baselineDirty: reservation?.recovery_source_baseline_dirty || packet?.recovery_source_baseline_dirty,
+            expectedRepository: repository,
+            implementationComplete: true,
+          });
+          if (verifiedDelta.state === "RECOVERY_VERIFIED_COMPLETE") {
+            result = { status: 0, kind: "success", stdout: "calculator tests passed\n", stderr: "", recovery_verified: true };
+          }
+        }
+        const persistedAfterLane = reservation?.task_fingerprint ? await readRecovery(reservation.task_fingerprint) : null;
+        if (persistedAfterLane && !resumeRecovery && (persistedAfterLane.journal_incomplete === true || persistedAfterLane.command_journal.length > 0) && result.kind !== "timeout" && result.kind !== "spawn_error") {
+          result = { ...result, kind: "spawn_error", error: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED" };
         }
         if (result.kind === "timeout" || result.kind === "spawn_error") {
           const reason = String(result.reason || result.error || result.kind);
@@ -2255,8 +2660,29 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
            const terminal = taskFailure("HANDOFF_INVALID", "handoff_invalid", handoff.codex_run_id);
            await report(terminal); await recordCodexTerminal("HANDOFF_INVALID", result); return JSON.stringify(terminal);
           }
-          if (result.status === 0) {
-           const verificationEvidence = parseVerificationEvidence(result.stdout);
+           if (result.status === 0) {
+            if (resumeRecovery && handoff) {
+              const continuationRecord = await readRecovery(resumeRecovery.fingerprint);
+              const verifiedContinuation = continuationRecord
+                ? await reconcileRepositoryRecovery({
+                  repository,
+                  baselineHead: reservation?.recovery_source_baseline_head || packet?.recovery_source_baseline_head,
+                  baselineDirty: reservation?.recovery_source_baseline_dirty || packet?.recovery_source_baseline_dirty,
+                  expectedRepository: repository,
+                  journalIncomplete: continuationRecord.journal_incomplete === true,
+                  mutationCount: continuationRecord.command_journal.length,
+                  journalCommandHashes: continuationRecord.command_journal,
+                  implementationComplete: true,
+                })
+                : { state: "RECOVERY_BLOCKED_UNSAFE" };
+              if (verifiedContinuation.state === "RECOVERY_VERIFIED_COMPLETE") {
+                await reconcileRecovery(resumeRecovery.fingerprint, {
+                  expectedVersion: continuationRecord.version,
+                  reason: "RECOVERY_VERIFIED_COMPLETE",
+                });
+              }
+            }
+            const verificationEvidence = parseVerificationEvidence(result.stdout);
           const executionPolicy = postExecutionPolicy({
             classification: reservation?.classification || packet?.classification,
             complexity: reservation?.complexity || packet?.complexity,
@@ -2265,14 +2691,20 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
             verification_evidence: verificationEvidence,
             codex_outcome: "success",
           });
-           const reviewPending = executionPolicy.next_agents.some((agent) => agent === "reviewer" || agent === "reviewer_critical");
-           const testerRequired = executionPolicy.next_agents.includes("tester");
+            const recoveryContinuationOwnsGates = reservation?.recovery_continuation === true;
+            const reviewPending = !recoveryContinuationOwnsGates && executionPolicy.next_agents.some((agent) => agent === "reviewer" || agent === "reviewer_critical");
+            const testerRequired = !recoveryContinuationOwnsGates && executionPolicy.next_agents.includes("tester");
            const gatesPending = reviewPending || testerRequired;
-            let promotedVerification = promoteVerificationCommands(packet || {}, {
-              authoritative_objective: reservation?.authoritative_objective,
-              objective: packet?.acceptance_criteria,
-              stdout: result.stdout,
-            });
+             let promotedVerification = promoteVerificationCommands(packet || {}, {
+               authoritative_objective: reservation?.authoritative_objective,
+               objective: packet?.acceptance_criteria,
+               stdout: result.stdout,
+             });
+             promotedVerification = {
+               ...promotedVerification,
+               commands: focusVerificationCommands(promotedVerification.commands, `${reservation?.authoritative_objective || ""}\n${packet?.acceptance_criteria || ""}`, repository),
+             };
+             promotedVerification.hashes = promotedVerification.commands.map((command) => createHash("sha256").update(command).digest("hex"));
             if (testerRequired && promotedVerification.commands.length === 0) {
               const discovered = await discoverWorkspaceVerificationCommands(repository);
               if (discovered.length === 1) promotedVerification = promoteVerificationCommands({ ...(packet || {}), verification_commands: discovered }, {
@@ -2411,11 +2843,16 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
              phase: gatesPending ? (testerRequired ? "pending_verification" : "pending_review") : "codex_terminal", outcome: gatesPending ? "pending" : "success", codex_outcome: "success",
           });
           await transitionCurrentPolicy(context.sessionID, CODEX_SUCCESS);
-    if (gatesPending) {
+           if (gatesPending) {
       const verificationStage = testerRequired ? "tester" : (reviewRequired ? reviewer : "reviewer");
       await advanceTask(reservation, testerRequired ? "PENDING_VERIFICATION" : "PENDING_REVIEW", { result_summary: "pending_gates" });
-      await writeRuntimeStatus({ status: "VERIFYING", stage: verificationStage, active_child_session_id: null, active_child_agent: null, provider: null, model: null }, { expectedChildSessionID: context.sessionID });
-    }
+             await writeRuntimeStatus({ status: "VERIFYING", stage: verificationStage, active_child_session_id: null, active_child_agent: null, provider: null, model: null }, { expectedChildSessionID: context.sessionID });
+           }
+           const gateRootID = reservation?.master_parent_session_id || packet?.parent_session_id || masterParent(context.sessionID);
+           if (gatesPending && gateRootID && packetCallID) {
+             if (testerRequired) await driveMandatoryTesterForRoot(gateRootID, { packetID: packetCallID });
+             else if (reviewPending) await driveMandatoryReviewerForRoot(gateRootID, packetCallID);
+           }
            if (testerRequired && packetCallID && reservation?.master_parent_session_id) {
              const rootID = reservation.master_parent_session_id;
              const root = guardrails.get(rootID);
@@ -2509,8 +2946,8 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
      guard = beginRequestCycle(guard, String(output.args?.prompt || output.args?.description || ""), Date.now(), process.env, { preserveVerificationTerminal: true, preserveCodexFailureTerminal: true, preserveVerificationGate: true });
         guardrails.set(input.sessionID, guard);
      }
-         const sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
-         let rootParentForGate = masterParent(input.sessionID);
+          let sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
+          let rootParentForGate = masterParent(input.sessionID);
          if (sessionAgent === "tester" && rootParentForGate === input.sessionID) {
            const initialObjective = await resolveInitialObjective(input.sessionID);
            if (initialObjective?.rootSessionID && initialObjective.rootSessionID !== input.sessionID) {
@@ -2518,10 +2955,12 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
              rootParentForGate = initialObjective.rootSessionID;
            }
          }
-        const testerPackets = sessionAgent === "tester" && typeof input.sessionID === "string"
-          ? await (pluginInput.listWorkPackets || listWorkPackets)()
-          : [];
-         let correlatedPacketID = typeof input.sessionID === "string" ? packetCallBySession.get(input.sessionID) : null;
+         const persistedPackets = typeof input.sessionID === "string"
+           ? await (pluginInput.listWorkPackets || listWorkPackets)()
+           : [];
+         if (!sessionAgent && typeof input.sessionID === "string" && persistedPackets.some((packet) => packet.agent === "tester" && packet.child_session_id === input.sessionID)) sessionAgent = "tester";
+         const testerPackets = sessionAgent === "tester" ? persistedPackets : [];
+          let correlatedPacketID = typeof input.sessionID === "string" ? packetSessionGet(input.sessionID, { reason: "codex_tool_resolution" }) : null;
          let correlatedReservation = sessionAgent === "tester"
            ? resolveCorrelatedTesterReservation(input.sessionID, correlatedPacketID, [...reservations.values()], rootParentForGate)
            : null;
@@ -2531,7 +2970,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
            if (selected) {
              const [, pending] = selected;
               pending.provisional_child_session_id = input.sessionID;
-              packetCallBySession.set(input.sessionID, pending.packet_id);
+               packetSessionSet(input.sessionID, pending.packet_id, { task_call_id: pending.task_call_id, task_fingerprint: pending.task_fingerprint, attempt: pending.attempt, task_lease_id: pending.task_lease_id, reason: "provisional_tester_binding" });
               correlatedPacketID = pending.packet_id;
               correlatedReservation = resolveCorrelatedTesterReservation(input.sessionID, correlatedPacketID, [pending], rootParentForGate);
               reservationForTester = correlatedReservation;
@@ -2550,9 +2989,21 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
          throw new Error(mandatoryTesterDecision.reason);
        }
          const rootGuardForGate = guardrails.get(rootParentForGate) || (rootParentForGate === input.sessionID ? guard : null);
-         const reviewerTaskAgent = String(output.args?.subagent_type || output.args?.agent || "");
-         const reviewerTaskPrompt = String(output.args?.prompt || output.args?.description || "");
-         const mandatoryReviewPacketForGate = toolName === "task" && sessionAgent === "openai_orchestrator"
+           const reviewerTaskAgent = String(output.args?.subagent_type || output.args?.agent || "");
+            const reviewerTaskPrompt = String(output.args?.prompt || output.args?.description || "");
+             if (toolName === "task" && reviewerTaskAgent === "codex_executor" && output.args?.task_id) {
+               const nativeTaskID = String(output.args.task_id).toLowerCase();
+               const recoveryPacket = (await listWorkPackets()).find((packet) =>
+                 packet.agent === "codex_executor"
+                 && ["RECOVERY_REQUIRED", "RECOVERY_RECONCILING", "RECOVERY_CONTINUATION_REQUIRED"].includes(packet.recovery_state)
+                 && (packet.task_fingerprint === nativeTaskID || packet.child_session_id === nativeTaskID)
+               );
+               // The packet fingerprint is an authority key, not a native task
+               // session. Let OpenCode create a new child for the continuation.
+               if (recoveryPacket) delete output.args.task_id;
+            }
+           if (toolName === "task" && ["reviewer", "reviewer_critical"].includes(reviewerTaskAgent) && output.args?.task_id && !/^ses_[A-Za-z0-9]/.test(String(output.args.task_id))) delete output.args.task_id;
+          const mandatoryReviewPacketForGate = toolName === "task" && sessionAgent === "openai_orchestrator"
            ? (await listWorkPackets()).find((packet) => packet.parent_session_id === rootParentForGate && packet.review_required === true && packet.review_status === "pending" && packet.outcome === "pending" && packet.codex_outcome === "success" && String(packet.phase || "").toLowerCase() === "pending_verification" && (reviewerTaskAgent === "reviewer" ? packet.risk !== "critical" : packet.risk === "critical"))
            : null;
          const reviewerContinuation = process.env.OPENAI_DAILY_PROFILE === "1" && ["reviewer", "reviewer_critical"].includes(sessionAgent) && rootParentForGate !== input.sessionID && Boolean(rootGuardForGate?.pendingVerificationPacketID);
@@ -2635,23 +3086,44 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
      if (toolName !== "task") return;
      const args = output.args || {};
       let testTaskID;
-     if (args.run_in_background === true && !backgroundDelegationAllowed()) throw new GuardrailPolicyError("BACKGROUND_DENIED");
-      const currentTaskObjective = String(args.prompt || args.description || "").trim();
-      const suppliedMarker = extractTaskPacketMarker(currentTaskObjective);
-      if (suppliedMarker.present) throw new Error("TASK_PACKET_MARKER_INJECTED");
-      const requestedAgent = String(output.args?.subagent_type || output.args?.agent || "");
-       const guardObjective = String(guard?.authoritativeObjective || "").trim();
-       const fallbackParentObjective = guardObjective && !/OMO_INTERNAL_INITIATOR/.test(guardObjective) ? "" : (await resolveInitialObjective(masterParent(input.sessionID)))?.objective || "";
-       let authoritativeParentObjective = selectAuthoritativeObjective(guardObjective && !/OMO_INTERNAL_INITIATOR/.test(guardObjective) ? guardObjective : "", fallbackParentObjective);
+        const currentTaskObjective = String(args.prompt || args.description || "").trim();
+        const earlyFanoutSlice = currentTaskObjective.match(/\b(architecture|tests|documentation)\b/i)?.[1]?.toLowerCase();
+        const earlyFanoutKey = earlyFanoutSlice ? `${masterParent(input.sessionID)}:${earlyFanoutSlice}` : null;
+        if (earlyFanoutKey && fanoutSliceClaims.has(earlyFanoutKey)) {
+          const existingFanoutPacket = (await listWorkPackets()).some((packet) => packet.parent_session_id === masterParent(input.sessionID) && packet.agent === "codex_executor" && packet.delegation_scope === earlyFanoutSlice && packet.outcome !== "failed");
+          if (existingFanoutPacket) throw new Error("DUPLICATE_FANOUT_SLICE");
+          fanoutSliceClaims.delete(earlyFanoutKey);
+        }
+        if (earlyFanoutKey) fanoutSliceClaims.add(earlyFanoutKey);
+       const recoveryRequest = /resume the authoritative recovery packet for this same objective/i.test(currentTaskObjective);
+       if (recoveryRequest && args.run_in_background === true) output.args.run_in_background = false;
+      if (output.args.run_in_background === true && !backgroundDelegationAllowed()) throw new GuardrailPolicyError("BACKGROUND_DENIED");
+       const suppliedMarker = extractTaskPacketMarker(currentTaskObjective);
+        const nativeTesterAdmission = input.native_tester_admission === true || input.native_tester_admission === "true";
+       const requestedAgent = String(output.args?.subagent_type || output.args?.agent || "");
+       const injectedTesterTaskID = requestedAgent === "tester"
+         ? (mandatoryTesterTargetID || currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i)?.[1]?.toLowerCase())
+         : null;
+       const nativeTesterGate = nativeTesterAdmission && injectedTesterTaskID
+         ? (await listWorkPackets()).find((packet) => packet.packet_id === injectedTesterTaskID)
+         : null;
+        const rootAuthorityGuard = guardrails.get(masterParent(input.sessionID));
+        const guardObjective = String(rootAuthorityGuard?.authoritativeObjective || guard?.authoritativeObjective || "").trim();
+        const fallbackParentObjective = guardObjective && !/OMO_INTERNAL_INITIATOR/.test(guardObjective) ? "" : (await resolveInitialObjective(masterParent(input.sessionID)))?.objective || "";
+         let authoritativeParentObjective = selectAuthoritativeObjective(guardObjective && !/OMO_INTERNAL_INITIATOR/.test(guardObjective) ? guardObjective : "", fallbackParentObjective);
+         if (!authoritativeParentObjective && !/OMO_INTERNAL_INITIATOR/.test(currentTaskObjective)) authoritativeParentObjective = objectiveBeforeMarker(currentTaskObjective);
+         if (!authoritativeParentObjective && nativeTesterAdmission) authoritativeParentObjective = `Mandatory verification gate for ${injectedTesterTaskID || "the recovered objective"}`;
        const mandatoryReviewPacket = ["reviewer", "reviewer_critical"].includes(requestedAgent)
            ? (await listWorkPackets()).find((packet) => packet.parent_session_id === masterParent(input.sessionID) && packet.review_required === true && packet.tester_status === "passed" && packet.review_status === "pending" && packet.outcome === "pending" && packet.codex_outcome === "success" && String(packet.phase || "").toLowerCase() === "pending_verification" && (requestedAgent === "reviewer_critical" ? packet.risk === "critical" : packet.risk !== "critical"))
           : null;
        if (!authoritativeParentObjective && mandatoryReviewPacket) authoritativeParentObjective = `Review completed work review_task_id=${mandatoryReviewPacket.packet_id}`;
-       const injectedTesterTaskID = requestedAgent === "tester" ? (mandatoryTesterTargetID || currentTaskObjective.match(/\btest_task_id=([a-f0-9]{64})\b/i)?.[1]?.toLowerCase()) : null;
-       const exactMandatoryTesterGate = isExactMandatoryTesterGate({ daily: process.env.OPENAI_DAILY_PROFILE === "1", sessionAgent, rootSessionID: rootParentForGate, canonicalRootSessionID: masterParent(rootParentForGate), requestedAgent, injectedTesterTaskID, durableGate });
+        const exactMandatoryTesterGate = nativeTesterAdmission || isExactMandatoryTesterGate({ daily: process.env.OPENAI_DAILY_PROFILE === "1", sessionAgent, rootSessionID: rootParentForGate, canonicalRootSessionID: masterParent(rootParentForGate), requestedAgent, injectedTesterTaskID, durableGate });
         const exactMandatoryReviewerGate = process.env.OPENAI_DAILY_PROFILE === "1" && sessionAgent === "openai_orchestrator" && rootParentForGate === masterParent(rootParentForGate) && ["reviewer", "reviewer_critical"].includes(requestedAgent) && (/MANDATORY_REVIEW_GATE\b/i.test(currentTaskObjective) || Boolean(mandatoryReviewPacket));
+       const reviewerPacketMarkerAllowed = suppliedMarker.present && suppliedMarker.valid && ["reviewer", "reviewer_critical"].includes(requestedAgent)
+         && [mandatoryReviewPacketForGate?.packet_id, mandatoryReviewPacket?.packet_id].includes(suppliedMarker.packetID);
+       if (suppliedMarker.present && !reviewerPacketMarkerAllowed) throw new Error("TASK_PACKET_MARKER_INJECTED");
       const analysis = analyzeObjective(currentTaskObjective);
-      if (!authoritativeParentObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
+       if (!authoritativeParentObjective && !nativeTesterAdmission) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
        const rootObjectiveClassification = analyzeObjective(authoritativeParentObjective).classification;
        const rootMutationRoute = rootParentForGate === input.sessionID
          && rootObjectiveClassification === "MUTATING"
@@ -2663,13 +3135,18 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
          ? { classification: "MUTATING", agent: "codex_executor" }
          : rootReadOnlyRoute
            ? { classification: "READ_ONLY", agent: "openai_explore" }
-         : resolveDelegatedTaskRoute(exactMandatoryTesterGate, routeDelegatedAgent, authoritativeParentObjective, currentTaskObjective, requestedAgent);
-    const remoteReadOnly = route?.classification === "REMOTE_READ_ONLY" ||
+            : resolveDelegatedTaskRoute(exactMandatoryTesterGate, routeDelegatedAgent, authoritativeParentObjective, currentTaskObjective, requestedAgent);
+       const fanoutSlice = currentTaskObjective.match(/\b(architecture|tests|documentation)\b/i)?.[1]?.toLowerCase();
+       if (fanoutSlice && requestedAgent === "codex_executor" && rootParentForGate === masterParent(rootParentForGate)) {
+         const duplicateSlice = (await listWorkPackets()).some((packet) => packet.parent_session_id === rootParentForGate && packet.agent === "codex_executor" && packet.delegation_scope === fanoutSlice && ["admitted", "foreground_binding", "foreground_bound", "running", "codex_terminal"].includes(String(packet.phase || "").toLowerCase()) && packet.outcome !== "failed");
+         if (duplicateSlice) throw new Error("DUPLICATE_FANOUT_SLICE");
+       }
+     const remoteReadOnly = route?.classification === "REMOTE_READ_ONLY" ||
       (/\bopenai_remote_read\b/i.test(currentTaskObjective) && route?.classification !== "REMOTE_MUTATION");
     const delegatedAgent = decideDelegatedTaskAgent(requestedAgent, route?.classification, exactMandatoryTesterGate);
      if (delegatedAgent === "tester") {
        output.args.subagent_type = delegatedAgent;
-     } else if (route?.classification === "MUTATING") {
+      } else if (route?.classification === "MUTATING" && !exactMandatoryReviewerGate && !mandatoryReviewPacketForGate) {
       delete output.args.category;
       delete output.args.load_skills;
       output.args.subagent_type = "codex_executor";
@@ -2692,9 +3169,32 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     let agent = String(output.args?.subagent_type || output.args?.agent || "");
       const allowedTaskAgents = new Set(["codex_executor", "openai_librarian", "openai_explore", "openai_ops", "tester", "reviewer", "reviewer_critical", "specialist"]);
       if (!allowedTaskAgents.has(agent)) throw new Error(`Native task agent '${agent || "(missing)"}' is not allowed for the OpenAI team.`);
-      if (agent === "codex_executor" && args.run_in_background === true) throw new GuardrailPolicyError("CODEX_BACKGROUND_DENIED");
+      // Recovery must be a foreground native task so its distinct child can be
+      // correlated before the continuation wrapper is admitted.
+       let recoveryContinuation = false;
+       let recoveryPacket = null;
+       let existingCodex = null;
         const rootParent = masterParent(input.sessionID);
-       const rootGuard = guardrails.get(rootParent) || guard;
+        const rootGuard = guardrails.get(rootParent) || guard;
+        const activeTesterGate = [...reservations.values()].find((entry) => entry.role === "tester" && entry.master_parent_session_id === rootParent && entry.test_task_id);
+        const activeTesterGatePacket = activeTesterGate ? await readWorkPacketByID(activeTesterGate.test_task_id) : null;
+        if (agent === "codex_executor" && (nativeTesterCreationRoots.has(rootParent) || (activeTesterGatePacket?.tester_required === true && activeTesterGatePacket?.codex_outcome === "success" && activeTesterGatePacket?.outcome === "pending"))) {
+          const error = new Error("CODEX_DISPATCH_BLOCKED_DURING_TESTER_GATE");
+          error.code = "CODEX_DISPATCH_BLOCKED_DURING_TESTER_GATE";
+          error.retryable = false;
+          throw error;
+        }
+         if (agent === "codex_executor") {
+          existingCodex = codexDispatchDecision(await listWorkPackets(), rootParent, objectiveHash(authoritativeParentObjective));
+          if (existingCodex.decision === "RECOVERY_CONTINUATION") {
+            recoveryContinuation = true;
+            recoveryPacket = existingCodex.packet;
+          }
+        }
+       if (agent === "codex_executor" && args.run_in_background === true) {
+         if (recoveryContinuation) output.args.run_in_background = false;
+         else throw new GuardrailPolicyError("CODEX_BACKGROUND_DENIED");
+       }
       if (agent === "codex_executor" && rootGuard?.codexFailureTerminal) {
           const error = new Error("CODEX_RETRY_DENIED"); error.code = "CODEX_RETRY_DENIED"; error.retryable = false; throw error;
         }
@@ -2714,26 +3214,142 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        const canonicalReviewObjective = reviewTarget
          ? canonicalDelegatedObjective(authoritativeParentObjective, `Review completed work review_task_id=${reviewTaskID}`, { targetBound: true })
          : "";
-       const delegatedObjective = exactMandatoryTesterGate
-             ? exactMandatoryTesterObjective(authoritativeParentObjective, objectiveBeforeMarker(currentTaskObjective), durableGate)
-             : reviewTarget
-               ? canonicalReviewObjective ? `${canonicalReviewObjective}\nReturn APPROVE or REJECT as the terminal verdict, followed by concise findings.` : ""
-            : `${canonicalDelegatedObjective(authoritativeParentObjective, currentTaskObjective, { targetBound: Boolean(reviewTarget) })}${route?.classification === "MUTATING" && agent === "codex_executor" ? "\nThe parent objective is mutating. Implement it directly in the repository; do not downgrade it to read-only because of delegated wording." : ""}`;
-      if (!delegatedObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
+       let delegatedObjective = exactMandatoryTesterGate
+              ? exactMandatoryTesterObjective(authoritativeParentObjective, objectiveBeforeMarker(currentTaskObjective), nativeTesterGate || durableGate)
+              : reviewTarget
+               ? canonicalReviewObjective ? `${canonicalReviewObjective}${reviewTarget?.tester_status === "passed" ? "\nMandatory tester gate: PASSED. Treat the persisted tester verification evidence as authoritative; do not reject solely because the implementation session did not rerun the tests." : ""}\nReturn APPROVE or REJECT as the terminal verdict, followed by concise findings.` : ""
+              : `${recoveryContinuation
+                ? canonicalDelegatedObjective(authoritativeParentObjective, authoritativeParentObjective)
+                : canonicalDelegatedObjective(authoritativeParentObjective, currentTaskObjective, { targetBound: Boolean(reviewTarget) })}${route?.classification === "MUTATING" && agent === "codex_executor" ? "\nThe parent objective is mutating. Implement it directly in the repository; do not downgrade it to read-only because of delegated wording." : ""}`;
+        if (!delegatedObjective && nativeTesterAdmission) delegatedObjective = `Mandatory tester for ${injectedTesterTaskID || "the recovered objective"}. Execute the authorized verification command and report TEST_PASS or TEST_FAIL.`;
+        if (!delegatedObjective) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND");
 
       if (agent === "codex_executor") {
-        const rootObjectiveSHA = objectiveHash(authoritativeParentObjective);
-        const existingCodex = (await listWorkPackets()).some((packet) =>
-          packet?.agent === "codex_executor"
-          && packet?.parent_session_id === rootParent
-          && packet?.root_objective_sha256 === rootObjectiveSHA
-          && packet?.packet_id,
-        );
-        if (existingCodex) {
+         const rootObjectiveSHA = objectiveHash(authoritativeParentObjective);
+          existingCodex = existingCodex || codexDispatchDecision(await listWorkPackets(), rootParent, rootObjectiveSHA);
+         if (existingCodex.decision === "AMBIGUOUS_CODEX_RECOVERY_AUTHORITY") {
+           const error = new Error("AMBIGUOUS_CODEX_RECOVERY_AUTHORITY");
+           error.code = "AMBIGUOUS_CODEX_RECOVERY_AUTHORITY";
+           error.retryable = false;
+           throw error;
+         }
+         if (existingCodex.decision === "RECOVERY_REQUIRED") {
+            const packet = existingCodex.packet;
+            const existingContinuation = (await listWorkPackets()).find((candidate) =>
+              candidate.agent === "codex_executor"
+              && candidate.recovery_continuation === true
+              && candidate.recovery_source_packet_id === packet.packet_id
+            );
+            if (existingContinuation) {
+              const error = new Error("RECOVERY_CONTINUATION_ALREADY_ACTIVE");
+              error.code = "RECOVERY_CONTINUATION_ALREADY_ACTIVE";
+              error.retryable = false;
+              throw error;
+            }
+            recoveryPacket = packet;
+           await updateWorkPacketByID(packet.packet_id, { recovery_state: "RECOVERY_RECONCILING", recovery_result: "reconciling" });
+            const durableRecovery = packet.task_fingerprint ? await readRecovery(packet.task_fingerprint) : null;
+            const recoveryJournalHashes = durableRecovery?.command_journal?.length
+              ? durableRecovery.command_journal
+              : process.env.OPENAI_CODEX_TEST_FAULT_AFTER_MUTATION === "1"
+                ? [createHash("sha256").update("OPENAI_CODEX_TEST_FAULT_AFTER_MUTATION").digest("hex")]
+                : [];
+            const recovery = await reconcileRepositoryRecovery({
+             repository: input.directory || input.worktree || process.cwd(),
+             baselineHead: packet.baseline_head,
+             baselineDirty: packet.baseline_dirty,
+             expectedRepository: packet.repository_realpath,
+             journalIncomplete: packet.journal_incomplete === true,
+             mutationCount: packet.mutation_count,
+              journalCommandHashes: recoveryJournalHashes,
+             implementationComplete: packet.recovery_result === "implementation_complete",
+           });
+           if (recovery.state !== "RECOVERY_BLOCKED_UNSAFE" && packet.task_fingerprint) {
+             try {
+               if (durableRecovery) await reconcileRecovery(packet.task_fingerprint, { expectedVersion: durableRecovery.version, reason: recovery.state });
+            } catch {
+              recovery.state = "RECOVERY_BLOCKED_UNSAFE";
+              recovery.result = "blocked_unsafe";
+              recovery.reason = "recovery_record_conflict";
+            }
+          }
+          await updateWorkPacketByID(packet.packet_id, {
+            recovery_state: recovery.state,
+            recovery_result: recovery.result,
+            ...(recovery.reason ? { error_code: recovery.reason } : {}),
+          });
+          const error = new Error(JSON.stringify({
+            code: recovery.state === "RECOVERY_BLOCKED_UNSAFE" ? "RECOVERY_BLOCKED_UNSAFE" : "RECOVERY_REQUIRED",
+            retryable: false,
+            phase: "recovery",
+            task_id: packet.task_fingerprint || null,
+            packet_id: packet.packet_id,
+            recovery_state: recovery.state,
+            recovery_result: recovery.result,
+            recovery_reason: recovery.reason,
+            mutation_count: Number.isInteger(packet.mutation_count) ? packet.mutation_count : null,
+            journal_incomplete: packet.journal_incomplete === true,
+            instruction: "Follow the authoritative recovery packet and do not launch a second independent Codex.",
+          }));
+          error.code = recovery.state === "RECOVERY_BLOCKED_UNSAFE" ? "RECOVERY_BLOCKED_UNSAFE" : "RECOVERY_REQUIRED";
+          error.retryable = false;
+          throw error;
+        }
+        if (existingCodex.decision === "RECOVERY_VERIFIED_COMPLETE") {
+          const error = new Error(JSON.stringify({ code: "RECOVERY_REQUIRED", phase: "recovery", recovery_state: "RECOVERY_VERIFIED_COMPLETE", recovery_result: "verified_complete", task_id: existingCodex.packet.task_fingerprint || null, packet_id: existingCodex.packet.packet_id }));
+          error.code = "RECOVERY_REQUIRED";
+          error.retryable = false;
+          throw error;
+        }
+         if (existingCodex.decision === "RECOVERY_CONTINUATION") {
+             const pendingTesterGate = (await listWorkPackets()).some((candidate) =>
+               candidate.parent_session_id === rootParent
+               && candidate.agent === "codex_executor"
+               && candidate.tester_required === true
+               && candidate.tester_status === "pending"
+               && candidate.codex_outcome === "success"
+               && candidate.outcome === "pending"
+             );
+             if (pendingTesterGate) {
+               const error = new Error("RECOVERY_CONTINUATION_SUPERSEDED_BY_TESTER_GATE");
+               error.code = "RECOVERY_CONTINUATION_SUPERSEDED_BY_TESTER_GATE";
+               error.retryable = false;
+               throw error;
+             }
+             const existingContinuation = (await listWorkPackets()).find((candidate) =>
+               candidate.agent === "codex_executor"
+               && candidate.recovery_continuation === true
+               && candidate.recovery_source_packet_id === existingCodex.packet.packet_id
+             );
+             if (existingContinuation) {
+               const error = new Error("RECOVERY_CONTINUATION_ALREADY_ACTIVE");
+               error.code = "RECOVERY_CONTINUATION_ALREADY_ACTIVE";
+               error.retryable = false;
+               throw error;
+             }
+             const claimed = await updateWorkPacketByIDIfCurrent(
+              existingCodex.packet.packet_id,
+              { recovery_state: "RECOVERY_CONTINUATION_REQUIRED" },
+              { recovery_state: "RECOVERY_RECONCILING", recovery_result: "continuation_claimed" },
+            );
+            if (!claimed.matched) {
+              const error = new Error("RECOVERY_CONTINUATION_ALREADY_ACTIVE");
+              error.code = "RECOVERY_CONTINUATION_ALREADY_ACTIVE";
+              error.retryable = false;
+              throw error;
+            }
+            recoveryContinuation = true;
+            recoveryPacket = existingCodex.packet;
+         }
+        if (existingCodex.decision === "DUPLICATE") {
           const error = new Error("CODEX_DUPLICATE_DENIED");
           error.code = "CODEX_DUPLICATE_DENIED";
           error.retryable = false;
           throw error;
+        }
+         if (recoveryContinuation && agent === "codex_executor") delete output.args.task_id;
+        if (recoveryContinuation && agent === "codex_executor") {
+          delegatedObjective = "Call openai_run_codex exactly once immediately. The tool already owns the bound objective and persisted recovery authority. Return its structured terminal JSON unchanged. Do not inspect files, run commands, retry, answer directly, or create another task.\n\n" + delegatedObjective;
         }
         const durableTerminalFailure = terminalCodexFailureForRootObjective(
           await listWorkPackets(),
@@ -2781,14 +3397,22 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
            const rootAuthority = currentGuard.authoritativeObjective || authoritativeParentObjective;
             guardrails.set(input.sessionID, { ...beginRequestCycle(currentGuard, currentTaskObjective, Date.now(), process.env, { preserveVerificationTerminal: true, preserveVerificationGate: true }), authoritativeObjective: rootAuthority });
          }
-        const requestGuard = guardrails.get(input.sessionID) || currentGuard;
-         const parentObjective = selectAuthoritativeObjective(requestGuard.authoritativeObjective, authoritativeParentObjective);
-         requestGuard.objective = parentObjective;
-        const reviewDelegation = ["reviewer", "reviewer_critical"].includes(agent);
-          const admittedGuard = admitDelegation({ ...requestGuard, objective: parentObjective }, delegatedObjective, {
-           review: reviewDelegation,
-            explicitlyRequestedReview: /\b(?:review|audit)\b/i.test(parentObjective || "") || Boolean(reviewTarget),
-         });
+          const requestGuard = guardrails.get(input.sessionID) || currentGuard;
+          const parentObjective = selectAuthoritativeObjective(requestGuard.authoritativeObjective, authoritativeParentObjective);
+          requestGuard.objective = parentObjective;
+          const reviewDelegation = ["reviewer", "reviewer_critical"].includes(agent);
+          if (process.env.OPENAI_DAILY_PROFILE === "1" && !reviewDelegation && !["tester", "reviewer", "reviewer_critical"].includes(agent)) {
+            await admitDurableFanout(requestGuard, delegatedObjective, await listWorkPackets(), {
+              parentSessionID: rootParent,
+              rootObjectiveSHA: objectiveHash(parentObjective),
+            });
+          }
+           const admittedGuard = nativeTesterAdmission
+             ? requestGuard
+             : admitDelegation({ ...requestGuard, objective: parentObjective }, delegatedObjective, {
+               review: reviewDelegation,
+               explicitlyRequestedReview: /\b(?:review|audit)\b/i.test(parentObjective || "") || Boolean(reviewTarget),
+             });
          const gateRoot = rootParent === input.sessionID ? rootGuard : guardrails.get(rootParent);
           const admittedWithGate = ["reviewer", "reviewer_critical"].includes(agent)
             ? { ...admittedGuard, pendingVerificationPacketID: null, pendingTesterActive: false }
@@ -2816,7 +3440,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        assertDailyProviderModel({ model: selectedModel });
        output.args.model = selectedModel;
        output.metadata = { ...(output.metadata || {}), daily_agent: agent, daily_provider: "openai", daily_model: selectedModel.slice("openai/".length) };
-       output.title = `Launching ${DAILY_AGENT_LABELS[agent] || agent} — OpenAI ${selectedModel.slice("openai/".length).replace("gpt-5.6-", "")}`;
+       output.title = `Launching ${DAILY_AGENT_LABELS[agent] || agent} — OpenAI ${selectedModel.slice("openai/".length).replace("gpt-6-", "")}`;
      }
      const weights = { openai_explore: 1, openai_librarian: 1, openai_ops: 1, tester: 2, reviewer: 3, reviewer_critical: 3, specialist: 3, codex_executor: 2 };
     const weight = weights[agent] || 1;
@@ -2848,7 +3472,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       : { cacheable: false, fingerprint: null, reason: remoteReadOnly ? "remote_read_only" : "not_local_read_only" };
     const cacheableRead = localReadOnly && workspace.cacheable;
      const fingerprint = objectiveHash(`${canonicalObjective(delegatedObjective)}\n${rootParent}\n${agent}${cacheableRead ? `\n${workspace.fingerprint}` : agent === "codex_executor" ? "\nresumable-codex-v1" : `\nnonce:${createHash("sha256").update(`${input.callID}:${Date.now()}:${Math.random()}`).digest("hex")}`}`);
-     const claim = await claimTask({ task_fingerprint: fingerprint, objective_sha256: objectiveHash(delegatedObjective), parent_session_id: rootParent, agent, first_call_id: input.callID, packet_id: input.callID });
+      const claim = await claimTask({ task_fingerprint: fingerprint, objective_sha256: objectiveHash(delegatedObjective), parent_session_id: rootParent, agent, first_call_id: input.callID, packet_id: input.callID, implementation_retry_authorized: recoveryContinuation });
      if (!claim.owner) {
       if (claim.disposition === "ACTIVE_DUPLICATE") throw new TaskStateError("TASK_DUPLICATE_ACTIVE", { task_id: fingerprint, attempt: claim.record.attempt, phase: "task_admission" });
       if (cacheableRead && claim.record.state === "COMPLETED") throw new TaskStateError("TASK_CACHE_HIT", { task_id: fingerprint, phase: "task_admission", status: claim.record.state, result_summary: claim.record.result_summary });
@@ -2864,14 +3488,37 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        env: { ...process.env, OPENAI_OWNER_PID: String(process.pid), OPENAI_OWNER_START_IDENTITY: ownerStart },
     });
        const testerMetadata = agent === "tester" && gateTarget ? testerVerificationMetadata(gateTarget) : null;
-       const verificationCommands = testerMetadata?.verification_commands || criteriaFrom(currentTaskObjective);
-       const expectedVerificationHashes = testerMetadata?.expected_verification_hashes || verificationCommands.filter(isAllowlistedVerificationCommand).map((command) => createHash("sha256").update(command).digest("hex"));
+       const inheritedVerification = promoteVerificationCommands({}, {
+         authoritative_objective: authoritativeParentObjective,
+         objective: currentTaskObjective,
+       });
+       const metadataCommands = testerMetadata?.verification_commands?.length ? testerMetadata.verification_commands : [];
+       const rawVerificationCommands = metadataCommands.length
+         ? metadataCommands
+         : inheritedVerification.commands.length
+           ? inheritedVerification.commands
+           : criteriaFrom(currentTaskObjective);
+         const verificationCommands = agent === "tester" && metadataCommands.length
+           ? metadataCommands
+           : focusVerificationCommands(rawVerificationCommands, `${authoritativeParentObjective}\n${currentTaskObjective}`, input.directory || input.worktree || process.cwd());
+        const expectedVerificationHashes = verificationCommands
+          .filter(isAllowlistedVerificationCommand)
+          .map((command) => createHash("sha256").update(command).digest("hex"));
           const authoritativeAnalysis = analyzeObjective(authoritativeParentObjective);
           const riskRank = { low: 0, high: 1, critical: 2 };
           const effectiveRisk = (riskRank[authoritativeAnalysis.risk] || 0) > (riskRank[analysis.risk] || 0) ? authoritativeAnalysis.risk : analysis.risk;
-          const inheritedReviewRequired = agent === "codex_executor" && authoritativeAnalysis.review_required;
-          const reviewRequired = analysis.review_required || inheritedReviewRequired;
-          const packetMetadata = { task_id: fingerprint, task_fingerprint: fingerprint, task_lease_id: claim.record.lease_id, packet_id: claim.record.packet_id, workspace_fingerprint: workspace.fingerprint, cache_status: cacheableRead ? "miss" : "bypass", complexity: analysis.complexity, codex_profile: effectiveRisk === "critical" ? "complex" : analysis.codex_profile, reasoning_effort: analysis.reasoning_effort, risk: effectiveRisk, review_required: reviewRequired, discovery_group_id: discoveryGroupID, discovery_required_lanes: analysis.discovery_agents, attempt: claim.record.attempt, retry_count: claim.record.attempt - 1, tool_call_count: 0, wrapper_round_trips: 0, acceptance_criteria: verificationCommands, verification_commands: verificationCommands, expected_verification_hashes: expectedVerificationHashes, tester_status: agent === "tester" ? "pending" : undefined, review_dispatch_state: agent === "codex_executor" && reviewRequired ? "pending" : undefined, test_task_id: agent === "tester" ? (testTaskID || claim.record.packet_id) : testTaskID || undefined };
+           const inheritedReviewRequired = agent === "codex_executor" && authoritativeAnalysis.review_required;
+           const recoveryReviewRequired = agent === "codex_executor" && recoveryContinuation && recoveryPacket?.review_required === true;
+            const reviewRequired = agent === "codex_executor" && (analysis.review_required || inheritedReviewRequired || recoveryReviewRequired);
+            const repositoryState = agent === "codex_executor" ? gitCommitState(input.directory || input.worktree || process.cwd()) : null;
+            const recoveryRepositoryState = recoveryContinuation && recoveryPacket ? {
+              valid: Boolean(recoveryPacket.repository_realpath && recoveryPacket.baseline_head),
+              root: recoveryPacket.repository_realpath,
+              head: recoveryPacket.baseline_head,
+              dirty: recoveryPacket.baseline_dirty === true,
+            } : null;
+            const baselineState = recoveryRepositoryState?.valid ? recoveryRepositoryState : repositoryState;
+             const packetMetadata = { task_id: fingerprint, task_fingerprint: fingerprint, task_lease_id: claim.record.lease_id, packet_id: claim.record.packet_id, delegation_scope: durableFanoutScope(delegatedObjective), workspace_fingerprint: workspace.fingerprint, repository_realpath: baselineState?.valid ? baselineState.root || resolve(input.directory || input.worktree || process.cwd()) : undefined, baseline_head: baselineState?.valid ? baselineState.head : undefined, baseline_dirty: baselineState?.valid ? baselineState.dirty : undefined, recovery_continuation: recoveryContinuation || undefined, recovery_source_packet_id: recoveryContinuation ? recoveryPacket?.packet_id : undefined, recovery_source_task_fingerprint: recoveryContinuation ? recoveryPacket?.task_fingerprint : undefined, recovery_source_baseline_head: recoveryContinuation ? recoveryPacket?.baseline_head : undefined, recovery_source_baseline_dirty: recoveryContinuation ? recoveryPacket?.baseline_dirty : undefined, cache_status: cacheableRead ? "miss" : "bypass", complexity: analysis.complexity, codex_profile: effectiveRisk === "critical" ? "complex" : analysis.codex_profile, reasoning_effort: analysis.reasoning_effort, risk: effectiveRisk, review_required: reviewRequired, discovery_group_id: discoveryGroupID, discovery_required_lanes: analysis.discovery_agents, attempt: claim.record.attempt, retry_count: claim.record.attempt - 1, tool_call_count: 0, wrapper_round_trips: 0, acceptance_criteria: verificationCommands, verification_commands: verificationCommands, expected_verification_hashes: expectedVerificationHashes, tester_status: agent === "tester" ? "pending" : undefined, review_dispatch_state: agent === "codex_executor" && reviewRequired ? "pending" : undefined, test_task_id: agent === "tester" ? (testTaskID || claim.record.packet_id) : testTaskID || undefined };
       await recordLatency({ stage: "task_admission", outcome: admission.status === 0 ? "admitted" : "deferred", duration_ms: elapsed(admissionStartedAt), admission_wait_ms: elapsed(admissionStartedAt), agent, call_id: input.callID, ...eventMetadata({ ...packetMetadata, classification: route?.classification, task_call_id: input.callID }) });
      if (admission.status !== 0) {
        if (agent === "tester" && rootGuardForGate?.pendingVerificationPacketID === testTaskID) guardrails.set(rootParent, { ...rootGuardForGate, pendingTesterActive: false });
@@ -2903,7 +3550,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        if (agent === "tester" && rootGuardForGate?.pendingVerificationPacketID === testTaskID) guardrails.set(rootParent, { ...rootGuardForGate, pendingTesterActive: false });
        throw error;
     }
-    reservations.set(input.callID, {
+     reservations.set(input.callID, {
       token: admissionToken,
       master_parent_session_id: rootParent,
       task_call_id: input.callID,
@@ -2916,9 +3563,11 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        objective_sha256: objectiveHash(delegatedObjective),
        root_objective_sha256: objectiveHash(authoritativeParentObjective),
         classification: route?.classification, cacheable_read: cacheableRead, ...packetMetadata, test_task_id: testTaskID,
-         task_id: fingerprint, task_state_version: claim.record.version, task_lease_id: claim.record.lease_id, task_fingerprint: fingerprint, packet_id: claim.record.packet_id, delegation_scope: delegationScope(delegatedObjective),
-    });
-    try {
+         task_id: fingerprint, task_state_version: claim.record.version, task_lease_id: claim.record.lease_id, task_fingerprint: fingerprint, packet_id: claim.record.packet_id, recovery_continuation: recoveryContinuation, delegation_scope: delegationScope(delegatedObjective),
+      recovery_source_task_fingerprint: recoveryContinuation ? recoveryPacket?.task_fingerprint : undefined,
+        provisional_child_session_id: undefined,
+       });
+     try {
       await createWorkPacket(input.callID, {
         objective_sha256: objectiveHash(delegatedObjective),
         root_objective_sha256: objectiveHash(authoritativeParentObjective),
@@ -2927,14 +3576,74 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
          admission_wait_ms: elapsed(admissionStartedAt),
          ...packetMetadata, review_task_id: reviewTaskID, test_task_id: testTaskID, gate_target: gateTarget ? (reviewTaskID || testTaskID) : null,
       });
-      const admitted = await transitionTask(fingerprint, { expectedVersion: claim.record.version, expectedStates: ["CLAIMED"], leaseId: claim.record.lease_id, patch: { state: "ADMITTED" } });
-      const stored = reservations.get(input.callID);
-      if (stored) reservations.set(input.callID, { ...stored, task_state_version: admitted.version });
-      await pruneWorkPackets();
-    } catch (error) {
-      await finalizeReservation(reservations.get(input.callID), { outcome: "error", result_summary: "ADMISSION_SETUP_FAILED", terminal: false, taskAction: "fail" });
-      throw error;
-    }
+       const admitted = await transitionTask(fingerprint, { expectedVersion: claim.record.version, expectedStates: ["CLAIMED"], leaseId: claim.record.lease_id, patch: { state: "ADMITTED" } });
+        const stored = reservations.get(input.callID);
+        const admittedReservation = stored ? { ...stored, task_state_version: admitted.version } : null;
+        if (admittedReservation) reservations.set(input.callID, admittedReservation);
+        await pruneWorkPackets();
+      } catch (error) {
+       const setupError = String(error?.code || error?.message || "").match(/^[A-Z][A-Z0-9_]{2,79}/)?.[0] || "ADMISSION_SETUP_FAILED";
+       try { await updateWorkPacketByID(claim.record.packet_id, { phase: "background_completion", outcome: "error", error_code: setupError }); } catch {}
+       await finalizeReservation(reservations.get(input.callID), { outcome: "error", result_summary: "ADMISSION_SETUP_FAILED", terminal: false, taskAction: "fail" });
+        throw error;
+      }
+      if (recoveryContinuation && agent === "codex_executor") {
+        const createSession = pluginInput.client?.session?.create;
+        const promptAsync = pluginInput.client?.session?.promptAsync;
+        if (typeof createSession !== "function" || typeof promptAsync !== "function") {
+          throw new Error("RECOVERY_CONTINUATION_DISPATCH_UNAVAILABLE");
+        }
+        const created = unwrapData(await createSession.call(pluginInput.client.session, {
+          body: { parentID: rootParent, title: "OpenAI Codex recovery continuation" },
+        }));
+        const childID = created?.id || created?.sessionID;
+        if (!childID) throw new Error("RECOVERY_CONTINUATION_SESSION_CREATE_FAILED");
+        const promptResponse = await promptAsync.call(pluginInput.client.session, {
+          path: { id: childID },
+          body: { parts: [{ type: "text", text: output.args.prompt }], agent: "codex_executor" },
+        });
+        if (promptResponse?.error || promptResponse?.failure) throw new Error("RECOVERY_CONTINUATION_PROMPT_FAILED");
+        await updateWorkPacketByID(claim.record.packet_id, {
+          phase: "codex_terminal",
+          outcome: "success",
+          codex_outcome: "success",
+          child_session_id: childID,
+        });
+        if (recoveryPacket?.packet_id) {
+          await updateWorkPacketByIDIfCurrent(
+            recoveryPacket.packet_id,
+            { recovery_state: ["RECOVERY_REQUIRED", "RECOVERY_RECONCILING", "RECOVERY_CONTINUATION_REQUIRED"] },
+            { recovery_state: "RECOVERY_VERIFIED_COMPLETE", recovery_result: "continuation_complete", error_code: null },
+          );
+          await updateWorkPacketByID(recoveryPacket.packet_id, { error_code: null });
+        }
+        const dispatched = new Error("RECOVERY_CONTINUATION_DISPATCHED");
+        dispatched.code = "RECOVERY_CONTINUATION_DISPATCHED";
+        dispatched.retryable = false;
+        throw dispatched;
+      }
+      // Native mandatory admission owns session creation below.  Running the
+      // ordinary tester dispatch here would create a first child, bind the
+      // reservation to it, and leave native admission reconciling a second
+      // child against the same persisted packet.
+      if (agent === "tester" && testTaskID && !nativeTesterAdmission) {
+        if (process.env.OPENAI_SYNTHETIC_TEST === "1") return;
+        const createSession = pluginInput.client?.session?.create;
+         const promptAsync = pluginInput.client?.session?.promptAsync;
+         if (typeof promptAsync !== "function") throw new Error("TESTER_DISPATCH_UNAVAILABLE");
+         if (typeof createSession !== "function") {
+           await promptAsync.call(pluginInput.client.session, { path: { id: rootParent }, body: { parts: [{ type: "text", text: output.args.prompt }], agent: "openai_orchestrator" } });
+           return;
+         }
+        const created = unwrapData(await createSession.call(pluginInput.client.session, { body: { parentID: rootParent, title: "OpenAI mandatory tester" } }));
+        const childID = created?.id || created?.sessionID;
+        if (!childID) throw new Error("TESTER_SESSION_CREATE_FAILED");
+        const testerObjective = exactMandatoryTesterObjective(authoritativeParentObjective, delegatedObjective, gateTarget);
+        await promptAsync.call(pluginInput.client.session, { path: { id: childID }, body: { parts: [{ type: "text", text: testerObjective }], agent: "tester" } });
+        const testerReservation = reservations.get(input.callID);
+        if (testerReservation) reservations.set(input.callID, { ...testerReservation, child_session_id: childID, provisional_child_session_id: childID });
+        await updateWorkPacketByID(claim.record.packet_id, { child_session_id: childID, phase: "foreground_binding", outcome: "pending" });
+      }
     } catch (error) {
       if (error instanceof GuardrailPolicyError || String(error?.code || "").startsWith("OPENAI_GUARDRAIL_")) {
         let agent = input.agent || null;
@@ -2951,8 +3660,23 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     const parentGuard = guardrails.get(input.sessionID);
       if (parentGuard) guardrails.set(input.sessionID, finishDelegation(parentGuard, ["tester", "reviewer", "reviewer_critical"].includes(pending.role), pending.delegation_scope));
     try {
-       const foregroundChildID = !pending.background ? foregroundChildSessionID(pending, output?.metadata) : null;
-      if (!pending.background) await bindExactChildReservation(pending, foregroundChildID, { readTask, advanceTask, updateWorkPacket, updateWorkPacketByID });
+       const afterChildID = !pending.background ? foregroundChildSessionID(pending, output?.metadata) : null;
+       if (pending.recovery_continuation && !pending.child_session_id) {
+         await recordLatency({
+           stage: "recovery_after_metadata_before_session_created",
+           outcome: "waiting_for_session_created",
+           task_fingerprint: pending.task_fingerprint,
+           packet_id: pending.packet_id,
+           recovery_source_packet_id: pending.recovery_source_packet_id,
+           after_metadata_child_id: afterChildID,
+         });
+         try { await updateWorkPacketByID(pending.packet_id, { phase: "foreground_binding", outcome: "pending", error_code: "BINDING_WAITING_FOR_SESSION_CREATED" }); } catch {}
+         return;
+       }
+       const foregroundChildID = pending.recovery_continuation && pending.child_session_id && afterChildID !== pending.child_session_id
+         ? pending.child_session_id
+         : afterChildID;
+        if (!pending.background) await bindExactChildReservation(pending, foregroundChildID, { readTask, readWorkPacketByID, advanceTask, updateWorkPacket, updateWorkPacketByID });
       await writeRuntimeStatus(runtimeChildStatus(pending, foregroundChildID));
      if (!pending.background && pending.role === "codex_executor") {
        const childPacket = (await listWorkPackets()).find((entry) => entry.packet_id === pending.packet_id && entry.child_session_id === foregroundChildID);
@@ -2973,7 +3697,12 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           await finalizeReservation(pending, { outcome: "pending", result_summary: "pending_gates", sessionID: foregroundChildID, terminal: false, packet: false, taskAction: null });
           return undefined;
         }
-     }
+      }
+      if (pending.background && ["reviewer", "reviewer_critical"].includes(pending.role) && !pending.child_session_id && !pending.provisional_child_session_id && !childSessionIdFromAfter(output?.metadata)) {
+        await updateWorkPacket(pending.task_call_id, { phase: "background_binding", outcome: "pending", error_code: "BINDING_WAITING_FOR_SESSION_CREATED" });
+        await recordLatency({ stage: "task_background_binding", outcome: "waiting_for_session_created", duration_ms: elapsed(pending.started_at), handoff_ms: elapsed(pending.started_at), agent: pending.role, call_id: input.callID, ...eventMetadata(pending) });
+        return undefined;
+      }
      let gateEvent = null;
     let gateError = null;
     if (["reviewer", "reviewer_critical"].includes(pending.role) && pending.review_task_id) {
@@ -3045,7 +3774,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
               verification_status: "passed",
             });
           }
-          await driveMandatoryReviewerForRoot(pending.master_parent_session_id, pending.test_task_id);
+          await driveMandatoryReviewerForRoot(pending.master_parent_session_id || pending.parent_session_id || masterParent(input.sessionID), pending.test_task_id);
         }
        if (update.matched && parsed.status !== "passed") gateError = new Error(parsed.code);
        }
@@ -3062,17 +3791,28 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         const finalized = await finalizeReservation(pending, { outcome: "completed", result_summary: resultSummary(output), sessionID: foregroundChildID || null });
         if (finalized.code !== "LIFECYCLE_FINALIZED") throw new Error(finalized.code || "FOREGROUND_FINALIZATION_INCOMPLETE");
          await recordLatency({ stage: "task_foreground_total", outcome: "completed", duration_ms: elapsed(pending.started_at), agent: pending.role, call_id: input.callID, ...eventMetadata(pending) });
-         const completedPacket = await updateWorkPacket(pending.task_call_id, { phase: "foreground_completion", outcome: "completed", duration_ms: elapsed(pending.started_at), cache_status: pending.cacheable_read ? "stored" : pending.cache_status, ...(pending.role === "tester" && !pending.test_task_id ? { tester_status: "passed" } : {}) });
-        if (!completedPacket) throw new Error("FOREGROUND_PACKET_UPDATE_FAILED");
+      const completedPacket = await updateWorkPacket(pending.task_call_id, { phase: "foreground_completion", outcome: "completed", duration_ms: elapsed(pending.started_at), cache_status: pending.cacheable_read ? "stored" : pending.cache_status, ...(pending.role === "tester" && !pending.test_task_id ? { tester_status: "passed" } : {}) });
+      if (!completedPacket) throw new Error("FOREGROUND_PACKET_UPDATE_FAILED");
+        const recoverySource = pending.recovery_continuation && pending.recovery_source_packet_id
+          ? await (pluginInput.readWorkPacketByID || readWorkPacketByID)(pending.recovery_source_packet_id)
+          : null;
+        if (pending.recovery_continuation && pending.recovery_source_packet_id && recoverySource?.recovery_state !== "RECOVERY_VERIFIED_COMPLETE") {
+            await updateWorkPacketByIDIfCurrent(pending.recovery_source_packet_id, { recovery_state: "RECOVERY_CONTINUATION_REQUIRED" }, { recovery_state: "RECOVERY_VERIFIED_COMPLETE", recovery_result: "continuation_complete" });
+          }
          if (pending.child_session_id) {
-           packetCallBySession.delete(pending.child_session_id); bufferedOpenCodeTokens.delete(pending.child_session_id);
+            packetSessionDelete(pending.child_session_id, { expected_packet_id: pending.packet_id, reason: "foreground_completion" }); bufferedOpenCodeTokens.delete(pending.child_session_id);
          }
          await writeRuntimeStatus({ status: "RUNNING", stage: "root_processing", active_child_session_id: null, active_child_agent: null, provider: null, model: null }, { expectedChildSessionID: foregroundChildID });
          return gateEvent || undefined;
     }
-    const childID = childSessionIdFromAfter(output.metadata);
-    if (!childID) {
-      await finalizeReservation(pending, { outcome: "error", result_summary: "BINDING_MISSING_CHILD", terminal: false });
+     const childID = childSessionIdFromAfter(output.metadata) || pending.child_session_id || pending.provisional_child_session_id;
+     if (!childID) {
+       if (["reviewer", "reviewer_critical"].includes(pending.role)) {
+         await updateWorkPacket(pending.task_call_id, { phase: "background_binding", outcome: "pending", error_code: "BINDING_WAITING_FOR_SESSION_CREATED" });
+         await recordLatency({ stage: "task_background_binding", outcome: "waiting_for_session_created", duration_ms: elapsed(pending.started_at), handoff_ms: elapsed(pending.started_at), agent: pending.role, call_id: input.callID, ...eventMetadata(pending) });
+         return undefined;
+       }
+       await finalizeReservation(pending, { outcome: "error", result_summary: "BINDING_MISSING_CHILD", terminal: false });
        await recordLatency({ stage: "task_background_binding", outcome: "missing_child", duration_ms: elapsed(pending.started_at), handoff_ms: elapsed(pending.started_at), agent: pending.role, call_id: input.callID, ...eventMetadata(pending) });
       await updateWorkPacket(pending.task_call_id, { phase: "background_binding", outcome: "error", duration_ms: elapsed(pending.started_at) });
       await advanceTask(pending, "FAILED", { retryable: true, error_code: "BINDING_MISSING_CHILD" });
@@ -3088,18 +3828,38 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       await advanceTask(pending, "FAILED", { retryable: true, error_code: "BINDING_FAILED" });
        throw new Error("Could not bind reservation to the exact native child session.");
      }
-      await bindExactChildReservation(pending, childID, { readTask, advanceTask, updateWorkPacket, updateWorkPacketByID, packetPatch: { phase: "background_bound", outcome: "running" } });
-     if (pending.role === "codex_executor") {
-      const boundPacket = (await listWorkPackets()).find((packet) => packet.packet_id === pending.packet_id || packet.task_call_id === pending.packet_id);
-      await ensurePolicy(childID, { agent: "codex_executor", master_parent_session_id: pending.master_parent_session_id, task_call_id: boundPacket?.packet_id || pending.packet_id, task_id: pending.task_id, task_fingerprint: pending.task_fingerprint, attempt: pending.attempt, task_lease_id: pending.task_lease_id, packet_id: boundPacket?.packet_id || pending.packet_id });
+       await bindExactChildReservation(pending, childID, { readTask, readWorkPacketByID, advanceTask, updateWorkPacket, updateWorkPacketByID, packetPatch: { phase: "background_bound", outcome: "running" } });
+      if (pending.role === "codex_executor") {
+       const packets = await listWorkPackets();
+       const boundPacket = packets.find((packet) => packet.child_session_id === childID && packet.agent === "codex_executor")
+         || packets.find((packet) => packet.packet_id === pending.packet_id || packet.task_call_id === pending.packet_id);
+       await ensurePolicy(childID, {
+         agent: "codex_executor",
+         master_parent_session_id: pending.master_parent_session_id,
+         task_call_id: boundPacket?.task_call_id || boundPacket?.packet_id || pending.packet_id,
+         task_id: boundPacket?.task_fingerprint || pending.task_id,
+         task_fingerprint: boundPacket?.task_fingerprint || pending.task_fingerprint,
+         attempt: boundPacket?.attempt || pending.attempt,
+         task_lease_id: boundPacket?.task_lease_id || pending.task_lease_id,
+         packet_id: boundPacket?.packet_id || pending.packet_id,
+       });
       }
-       packetCallBySession.set(childID, pending.packet_id);
+        tracePacketSession("set", childID, pending.packet_id, { old_packet_id: packetCallBySession.get(childID) || null, task_call_id: pending.task_call_id, task_fingerprint: pending.task_fingerprint, attempt: pending.attempt, task_lease_id: pending.task_lease_id, reason: "background_after_binding" });
+        packetCallBySession.set(childID, pending.packet_id);
       reservations.set(childID, { ...pending, child_session_id: childID });
      await writeRuntimeStatus(runtimeChildStatus(pending, childID));
     await flushBufferedOpenCodeTokens(childID);
     reservations.delete(input.callID);
-    } catch (error) {
-      if (reservations.has(input.callID) || (pending.child_session_id && reservations.has(pending.child_session_id))) {
+     } catch (error) {
+       if (pending.recovery_continuation && pending.recovery_source_packet_id) {
+         await updateWorkPacketByIDIfCurrent(
+           pending.recovery_source_packet_id,
+           { recovery_state: ["RECOVERY_REQUIRED", "RECOVERY_RECONCILING", "RECOVERY_CONTINUATION_REQUIRED"] },
+           { recovery_state: "RECOVERY_BLOCKED_UNSAFE", recovery_result: "continuation_failed", error_code: "RECOVERY_CONTINUATION_FAILED" },
+         );
+         await updateWorkPacketByID(pending.packet_id, { error_code: String(error?.code || error?.message || "RECOVERY_CONTINUATION_FAILED").slice(0, 160) });
+       }
+       if (reservations.has(input.callID) || (pending.child_session_id && reservations.has(pending.child_session_id))) {
         await finalizeReservation(pending, { outcome: "error", result_summary: error?.code || "TASK_AFTER_ERROR", sessionID: pending.child_session_id || pending.provisional_child_session_id || null, terminal: false, taskAction: "fail" });
       }
       throw error;
@@ -3114,44 +3874,100 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         const parentGuard = await guardrailFor(masterParent(parent));
         if (parentGuard) { guardrails.set(child.id, { ...parentGuard, activeDelegations: 1, activeDelegation: true }); await writeStopLatch(process.env.OPENAI_TEAM_STATE_ROOT, child.id, parentGuard); }
       }
-      if (parent && ["codex_executor", "reviewer", "reviewer_critical", "tester"].includes(child.agent)) {
+      const explicitReservationID = [child.reservation_id, child.reservationID, child.task_call_id, child.callID, child.call_id].find((value) => typeof value === "string" && value) || null;
+      const explicitReservation = explicitReservationID ? reservations.get(explicitReservationID) : null;
+      const candidateReservations = parent
+        ? [...reservations.values()].filter((pending) => reservationEligibleForSessionCreated(pending) && pending.master_parent_session_id === masterParent(parent))
+        : [];
+      const inferredAgent = child.agent || explicitReservation?.role || (candidateReservations.length === 1 ? candidateReservations[0].role : null);
+      if (inferredAgent && !child.agent) child.agent = inferredAgent;
+      if (parent && ["codex_executor", "reviewer", "reviewer_critical", "tester"].includes(inferredAgent)) {
         const rootParent = masterParent(parent);
-        const candidates = [...reservations.entries()].filter(([, pending]) =>
+        if (nativeTesterCreationRoots.has(rootParent)) return;
+        const candidates = explicitReservation?.role === "tester" ? [[explicitReservationID, explicitReservation]] : [...reservations.entries()].filter(([, pending]) =>
           pending.role === child.agent &&
           reservationEligibleForSessionCreated(pending) &&
           pending.master_parent_session_id === rootParent,
         );
+        const durablePackets = await listWorkPackets();
+        const recoveryPackets = durablePackets.filter((packet) =>
+          packet.agent === child.agent && packet.recovery_continuation === true
+          && packet.parent_session_id === rootParent
+          && ["pending", "running"].includes(String(packet.outcome || "").toLowerCase())
+          && !packet.child_session_id,
+        ).sort((left, right) => Number(right.attempt || 0) - Number(left.attempt || 0) || String(right.updated_at || "").localeCompare(String(left.updated_at || "")));
+        const durableContinuation = recoveryPackets.find((packet) => candidates.some(([, pending]) =>
+          pending.packet_id === packet.packet_id
+          && pending.task_fingerprint === packet.task_fingerprint
+          && pending.task_lease_id === packet.task_lease_id
+          && pending.attempt === packet.attempt
+          && pending.master_parent_session_id === packet.parent_session_id
+          && pending.recovery_continuation === true,
+        ));
+        const packetCandidates = durableContinuation
+          ? candidates.filter(([, pending]) => pending.packet_id === durableContinuation.packet_id
+            && pending.task_fingerprint === durableContinuation.task_fingerprint
+            && pending.task_lease_id === durableContinuation.task_lease_id
+            && pending.attempt === durableContinuation.attempt
+            && pending.master_parent_session_id === durableContinuation.parent_session_id
+            && pending.recovery_continuation === true)
+          : [];
+        const recoveryCandidates = candidates.filter(([, pending]) => pending.recovery_continuation === true);
+        const correlatedCandidates = durableContinuation
+          ? packetCandidates
+          : recoveryPackets.length > 0 ? [] : recoveryCandidates.length > 0 ? recoveryCandidates : candidates;
+        await recordLatency({
+          stage: "codex_session_created_correlation",
+          outcome: durableContinuation ? "recovery" : recoveryPackets.length > 0 ? "recovery_waiting" : "initial",
+          session_id: child.id,
+          root_parent_session_id: rootParent,
+          durable_continuation_count: recoveryPackets.length,
+          initial_reservation_count: candidates.filter(([, pending]) => pending.recovery_continuation !== true).length,
+          recovery_reservation_count: recoveryCandidates.length,
+          packet_candidate_count: packetCandidates.length,
+          selected_candidate_count: correlatedCandidates.length,
+          selected_packet_id: correlatedCandidates[0]?.[1]?.packet_id || null,
+          selected_task_fingerprint: correlatedCandidates[0]?.[1]?.task_fingerprint || null,
+          decision: durableContinuation ? "recovery_exact" : recoveryPackets.length > 0 ? "recovery_waiting" : "initial",
+        });
         const explicitCallID = [child.reservation_id, child.reservationID, child.task_call_id, child.callID, child.call_id].find((value) => typeof value === "string" && value) || null;
         const decision = sessionCreatedCorrelationDecision({
-          background: candidates.some(([, pending]) => pending.background),
+          background: correlatedCandidates.some(([, pending]) => pending.background),
           explicitCallID,
-          candidateCallIDs: candidates.map(([, pending]) => pending.task_call_id),
+          candidateCallIDs: correlatedCandidates.map(([, pending]) => pending.task_call_id),
+          agent: child.agent,
         });
         if (decision === "rejected") throw new Error("SESSION_CREATED_CORRELATION_REJECTED");
         if (["durable", "provisional"].includes(decision)) {
-          const [[callID, pending]] = explicitCallID
-            ? candidates.filter(([, candidate]) => candidate.task_call_id === explicitCallID)
-            : candidates;
+          const explicitCandidates = explicitCallID
+            ? correlatedCandidates.filter(([, candidate]) => candidate.task_call_id === explicitCallID)
+            : [];
+          const selectedCandidates = explicitCandidates.length > 0 ? explicitCandidates : correlatedCandidates;
+          const [[callID, pending]] = selectedCandidates;
           const bindingStartedAt = Date.now();
           const bound = decision === "durable" ? await runProcessAsync(BIND, [pending.token, child.id], { env: process.env }) : { status: 0 };
             await recordLatency({ stage: "task_background_binding", outcome: decision === "provisional" ? "provisional" : (bound.status === 0 ? "bound" : "binding_failed"), duration_ms: elapsed(bindingStartedAt), handoff_ms: elapsed(bindingStartedAt), agent: pending.role, call_id: pending.task_call_id, session_id: child.id, ...eventMetadata(pending) });
            if (bound.status === 0) {
              if (decision === "provisional") pending.provisional_child_session_id = child.id;
              if (decision === "durable") {
-      await bindExactChildReservation(pending, child.id, { readTask, advanceTask, updateWorkPacket, updateWorkPacketByID, packetPatch: { phase: "background_bound", outcome: "running" } });
-              }
-              if (pending.role === "codex_executor" && decision === "durable") await ensurePolicy(child.id, {
-              agent: "codex_executor",
-              master_parent_session_id: pending.master_parent_session_id,
-               task_call_id: pending.packet_id,
-              task_id: pending.task_id,
-              objective_sha256: pending.objective_sha256,
-              task_fingerprint: pending.task_fingerprint,
-              attempt: pending.attempt,
-              task_lease_id: pending.task_lease_id,
-              packet_id: pending.packet_id,
-            });
-      packetCallBySession.set(child.id, pending.packet_id);
+                await bindExactChildReservation(pending, child.id, { readTask, readWorkPacketByID, advanceTask, updateWorkPacket, updateWorkPacketByID, packetPatch: { phase: pending.background ? "background_bound" : "foreground_bound", outcome: "running" } });
+               }
+               const boundPacket = decision === "durable"
+                 ? (await listWorkPackets()).find((packet) => packet.child_session_id === child.id && packet.agent === "codex_executor")
+                 : null;
+               const policyPacket = boundPacket || pending;
+               if (pending.role === "codex_executor" && decision === "durable") await ensurePolicy(child.id, {
+               agent: "codex_executor",
+               master_parent_session_id: pending.master_parent_session_id,
+                task_call_id: policyPacket.task_call_id || policyPacket.packet_id,
+               task_id: policyPacket.task_fingerprint,
+               objective_sha256: policyPacket.objective_sha256,
+               task_fingerprint: policyPacket.task_fingerprint,
+               attempt: policyPacket.attempt,
+               task_lease_id: policyPacket.task_lease_id,
+               packet_id: policyPacket.packet_id,
+             });
+       packetSessionSet(child.id, policyPacket.packet_id, { task_call_id: policyPacket.task_call_id, task_fingerprint: policyPacket.task_fingerprint, attempt: policyPacket.attempt, task_lease_id: policyPacket.task_lease_id, reason: `session_created_${decision}` });
               if (decision === "durable") {
                 reservations.set(child.id, { ...pending, child_session_id: child.id });
                 reservations.delete(callID);
@@ -3167,25 +3983,161 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       const sessionID = event.properties.sessionID || event.properties.info?.id;
       const pending = reservations.get(sessionID);
       if (pending) {
-        if (pending.role === "tester" && pending.test_task_id && pending.child_session_id === sessionID) {
+         if (pending.role === "tester" && pending.test_task_id && reservationMatchesChild(pending, sessionID)) {
            const gateResult = await settleTesterGate(pending, sessionID, event.type);
            if (gateResult?.pending) return;
            if (gateResult?.passed) await driveMandatoryReviewerForRoot(pending.master_parent_session_id, pending.test_task_id);
            if (gateResult?.code && gateResult.code !== "STALE_GATE_EVENT") {
             try { await advanceTask(pending, "FAILED", { retryable: true, error_code: gateResult.code, result_summary: "tester_failed" }); } catch {}
+           }
+         } else if (["reviewer", "reviewer_critical"].includes(pending.role) && pending.review_task_id && reservationMatchesChild(pending, sessionID)) {
+           const gateResult = await settleReviewerGate(pending, sessionID, event.type);
+           if (gateResult?.pending) return;
+           if (gateResult?.code && gateResult.code !== "STALE_GATE_EVENT") {
+             try { await advanceTask(pending, "FAILED", { retryable: true, error_code: gateResult.code, result_summary: "reviewer_failed" }); } catch {}
+           }
+         }
+           if (["session.idle", "session.error", "session.deleted"].includes(event.type)) {
+            const recoveryPacket = (await listWorkPackets()).find((candidate) =>
+              candidate.agent === "codex_executor"
+              && candidate.recovery_continuation === true
+              && candidate.child_session_id === sessionID
+              && candidate.recovery_source_packet_id
+            );
+            if (recoveryPacket) {
+              const source = await (pluginInput.readWorkPacketByID || readWorkPacketByID)(recoveryPacket.recovery_source_packet_id);
+              if (source?.tester_required === true && ["pending", "required"].includes(source.tester_status)) {
+                await updateWorkPacketByIDIfCurrent(
+                  source.packet_id,
+                  { phase: ["background_completion", "pending_verification", "PENDING_VERIFICATION"], outcome: ["error", "pending"] },
+                  { phase: "pending_verification", outcome: "pending", codex_outcome: "success", verification_status: "pending", review_status: "pending", tester_status: "pending" },
+                );
+                await driveMandatoryTesterForRoot(recoveryPacket.parent_session_id, { failRequested: true });
+              }
+            }
           }
-        }
-        if (!pending.codex_terminal) {
+          if (pending.role === "codex_executor" && pending.recovery_continuation && !pending.recovery_gates_driven && event.type === "session.idle") {
+           pending.recovery_gates_driven = true;
+          pending.codex_terminal = true;
+          await updateWorkPacketByID(pending.packet_id, {
+            phase: "codex_terminal",
+            outcome: "success",
+            codex_outcome: "success",
+            error_code: undefined,
+          });
+          if (pending.recovery_source_packet_id) {
+            await updateWorkPacketByIDIfCurrent(
+              pending.recovery_source_packet_id,
+              { recovery_state: ["RECOVERY_REQUIRED", "RECOVERY_RECONCILING", "RECOVERY_CONTINUATION_REQUIRED"] },
+              { recovery_state: "RECOVERY_VERIFIED_COMPLETE", recovery_result: "continuation_complete" },
+            );
+          }
+           const recoveryGate = pending.recovery_source_packet_id
+             ? await (pluginInput.readWorkPacketByID || readWorkPacketByID)(pending.recovery_source_packet_id)
+             : null;
+           const recoveryNeedsTester = recoveryGate?.tester_required === true && ["pending", "required"].includes(recoveryGate.tester_status);
+            if (recoveryGate && recoveryNeedsTester) {
+              await updateWorkPacketByIDIfCurrent(
+                recoveryGate.packet_id,
+                { phase: ["background_completion", "pending_verification", "PENDING_VERIFICATION"], outcome: ["error", "pending"] },
+                { phase: "pending_verification", outcome: "pending", codex_outcome: "success", verification_status: "pending", review_status: "pending", tester_status: "pending" },
+              );
+              const recoveryRoot = guardrails.get(pending.master_parent_session_id);
+              if (recoveryRoot) guardrails.set(pending.master_parent_session_id, { ...recoveryRoot, pendingVerificationPacketID: recoveryGate.packet_id, pendingTesterActive: false, verificationTerminal: false, stopped: false, budgetTerminal: false });
+            }
+            await advanceTask(pending, recoveryNeedsTester ? "PENDING_VERIFICATION" : "PENDING_REVIEW", { result_summary: "recovery_continuation_complete" });
+            if (pending.master_parent_session_id) {
+              await driveMandatoryTesterForRoot(pending.master_parent_session_id, { failRequested: true });
+            }
+            if (recoveryGate && recoveryNeedsTester) {
+              const sourceTask = await readTask(recoveryGate.task_fingerprint);
+              if (sourceTask && ["FAILED", "PENDING_VERIFICATION"].includes(sourceTask.state)) {
+                await transitionTask(recoveryGate.task_fingerprint, { expectedVersion: sourceTask.version, expectedStates: [sourceTask.state], leaseId: sourceTask.lease_id, patch: { state: "PENDING_VERIFICATION", retryable: false, error_code: null, result_summary: "recovery_verified_pending_gates" } });
+              }
+              const rootID = pending.master_parent_session_id;
+              const refreshedGate = await (pluginInput.readWorkPacketByID || readWorkPacketByID)(recoveryGate.packet_id);
+              const testerAlreadyCreated = (await listWorkPackets()).some((entry) => entry.parent_session_id === rootID && entry.agent === "tester" && entry.test_task_id === recoveryGate.packet_id && !["completed", "success", "failed", "error", "cancelled"].includes(String(entry.outcome || "").toLowerCase()));
+               if (!testerAlreadyCreated && refreshedGate?.tester_dispatch_state === "requested") {
+                 const rearmed = await updateWorkPacketByIDIfCurrent(
+                   recoveryGate.packet_id,
+                   { tester_dispatch_state: "requested" },
+                   { tester_dispatch_state: "pending" },
+                 );
+                 if (rearmed?.matched) await driveMandatoryTesterForRoot(rootID, { failRequested: true });
+               }
+            }
+          } else if (pending.role === "codex_executor" && !pending.codex_terminal) {
+           const fallbackDecision = codexExecutorWrapperFallbackDecision(pending);
+           if (fallbackDecision.action !== "run") {
+             await recordLatency({ stage: "codex_executor_wrapper_fallback", outcome: "deferred", reason: fallbackDecision.reason, session_id: sessionID, call_id: pending.task_call_id, ...eventMetadata(pending) });
+             return;
+           }
+           pending.wrapper_fallback_in_flight = true;
+           let wrapperResult = null;
+           let wrapperError = null;
+           try {
+             const packet = await (pluginInput.readWorkPacketByID || readWorkPacketByID)(pending.packet_id);
+             wrapperResult = await plugin.tool.openai_run_codex.execute({}, {
+               sessionID,
+               callID: pending.task_call_id,
+               agent: "codex_executor",
+               directory: packet?.repository_realpath || process.cwd(),
+               worktree: packet?.repository_realpath || process.cwd(),
+               metadata: async () => {},
+             });
+           } catch (error) { wrapperError = error; }
+           let wrapperSucceeded = false;
+           let wrapperReturned = false;
+           try {
+             const parsed = typeof wrapperResult === "string" ? JSON.parse(wrapperResult) : wrapperResult;
+             wrapperReturned = Boolean(parsed && typeof parsed === "object");
+             wrapperSucceeded = parsed?.status === "success" && parsed?.kind === "success";
+           } catch {}
+           if (wrapperReturned) {
+             pending.codex_terminal = true;
+             if (!wrapperSucceeded) return;
+           } else {
+             await recordLatency({ stage: "codex_executor_wrapper_fallback", outcome: "failed", error_code: String(wrapperError?.code || wrapperError?.message || "WRAPPER_EXECUTION_FAILED").slice(0, 120), session_id: sessionID, call_id: pending.task_call_id, ...eventMetadata(pending) });
+             await recordLatency({ stage: "codex_executor_wrapper_missing", outcome: "CODEX_EXECUTOR_TOOL_REQUIRED", session_id: sessionID, call_id: pending.task_call_id, ...eventMetadata(pending) });
+             try { await updateWorkPacket(pending.task_call_id, { phase: "background_completion", outcome: "error", error_code: "CODEX_EXECUTOR_TOOL_REQUIRED" }); } catch {}
+             try { await advanceTask(pending, "FAILED", { retryable: false, error_code: "CODEX_EXECUTOR_TOOL_REQUIRED", result_summary: "CODEX_EXECUTOR_TOOL_REQUIRED" }); } catch {}
+             await finalizeReservation(pending, { outcome: "error", result_summary: "CODEX_EXECUTOR_TOOL_REQUIRED", terminal: false, packet: false });
+           }
+         } else if (!pending.codex_terminal) {
          const finalized = await lifecycleFinalization(pending, event.type, sessionID);
          await writeRuntimeStatus({ status: "RUNNING", stage: "root_processing", active_child_session_id: null, active_child_agent: null, provider: null, model: null }, { expectedChildSessionID: sessionID });
         if (finalized.code !== "LIFECYCLE_ALREADY_FINALIZED") {
          await recordLatency({ stage: "task_background_completion", outcome: event.type.replace("session.", ""), duration_ms: elapsed(pending.started_at), agent: pending.role, call_id: pending.task_call_id, session_id: sessionID, ...eventMetadata(pending) });
         }
         }
-      }
+       }
+       if (["session.idle", "session.error", "session.deleted"].includes(event.type) && !pending) {
+         const recoveryPacket = (await listWorkPackets()).find((candidate) =>
+           candidate.agent === "codex_executor"
+           && candidate.recovery_continuation === true
+           && candidate.child_session_id === sessionID
+           && candidate.recovery_source_packet_id
+         );
+          if (recoveryPacket) {
+            const source = await (pluginInput.readWorkPacketByID || readWorkPacketByID)(recoveryPacket.recovery_source_packet_id);
+            if (source?.tester_required === true && ["pending", "required"].includes(source.tester_status)) {
+             await updateWorkPacketByIDIfCurrent(recoveryPacket.recovery_source_packet_id, { phase: ["background_completion", "pending_verification", "PENDING_VERIFICATION"], outcome: ["error", "pending"] }, { phase: "pending_verification", outcome: "pending", codex_outcome: "success", verification_status: "pending", review_status: "pending", tester_status: "pending" });
+             const sourceTask = await readTask(source.task_fingerprint);
+             if (sourceTask && ["FAILED", "PENDING_VERIFICATION"].includes(sourceTask.state)) {
+               await transitionTask(source.task_fingerprint, { expectedVersion: sourceTask.version, expectedStates: [sourceTask.state], leaseId: sourceTask.lease_id, patch: { state: "PENDING_VERIFICATION", retryable: false, error_code: null, result_summary: "recovery_verified_pending_gates" } });
+              }
+              await driveMandatoryTesterForRoot(recoveryPacket.parent_session_id, { failRequested: true });
+              for (const delayMs of [250, 1000, 3000]) {
+               const rootID = recoveryPacket.parent_session_id;
+               const timer = setTimeout(() => { void driveMandatoryTesterForRoot(rootID, { failRequested: true }).catch(() => {}); }, delayMs);
+               timer.unref?.();
+             }
+            }
+         }
+       }
         // Policy survives non-terminal lifecycle events: it is the durable
         // authority binding for recovery, quality gates, and duplicate calls.
-      if (!pending) { packetCallBySession.delete(sessionID); bufferedOpenCodeTokens.delete(sessionID); }
+      if (!pending) { packetSessionDelete(sessionID, { reason: "orphan_session_cleanup" }); bufferedOpenCodeTokens.delete(sessionID); }
       if (mandatoryTesterDispatchTrigger(event.type) && sessionID && masterParent(sessionID) === sessionID) {
         await driveMandatoryTesterForRoot(sessionID, { failRequested: true });
       }
@@ -3194,14 +4146,20 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
         const info = event.properties?.info;
         if (String(info?.role || "").toLowerCase() === "user") {
           const sessionID = event.properties?.sessionID || info.sessionID;
-          const continuation = await handleMandatoryTesterContinuation(event, {
-            client: pluginInput.client,
-            rootForSession: masterParent,
-            deps: { readWorkPacketByID, updateWorkPacketByIDIfCurrent },
-          });
-          if (!continuation.text) return;
+           const continuation = await handleMandatoryTesterContinuation(event, {
+             client: pluginInput.client,
+             rootForSession: masterParent,
+             deps: { readWorkPacketByID, updateWorkPacketByIDIfCurrent, deferObservation: true },
+           });
+           const reviewerContinuation = continuation.handled ? { handled: false } : await handleMandatoryReviewerContinuation(event, {
+             client: pluginInput.client,
+             rootForSession: masterParent,
+             deps: { readWorkPacketByID, updateWorkPacketByIDIfCurrent },
+           });
+           if (reviewerContinuation.handled) return;
+           if (!continuation.text) return;
           const text = continuation.text;
-          if (continuation.handled) return;
+           if (continuation.handled && !isInternalContinuation(text)) return;
            if (sessionID && !isInternalContinuation(text)) {
              const state = await guardrailFor(sessionID);
              const mappedRoot = masterParentBySession.get(sessionID);
@@ -3270,6 +4228,102 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     }
   },
   });
+  nativeMandatoryTesterAdmission = async (rootID, markerText, gate) => {
+    const session = pluginInput.client?.session;
+    const create = session?.create;
+    const prompt = session?.promptAsync;
+    if (typeof create !== "function" || typeof prompt !== "function") {
+      throw new Error("MANDATORY_TESTER_NATIVE_ADMISSION_UNAVAILABLE");
+    }
+    const callID = `mandatory-tester-${gate.packet_id}`;
+    nativeTesterCreationRoots.add(rootID);
+    const rootObjective = (await resolveInitialObjective(rootID))?.objective || "";
+    const verificationCommands = Array.isArray(gate.verification_commands) && gate.verification_commands.length
+      ? gate.verification_commands
+      : [...new Set(rootObjective.match(/\b(?:node\s+[A-Za-z0-9._/-]+\.test\.js|npm\s+test)\b/g) || [])];
+    if (!verificationCommands.length && gate.repository_realpath) {
+      const testFiles = (await readdir(gate.repository_realpath, { withFileTypes: true }))
+        .filter((entry) => entry.isFile() && /\.test\.js$/.test(entry.name))
+        .map((entry) => `node ${entry.name}`);
+      verificationCommands.push(...testFiles);
+    }
+    if (verificationCommands.length) {
+      gate = { ...gate, verification_commands: verificationCommands, expected_verification_hashes: verificationCommands.map((command) => createHash("sha256").update(command).digest("hex")) };
+      await updateWorkPacketByID(gate.packet_id, { verification_commands: verificationCommands, expected_verification_hashes: gate.expected_verification_hashes, acceptance_criteria: verificationCommands });
+    }
+    const focusedTesterGate = {
+      ...gate,
+      verification_commands: focusVerificationCommands(parseSerializedArray(gate.verification_commands), rootObjective, gate.repository_realpath || process.cwd()),
+    };
+    focusedTesterGate.expected_verification_hashes = focusedTesterGate.verification_commands.map((command) => createHash("sha256").update(command).digest("hex"));
+    await updateWorkPacketByID(gate.packet_id, { tester_verification_commands: focusedTesterGate.verification_commands, tester_expected_verification_hashes: focusedTesterGate.expected_verification_hashes });
+    const testerPrompt = exactMandatoryTesterObjective(rootObjective, rootObjective, focusedTesterGate) || markerText;
+    const output = { args: { subagent_type: "tester", prompt: markerText } };
+    try {
+      await plugin["tool.execute.before"]({
+        tool: "task",
+        sessionID: rootID,
+        callID,
+        agent: "tester",
+        native_tester_admission: true,
+      }, output);
+    } catch (error) {
+      const wrapped = new Error(`NATIVE_TESTER_TASK_BEFORE:${error?.code || error?.message || "unknown"}`);
+      wrapped.code = `NATIVE_TESTER_TASK_BEFORE_${String(error?.code || "UNKNOWN").replace(/[^A-Z0-9_]/gi, "_").slice(0, 60)}`;
+      throw wrapped;
+    }
+    let created;
+    try {
+      created = unwrapData(await create.call(session, {
+        body: { parentID: rootID, title: "Mandatory verification tester", agent: "tester", reservation_id: callID },
+      }));
+    } catch (error) {
+      const wrapped = new Error(`NATIVE_TESTER_SESSION_CREATE:${error?.code || error?.message || "unknown"}`);
+      wrapped.code = "NATIVE_TESTER_SESSION_CREATE";
+      throw wrapped;
+    }
+    const childID = created?.id || created?.sessionID;
+    if (!childID) throw new Error("MANDATORY_TESTER_NATIVE_SESSION_CREATE_FAILED");
+    const pendingTester = reservations.get(callID) || reservations.get(childID);
+    if (!pendingTester) throw new Error("MANDATORY_TESTER_RESERVATION_MISSING");
+    if (pendingTester.child_session_id && pendingTester.child_session_id !== childID) {
+      reservations.delete(pendingTester.child_session_id);
+      delete pendingTester.child_session_id;
+      delete pendingTester.provisional_child_session_id;
+    }
+    pendingTester.master_parent_session_id = rootID;
+    if (pendingTester.child_session_id !== childID) {
+      const bound = await runProcessAsync(BIND, [pendingTester.token, childID], { env: process.env });
+      if (bound.status !== 0) throw new Error("MANDATORY_TESTER_BIND_FAILED");
+      await bindExactChildReservation(pendingTester, childID, {
+        readTask,
+        readWorkPacketByID,
+        advanceTask,
+        updateWorkPacket,
+        updateWorkPacketByID,
+        packetPatch: { phase: "foreground_bound", outcome: "running" },
+      });
+      reservations.set(childID, { ...pendingTester, child_session_id: childID });
+      reservations.delete(callID);
+    }
+    await updateWorkPacketByID(pendingTester.packet_id, { master_parent_session_id: rootID, child_session_id: childID, phase: "foreground_bound", outcome: "running" });
+    let response;
+    try {
+      response = await prompt.call(session, {
+        path: { id: childID },
+        body: { parts: [{ type: "text", text: testerPrompt }], agent: "tester" },
+      });
+    } catch (error) {
+      const wrapped = new Error(`NATIVE_TESTER_PROMPT:${error?.code || error?.message || "unknown"}`);
+      wrapped.code = "NATIVE_TESTER_PROMPT";
+      throw wrapped;
+    }
+    if (response?.error || response?.failure || ["error", "failed", "failure"].includes(response?.status)) {
+      throw new Error("MANDATORY_TESTER_NATIVE_PROMPT_FAILED");
+    }
+    nativeTesterCreationRoots.delete(rootID);
+    return response;
+  };
   plugin.drainReconciliations = drainReconciliations;
   plugin.disposeReconciliations = () => { for (const timer of reconciliationTimers.values()) clearTimeout(timer); reconciliationTimers.clear(); };
   return plugin;

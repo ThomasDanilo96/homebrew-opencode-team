@@ -33,11 +33,16 @@ const byTask = (taskId, profile) => matrix().find((run) => run.task_id === taskI
 
 test("isolated runtime bridges default host auth sources without copying credentials", () => {
   const run = prepareRun(byTask("lookup-routing-contract", CONTROL_PROFILE));
-  const env = buildRunEnv(run, {}, { HOME: process.env.HOME });
+  const nodeBin = mkdtempSync(join(tmpdir(), "daily-node-bin-"));
+  writeFileSync(join(nodeBin, "node"), "#!/bin/sh\nprintf 'v22.23.3\\n'\n", { mode: 0o755 });
+  writeFileSync(join(nodeBin, "npm"), "#!/bin/sh\nprintf '10.9.9\\n'\n", { mode: 0o755 });
+  const env = buildRunEnv(run, {}, { HOME: process.env.HOME, OPENAI_BENCHMARK_NODE_BIN: nodeBin });
   assert.equal(env.OPENCODE_AUTH_SOURCE, join(process.env.HOME, ".local/share/opencode/auth.json"));
   assert.equal(env.OPENAI_CODEX_AUTH_SOURCE, join(process.env.HOME, ".codex/auth.json"));
   assert.equal(env.OPENCODE_TEAM_HOME, run.home.root);
+  assert.equal(buildRunEnv(run, {}, { HOME: process.env.HOME, PATH: "/broken/bin", OPENAI_BENCHMARK_NODE_BIN: nodeBin }).PATH, `${nodeBin}:/broken/bin`);
   rmSync(run.root, { recursive: true, force: true });
+  rmSync(nodeBin, { recursive: true, force: true });
 });
 
 const fakeLifecycle = {
@@ -318,7 +323,7 @@ test("telemetry present includes packet/latency attribution and DAILY pricing; a
         writeFileSync(join(run.telemetry_root, "work-packets", "packet.json"), JSON.stringify({
           task_id: run.task_id,
           outcome: "completed",
-          requested_model: "openai/gpt-5.6-luna",
+          requested_model: "openai/gpt-6-luna",
           codex_input_tokens: 100,
           codex_cached_input_tokens: 20,
           opencode_input_tokens: 50,
@@ -328,7 +333,7 @@ test("telemetry present includes packet/latency attribution and DAILY pricing; a
           codex_reasoning_tokens: 7,
           opencode_reasoning_tokens: 3,
         }));
-        writeFileSync(join(run.telemetry_root, "logs", "latency-metrics.jsonl"), `${JSON.stringify({ task_id: run.task_id, model: "gpt-5.6-luna", duration_ms: 1234, retry_count: 2, tool_call_count: 4, compaction_count: 1, wrapper_round_trips: 3 })}\n`);
+        writeFileSync(join(run.telemetry_root, "logs", "latency-metrics.jsonl"), `${JSON.stringify({ task_id: run.task_id, model: "gpt-6-luna", duration_ms: 1234, retry_count: 2, tool_call_count: 4, compaction_count: 1, wrapper_round_trips: 3 })}\n`);
         return { success: true, required_checks: { tests_pass: true, transition_matrix: true, no_race_reported: true } };
       },
     },
@@ -364,10 +369,10 @@ test("model mix counts observed models, preserves unknowns, and deduplicates cor
   const logs = join(root, "logs");
   mkdirSync(logs, { recursive: true });
   writeFileSync(join(logs, "latency-metrics.jsonl"), [
-    { model: "openai/gpt-5.6-luna", request_id: "luna-1" },
-    { model: "gpt-5.6-luna", request_id: "luna-1" },
-    { model: "gpt-5.6-terra", request_id: "terra-1" },
-    { model: "gpt-5.6-sol", request_id: "sol-1" },
+    { model: "openai/gpt-6-luna", request_id: "luna-1" },
+    { model: "gpt-6-luna", request_id: "luna-1" },
+    { model: "gpt-6-terra", request_id: "terra-1" },
+    { model: "gpt-6-sol", request_id: "sol-1" },
     { model: "vendor/future-model", request_id: "unknown-1" },
   ].map((record) => JSON.stringify(record)).join("\n") + "\n");
   try {
@@ -575,7 +580,7 @@ test("evaluator returns deterministic PASS, PARTIAL, FAIL and rejects unknown la
     const cleanDiff = { raw: { changed: [], added: [], deleted: [], outside_fixture: [] }, task_relevant: { changed: [], added: [], deleted: [], outside_fixture: [] }, ignored_runtime_generated: [] };
     const pass = evaluateRun({ run, rawResult: { required_checks: { answer_key: true } }, gateEvidence: {}, fixtureDiff: cleanDiff });
     assert.equal(pass.outcome, "PASS");
-    const partial = evaluateRun({ run, rawResult: { response_text: "openai/gpt-5.6-luna only" }, gateEvidence: {}, fixtureDiff: cleanDiff });
+    const partial = evaluateRun({ run, rawResult: { response_text: "openai/gpt-6-luna only" }, gateEvidence: {}, fixtureDiff: cleanDiff });
     assert.equal(partial.outcome, "PARTIAL");
     const fail = evaluateRun({ run, rawResult: {}, gateEvidence: {}, fixtureDiff: { ...cleanDiff, task_relevant: { changed: ["README.md"], added: [], deleted: [], outside_fixture: [] } } });
     assert.equal(fail.outcome, "FAIL");

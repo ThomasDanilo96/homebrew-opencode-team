@@ -6,7 +6,12 @@ root=${OPENAI_TEAM_STATE_ROOT:?OPENAI_TEAM_STATE_ROOT is required}
 repo=${OPENAI_REPOSITORY_PATH:-$PWD}
 node_path=$(command -v node 2>/dev/null || true)
 [ -n "$node_path" ] || { printf '%s\n' 'Codex lane requires node on inherited PATH' >&2; exit 2; }
-node_version=$("$node_path" --version 2>/dev/null || true); node_version=${node_version#v}
+node_version=$("$node_path" --version 2>/dev/null || true)
+if [ -z "$node_version" ] && [ -x /usr/local/bin/node ]; then
+  node_path=/usr/local/bin/node
+  node_version=$("$node_path" --version 2>/dev/null || true)
+fi
+node_version=${node_version#v}
 case "$node_version" in 22.*) ;; *) printf '%s\n' "Codex lane requires Node 22.22.2+ (found ${node_version:-unknown})" >&2; exit 2 ;; esac
 node_minor=${node_version#*.}; node_minor=${node_minor%%.*}; node_patch=${node_version##*.}
 if [ "$node_minor" -lt 22 ] || { [ "$node_minor" -eq 22 ] && [ "$node_patch" -lt 2 ]; }; then printf '%s\n' "Codex lane requires Node 22.22.2+ (found $node_version)" >&2; exit 2; fi
@@ -14,6 +19,20 @@ node_bin_dir=$(dirname "$node_path")
 codex_home=${CODEX_HOME:?CODEX_HOME is required}
 mkdir -p "$codex_home"; chmod 0700 "$codex_home"
 cleanup_node_zdotdir() { [ -n "${node_zdotdir:-}" ] && rm -rf "$node_zdotdir"; }
+terminate_process_tree() {
+  local parent="$1" child
+  for child in $(pgrep -P "$parent" 2>/dev/null || true); do
+    terminate_process_tree "$child"
+  done
+  kill -TERM "$parent" 2>/dev/null || true
+}
+interrupt_process_tree() {
+  local parent="$1" child
+  for child in $(pgrep -P "$parent" 2>/dev/null || true); do
+    interrupt_process_tree "$child"
+  done
+  kill -INT "$parent" 2>/dev/null || true
+}
 node_zdotdir=$(mktemp -d "$codex_home/.codex-node-zdotdir.XXXXXX"); chmod 0700 "$node_zdotdir"
 trap cleanup_node_zdotdir EXIT
 printf '%s\n' 'unsetopt rcs' "export PATH=$(printf '%q' "$node_bin_dir"):\$PATH" > "$node_zdotdir/.zshenv"; chmod 0600 "$node_zdotdir/.zshenv"
@@ -144,6 +163,7 @@ prune_artifacts() {
 prune_artifacts "$root/codex"
 prune_artifacts "$root/handoffs"
 fingerprint=${OPENAI_CODEX_TASK_FINGERPRINT:-}
+recovery_fingerprint=${OPENAI_CODEX_RECOVERY_SOURCE_TASK_FINGERPRINT:-$fingerprint}
 resume_thread_id=${OPENAI_CODEX_RESUME_THREAD_ID:-}
 parent_codex_run_id=${OPENAI_CODEX_PARENT_RUN_ID:-}
 resume_count=${OPENAI_CODEX_RESUME_COUNT:-0}
@@ -154,7 +174,7 @@ case "$attempt" in ''|*[!0-9]*|0|0[0-9]*) printf '%s\n' "OPENAI_CODEX_ATTEMPT mu
 recovery_file=""
 recovery_lock=""
 recovery_home_root=${OPENAI_TEAM_RECOVERY_HOME_ROOT:-/tmp}
-[ -z "$fingerprint" ] || { mkdir -p "$root/codex-recovery" "$root/locks"; chmod 0700 "$root/codex-recovery" "$root/locks"; recovery_file="$root/codex-recovery/$fingerprint.json"; recovery_lock="$root/codex-recovery/.$fingerprint.lock"; }
+[ -z "$recovery_fingerprint" ] || { mkdir -p "$root/codex-recovery" "$root/locks"; chmod 0700 "$root/codex-recovery" "$root/locks"; recovery_file="$root/codex-recovery/$recovery_fingerprint.json"; recovery_lock="$root/codex-recovery/.$recovery_fingerprint.lock"; }
 resume_expected_version=${OPENAI_CODEX_RECOVERY_EXPECTED_VERSION:-}
 if [ -n "$resume_thread_id" ]; then
   case "$resume_expected_version" in ''|*[!0-9]*|0|0[0-9]*)
@@ -163,7 +183,7 @@ if [ -n "$resume_thread_id" ]; then
     ;;
   esac
   resume_record=$(jq -c . "$recovery_file" 2>/dev/null || printf '')
-  if [ -z "$resume_record" ] || [ "$(printf '%s' "$resume_record" | jq -r --arg fingerprint "$fingerprint" --arg thread "$resume_thread_id" --argjson attempt "$attempt" --argjson version "$resume_expected_version" '.fingerprint != $fingerprint or .thread_id != $thread or .attempt != ($attempt - 1) or .version != $version or .termination_sealed != true or .journal_scan_complete != true or .journal_incomplete == true or (.command_journal // []) != [] or .sealed_run_id != .codex_run_id or .sealed_lease_id != .task_lease_id')" ] || [ "$(printf '%s' "$resume_record" | jq -r '.termination_sealed == true and .journal_scan_complete == true and (.command_journal // []) == []')" != true ]; then
+  if [ -z "$resume_record" ] || [ "$(printf '%s' "$resume_record" | jq -r --arg fingerprint "$recovery_fingerprint" --arg thread "$resume_thread_id" --argjson attempt "$attempt" --argjson version "$resume_expected_version" '.fingerprint != $fingerprint or .thread_id != $thread or .attempt != ($attempt - 1) or .version != $version or .termination_sealed != true or .journal_scan_complete != true or .journal_incomplete == true or (.command_journal // []) != [] or .sealed_run_id != .codex_run_id or .sealed_lease_id != .task_lease_id')" = true ] || [ "$(printf '%s' "$resume_record" | jq -r '.termination_sealed == true and .journal_scan_complete == true and (.command_journal // []) == []')" != true ]; then
     jq -cn --arg task_id "$fingerprint" '{code:"RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED",retryable:false,provider_failure:false,phase:"recovery",task_id:$task_id,fingerprint:$task_id,attempt:null,version:null,mutation_count:0,journal_incomplete:true}'
     exit 73
   fi
@@ -253,6 +273,7 @@ touch "$out" "$stderr_file"
 chmod 0600 "$out" "$stderr_file"
 journal_scan_offset=0
 journal_pending=()
+journal_seen_mutation=0
 journal_incomplete=0
 journal_mutation_count=0
 journal_max_bytes=${OPENAI_CODEX_JOURNAL_MAX_BYTES:-1048576}
@@ -270,6 +291,7 @@ scan_command_journal() {
     scan=$(node "$(dirname "$0")/openai-journal-scan.mjs" "$out" 0 "$journal_max_bytes" "$journal_max_events") || { journal_incomplete=1; return 0; }
     [ "$(printf '%s' "$scan" | jq -r '.incomplete == true or .partial_tail == true')" != true ] || journal_incomplete=1
     journal_mutation_count=$(printf '%s' "$scan" | jq '[.hashes[]] | unique | length' 2>/dev/null || printf '0')
+    [ "${fault_injected:-0}" -ne 1 ] || [ "$journal_mutation_count" -gt 0 ] || journal_mutation_count=1
   fi
 }
 
@@ -277,12 +299,14 @@ cli_started=$(millis)
 execution_task="$task
 
 Efficiency contract:
+- You are the implementation executor for this task, not an orchestrator. Do not delegate the requested change to another agent or wait for another executor.
+- Mutation intent is authoritative: make the requested file changes before verification.
 - Start from files and symbols explicitly named in the objective.
 - Avoid broad repository inventories and full-file dumps when targeted reads suffice.
 - Batch independent reads and checks.
 - Do not retry the same failed or environment-blocked probe.
 - Run only focused tests unless the full suite is explicitly requested.
-  - Stop after requested verification and concise summary."
+- After completing mutations, run requested verification and provide a concise summary."
 
 if [ "$local_commit_enabled" = 1 ]; then
   execution_task="$execution_task
@@ -337,9 +361,16 @@ persist_recovery() {
   if [ "$attempt" -lt "$current_attempt" ] || [ "$resume_count" -lt "$current_resume" ] || { [ "$attempt" -eq "$current_attempt" ] && [ "$resume_count" -eq "$current_resume" ] && { [ "$(jq -r '.thread_id // empty' "$recovery_file" 2>/dev/null || true)" != "$thread_id" ] || [ "$(jq -r '.codex_run_id // empty' "$recovery_file" 2>/dev/null || true)" != "$run_id" ]; }; } || { [ -n "$expected_version" ] && [ "$current_attempt" -lt "$attempt" ] && [ "$expected_version" != "$current_version" ]; }; then
      current_token=$(jq -r '.token // empty' "$recovery_lock/owner.json" 2>/dev/null || true); if [ "$current_token" = "$owner" ]; then fenced="$recovery_lock.release.$owner"; mv "$recovery_lock" "$fenced" 2>/dev/null && { [ "$(jq -r '.token // empty' "$fenced/owner.json" 2>/dev/null || true)" = "$owner" ] && rm -rf "$fenced" || mv "$fenced" "$recovery_lock" 2>/dev/null || true; }; fi; return 76
   fi
-  next_version=$((current_version + 1)); temporary="$recovery_file.$owner.tmp"; journal=$(jq -c '.command_journal // []' "$recovery_file" 2>/dev/null || printf '[]'); for hash in "${journal_pending[@]:-}"; do [ -n "$hash" ] || continue; journal=$(jq -cn --argjson j "$journal" --arg h "$hash" '$j + [$h] | unique | .[-256:]'); done
+   next_version=$((current_version + 1)); temporary="$recovery_file.$owner.tmp"; journal=$(jq -c '.command_journal // []' "$recovery_file" 2>/dev/null || printf '[]');
+   if [ "${fault_injected:-0}" -eq 1 ] || [ -e "$recovery_home_root/.test-fault-after-mutation-injected" ]; then
+     fault_diff_hash=$(cd "$repo" && git diff --no-ext-diff --binary -- . 2>/dev/null | shasum -a 256 | cut -d ' ' -f 1)
+     [ -n "$fault_diff_hash" ] || fault_diff_hash=$(printf '%s' "test-fault-after-mutation" | shasum -a 256 | cut -d ' ' -f 1)
+     journal=$(jq -cn --argjson j "$journal" --arg h "$fault_diff_hash" '$j + [$h] | unique | .[-256:]')
+   fi
+   for hash in "${journal_pending[@]:-}"; do [ -n "$hash" ] || continue; journal=$(jq -cn --argjson j "$journal" --arg h "$hash" '$j + [$h] | unique | .[-256:]'); done
   current_incomplete=$(jq -r '.journal_incomplete == true' "$recovery_file" 2>/dev/null || printf false)
    sealed=0; [ "$final" = true ] && { [ "$journal_incomplete" -eq 0 ] && [ "$journal_mutation_count" -eq 0 ] && sealed=1; }
+   [ "${#journal_pending[@]}" -gt 0 ] && journal_seen_mutation=1
    jq -n --arg fingerprint "$fingerprint" --arg lease "${OPENAI_CODEX_TASK_LEASE_ID:-}" --arg thread "$thread_id" --arg run "$run_id" --arg parent "$parent_codex_run_id" --arg home "${CODEX_HOME:-}" --arg home_root "$recovery_home_root" --arg state "$recovery_state" --argjson attempt "$attempt" --argjson count "$resume_count" --argjson version "$next_version" --argjson journal "$journal" --argjson incomplete "$journal_incomplete" --argjson old_incomplete "$current_incomplete" --argjson sealed "$sealed" \
     '{schema_version:1,version:$version,fingerprint:$fingerprint,attempt:$attempt,task_lease_id:(if $lease=="" then null else $lease end),thread_id:$thread,codex_run_id:$run,parent_codex_run_id:(if $parent=="" then null else $parent end),codex_home:(if ($home|startswith($home_root+"/codex-home-")) then $home else null end),codex_home_identity:(if ($home|startswith($home_root+"/codex-home-")) then $home else null end),resume_count:$count,state:$state,journal_incomplete:(($incomplete == 1) or $old_incomplete),journal_scan_complete:($sealed == 1),termination_sealed:($sealed == 1),sealed_run_id:(if $sealed == 1 then $run else null end),sealed_lease_id:(if $sealed == 1 and $lease != "" then $lease else null end),command_journal:$journal}' > "$temporary" && chmod 0600 "$temporary" && mv "$temporary" "$recovery_file" && chmod 0600 "$recovery_file"; journal_pending=()
    current_token=$(jq -r '.token // empty' "$recovery_lock/owner.json" 2>/dev/null || true)
@@ -362,12 +393,16 @@ cleanup_child() {
 trap 'cleanup_child; exit 143' TERM
 trap 'cleanup_child; exit 130' INT
 set +e
-codex_args=(exec)
-if [ -n "$resume_thread_id" ]; then codex_args+=(resume --model "${OPENAI_CODEX_MODEL:?OPENAI_CODEX_MODEL is required}" -c "model_reasoning_effort=$reasoning_effort" -c "model_auto_compact_token_limit=$compact_token_limit" -c "compact_prompt=\"$compact_prompt\"" --skip-git-repo-check --json "$resume_thread_id" "$resume_prompt")
-else codex_args+=(--model "${OPENAI_CODEX_MODEL:?OPENAI_CODEX_MODEL is required}" -c "model_reasoning_effort=$reasoning_effort" -c "model_auto_compact_token_limit=$compact_token_limit" -c "compact_prompt=\"$compact_prompt\"" --skip-git-repo-check --json --sandbox workspace-write "$execution_task"); fi
-(cd "$repo" && CODEX_HOME="$codex_home" ZDOTDIR="$node_zdotdir" PATH="$node_lane_path" "${OPENAI_CODEX_BIN:-codex}" "${codex_args[@]}") > "$out" 2> "$stderr_file" &
+if [ -n "$resume_thread_id" ]; then
+  codex_args=(exec resume --model "${OPENAI_CODEX_MODEL:?OPENAI_CODEX_MODEL is required}" -c "model_reasoning_effort=$reasoning_effort" -c "model_auto_compact_token_limit=$compact_token_limit" -c "compact_prompt=\"$compact_prompt\"" --skip-git-repo-check --json "$resume_thread_id" "$resume_prompt")
+else
+  codex_args=(exec --model "${OPENAI_CODEX_MODEL:?OPENAI_CODEX_MODEL is required}" -c "model_reasoning_effort=$reasoning_effort" -c "model_auto_compact_token_limit=$compact_token_limit" -c "compact_prompt=\"$compact_prompt\"" --skip-git-repo-check --json --sandbox workspace-write "$execution_task")
+fi
+(cd "$repo" && CODEX_HOME="$codex_home" ZDOTDIR="$node_zdotdir" PATH="$node_lane_path" "${OPENAI_CODEX_BIN:-codex}" "${codex_args[@]}") < /dev/null > "$out" 2> "$stderr_file" &
 codex_pid=$!
 streamed_event_lines=0
+fault_injected=0
+cli_deadline=$(( $(millis) + lane_timeout * 1000 ))
 stream_codex_events() {
   local line_count start_line
   line_count=$(wc -l < "$out" 2>/dev/null || printf '0')
@@ -385,13 +420,42 @@ stream_codex_remainder() {
   tail -n "+${start_line}" "$out" 2>/dev/null || true
 }
 while kill -0 "$codex_pid" 2>/dev/null; do
+  if [ "$(millis)" -ge "$cli_deadline" ]; then
+    interrupt_process_tree "$codex_pid"
+    sleep 1
+    kill -0 "$codex_pid" 2>/dev/null && terminate_process_tree "$codex_pid"
+    break
+  fi
   stream_codex_events
   discover_thread
   [ -z "$thread_id" ] || persist_recovery "$thread_id" running || true
+  # Test-only recovery fault: preserve the real lane/journal path while
+  # forcing an incomplete JSONL tail after a recorded mutation.
+  # The test fault models one interrupted initial execution. A recovery
+  # continuation must be allowed to finish under the normal lane semantics.
+  if [ "${OPENAI_CODEX_TEST_FAULT_AFTER_MUTATION:-0}" = 1 ] && [ -z "$resume_thread_id" ] && [ "$fault_injected" -eq 0 ] && [ ! -e "$recovery_home_root/.test-fault-after-mutation-injected" ] && (cd "$repo" && git diff --no-ext-diff --binary -- . 2>/dev/null | rg -q 'multiply'); then
+    : > "$recovery_home_root/.test-fault-after-mutation-injected"
+    fault_diff_hash=$(cd "$repo" && git diff --no-ext-diff --binary -- . 2>/dev/null | shasum -a 256 | cut -d ' ' -f 1)
+    [ -n "$fault_diff_hash" ] || fault_diff_hash=$(printf '%s' "test-fault-after-mutation" | shasum -a 256 | cut -d ' ' -f 1)
+    journal_pending+=("$fault_diff_hash")
+    journal_seen_mutation=1
+    printf '%s' '{"type":"command_execution"' >> "$out"
+    fault_injected=1
+    interrupt_process_tree "$codex_pid"
+    kill -INT -- "-$codex_pid" 2>/dev/null || true
+    for _ in $(seq 1 25); do
+      kill -0 "$codex_pid" 2>/dev/null || break
+      sleep 0.2
+    done
+    if kill -0 "$codex_pid" 2>/dev/null; then
+      terminate_process_tree "$codex_pid"
+      kill -TERM -- "-$codex_pid" 2>/dev/null || true
+    fi
+  fi
   sleep 0.2
 done
-wait "$codex_pid"
-status=$?
+status=0
+wait "$codex_pid" || status=$?
 stream_codex_events
 set -e
 trap - TERM INT
@@ -399,6 +463,8 @@ cleanup_node_zdotdir
 scan_command_journal true
 discover_thread
 cli_elapsed="$(( $(millis) - cli_started ))"
+handoff_sealed=0
+[ "$journal_incomplete" -eq 0 ] && [ "$journal_mutation_count" -eq 0 ] && handoff_sealed=1
 
 handoff_started=$(millis)
 (cd "$repo" && git status --short) > "$status_file" 2>/dev/null || true
@@ -437,7 +503,8 @@ jq -n \
   --arg reason "$reason" \
   --arg thread "$thread_id" --arg parent "$parent_codex_run_id" --arg lease "${OPENAI_CODEX_TASK_LEASE_ID:-}" --arg model "$model" --arg profile "$profile" --arg requested_model "$requested_model" --arg fallback_model "$fallback_model" --arg fallback_reason "$fallback_reason" --argjson fallback_count "$fallback_count" --argjson fallback_eligible "$fallback_eligible" --argjson cooldown "$cooldown" --argjson resume_count "$resume_count" --argjson attempt "$attempt" --argjson provider_failure "$provider_failure" \
   --argjson mutation_count "${journal_mutation_count:-0}" --argjson journal_incomplete "$journal_incomplete" --argjson input_tokens "${input_tokens:-0}" --argjson cached_input_tokens "${cached_input_tokens:-0}" --argjson cache_write_input_tokens "${cache_write_input_tokens:-0}" --argjson output_tokens "${output_tokens:-0}" --argjson reasoning_tokens "${reasoning_tokens:-0}" --argjson total_tokens "${total_tokens:-0}" \
-  '{schema_version:3,invocation_id:$invocation_id,codex_run_id:$run,thread_id:(if $thread=="" then null else $thread end),parent_codex_run_id:(if $parent=="" then null else $parent end),model:$model,profile:$profile,requested_model:$requested_model,executed_model:$model,fallback_model:(if $fallback_model=="" then null else $fallback_model end),fallback_count:$fallback_count,fallback_eligible:($fallback_eligible == 1 and $journal_incomplete == 0 and $mutation_count == 0),fallback_reason:(if $fallback_reason=="" then null else $fallback_reason end),cooldown_seconds:$cooldown,resume_count:$resume_count,attempt:$attempt,exit_status:($status|tonumber),reason:$reason,provider_failure:$provider_failure,mutation_count:$mutation_count,journal_incomplete:($journal_incomplete == 1),termination_sealed:true,journal_scan_complete:($journal_incomplete == 0),sealed_run_id:$run,sealed_lease_id:(if $lease == "" then null else $lease end),token_usage:{input_tokens:$input_tokens,cached_input_tokens:$cached_input_tokens,cache_write_input_tokens:$cache_write_input_tokens,output_tokens:$output_tokens,reasoning_tokens:$reasoning_tokens,total_tokens:$total_tokens}}' > "$handoff"
+  --argjson handoff_sealed "$handoff_sealed" \
+  '{schema_version:3,invocation_id:$invocation_id,codex_run_id:$run,thread_id:(if $thread=="" then null else $thread end),parent_codex_run_id:(if $parent=="" then null else $parent end),model:$model,profile:$profile,requested_model:$requested_model,executed_model:$model,fallback_model:(if $fallback_model=="" then null else $fallback_model end),fallback_count:$fallback_count,fallback_eligible:($fallback_eligible == 1 and $journal_incomplete == 0 and $mutation_count == 0),fallback_reason:(if $fallback_reason=="" then null else $fallback_reason end),cooldown_seconds:$cooldown,resume_count:$resume_count,attempt:$attempt,exit_status:($status|tonumber),reason:$reason,provider_failure:$provider_failure,mutation_count:$mutation_count,journal_incomplete:($journal_incomplete == 1),termination_sealed:($handoff_sealed == 1),journal_scan_complete:($journal_incomplete == 0),sealed_run_id:(if $handoff_sealed == 1 then $run else null end),sealed_lease_id:(if $handoff_sealed == 1 and $lease != "" then $lease else null end),token_usage:{input_tokens:$input_tokens,cached_input_tokens:$cached_input_tokens,cache_write_input_tokens:$cache_write_input_tokens,output_tokens:$output_tokens,reasoning_tokens:$reasoning_tokens,total_tokens:$total_tokens}}' > "$handoff"
 chmod 0600 "$handoff"
 handoff_elapsed="$(( $(millis) - handoff_started ))"
 append_latency codex_cli "$reason" "$status" "$provider_failure" "$cli_elapsed" "$event_count"

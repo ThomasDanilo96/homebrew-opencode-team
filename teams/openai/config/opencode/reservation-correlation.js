@@ -22,9 +22,10 @@ export const foregroundChildSessionID = (pending, metadata) =>
     ? resolveTesterChildSessionID(pending, metadata)
     : childSessionIdFromAfter(metadata);
 
-export const sessionCreatedCorrelationDecision = ({ background, explicitCallID, candidateCallIDs = [] } = {}) => {
+export const sessionCreatedCorrelationDecision = ({ background, explicitCallID, candidateCallIDs = [], agent } = {}) => {
   if (explicitCallID) return candidateCallIDs.includes(explicitCallID) ? "durable" : "rejected";
   if (candidateCallIDs.length !== 1) return "none";
+  if (agent === "codex_executor") return "durable";
   return background ? "durable" : "provisional";
 };
 
@@ -56,8 +57,12 @@ export const resolveCorrelatedTesterReservation = (childSessionID, packetCallID,
   return provisional.length === 1 ? { ...provisional[0], child_session_id: childSessionID, provisional_correlation_proof: { child_session_id: childSessionID, packet_call_id: packetCallID, canonical_root_id: canonicalRootID } } : null;
 };
 
-export const bindExactChildReservation = async (pending, childID, { readTask, advanceTask, updateWorkPacket, updateWorkPacketByID, packetPatch = {} } = {}) => {
+export const bindExactChildReservation = async (pending, childID, { readTask, readWorkPacketByID, advanceTask, updateWorkPacket, updateWorkPacketByID, packetPatch = {} } = {}) => {
   if (!pending || typeof childID !== "string" || !childID) throw new Error("BINDING_MISSING_CHILD");
+  if (pending.recovery_continuation && pending.recovery_source_packet_id && readWorkPacketByID) {
+    const sourcePacket = await readWorkPacketByID(pending.recovery_source_packet_id);
+    if (sourcePacket?.child_session_id === childID) throw new Error("RECOVERY_CONTINUATION_CHILD_REUSE_DENIED");
+  }
   if (pending.child_session_id && pending.child_session_id !== childID) throw new Error("CHILD_SESSION_ID_CONFLICT");
   if (pending.provisional_child_session_id && pending.provisional_child_session_id !== childID) throw new Error("PROVISIONAL_CHILD_SESSION_ID_CONFLICT");
   const task = pending.task_fingerprint && readTask ? await readTask(pending.task_fingerprint) : null;

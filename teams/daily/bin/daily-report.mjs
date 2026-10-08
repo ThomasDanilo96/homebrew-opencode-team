@@ -3,7 +3,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { DAILY_PRICING, dailyCost } from "../daily-policy.mjs";
 
-const MODELS = Object.freeze({ Luna: "gpt-5.6-luna", Terra: "gpt-5.6-terra", Sol: "gpt-5.6-sol" });
+const MODELS = Object.freeze({ Luna: "gpt-6-luna", Terra: "gpt-6-terra", Sol: "gpt-6-sol" });
 const COMPLEXITIES = Object.freeze(["TRIVIAL", "NORMAL", "COMPLEX", "HEAVY", "EXTREME"]);
 const finite = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 const token = (packet, field) => packet[field] === undefined ? 0 : finite(packet[field]);

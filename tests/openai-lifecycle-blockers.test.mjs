@@ -8,8 +8,65 @@ import { claimTask, readTask } from "../teams/openai/config/opencode/task-state.
 import { addWorkPacketTokensByID, createWorkPacket, incrementWorkPacketByID, listWorkPackets, updateWorkPacketByID } from "../teams/openai/config/opencode/work-packet.js";
 import { ensurePolicy, readPolicy } from "../teams/openai/config/opencode/codex-authority.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
+import { codexDispatchDecision, reservationMatchesChild } from "../teams/openai/config/opencode/openai-team-tools.js";
 
 const hash = (value) => createHash("sha256").update(value).digest("hex");
+
+test("pending recovery is not misclassified as a duplicate Codex launch", () => {
+  const packet = {
+    packet_id: "p".repeat(64),
+    task_fingerprint: "f".repeat(64),
+    agent: "codex_executor",
+    parent_session_id: "root",
+    root_objective_sha256: "o".repeat(64),
+    recovery_state: "RECOVERY_REQUIRED",
+    verification_status: "pending_manual_recovery_review",
+    mutation_count: 62,
+    journal_incomplete: true,
+  };
+  assert.deepEqual(codexDispatchDecision([packet], "root", "o".repeat(64)), { decision: "RECOVERY_REQUIRED", packet });
+  assert.equal(codexDispatchDecision([{ ...packet, recovery_state: undefined, verification_status: "pending" }], "root", "o".repeat(64)).decision, "DUPLICATE");
+  assert.equal(codexDispatchDecision([{ ...packet, recovery_state: undefined, verification_status: "pending", error_code: "RECOVERY_SIDE_EFFECT_REVIEW_REQUIRED" }], "root", "o".repeat(64)).decision, "RECOVERY_REQUIRED");
+  assert.equal(codexDispatchDecision([{ ...packet, recovery_state: "RECOVERY_CONTINUATION_REQUIRED", verification_status: "passed" }], "root", "o".repeat(64)).decision, "RECOVERY_CONTINUATION");
+  assert.equal(codexDispatchDecision([{ ...packet, recovery_state: "RECOVERY_VERIFIED_COMPLETE", verification_status: "passed" }], "root", "o".repeat(64)).decision, "RECOVERY_VERIFIED_COMPLETE");
+});
+
+test("codex recovery selection is deterministic across packet order", () => {
+  const rootObjective = "o".repeat(64);
+  const original = { packet_id: "a".repeat(64), agent: "codex_executor", parent_session_id: "root", root_objective_sha256: rootObjective, attempt: 1, updated_at: "2026-10-01T12:00:00Z" };
+  const recovery = { packet_id: "b".repeat(64), agent: "codex_executor", parent_session_id: "root", root_objective_sha256: rootObjective, attempt: 2, updated_at: "2026-10-01T11:00:00Z", recovery_continuation: true, recovery_state: "RECOVERY_CONTINUATION_REQUIRED", baseline_head: "abc123", baseline_dirty: false };
+  for (const packets of [[original, recovery], [recovery, original]]) {
+    const decision = codexDispatchDecision(packets, "root", rootObjective);
+    assert.equal(decision.decision, "RECOVERY_CONTINUATION");
+    assert.equal(decision.packet.packet_id, recovery.packet_id);
+  }
+});
+
+test("codex recovery selection fails closed for equal active authorities", () => {
+  const rootObjective = "o".repeat(64);
+  const packet = (id) => ({ packet_id: id.repeat(64), agent: "codex_executor", parent_session_id: "root", root_objective_sha256: rootObjective, attempt: 2, recovery_state: "RECOVERY_CONTINUATION_REQUIRED" });
+  const decision = codexDispatchDecision([packet("a"), packet("b")], "root", rootObjective);
+  assert.equal(decision.decision, "AMBIGUOUS_CODEX_RECOVERY_AUTHORITY");
+  assert.equal(decision.packet, null);
+});
+
+test("active recovery continuation suppresses a second continuation", () => {
+  const rootObjective = "o".repeat(64);
+  const source = { packet_id: "a".repeat(64), agent: "codex_executor", parent_session_id: "root", root_objective_sha256: rootObjective, attempt: 1, recovery_state: "RECOVERY_CONTINUATION_REQUIRED" };
+  const active = { packet_id: "b".repeat(64), agent: "codex_executor", parent_session_id: "root", root_objective_sha256: rootObjective, attempt: 2, recovery_continuation: true, recovery_source_packet_id: source.packet_id, outcome: "pending" };
+  const decision = codexDispatchDecision([source, active], "root", rootObjective);
+  assert.equal(decision.decision, "DUPLICATE");
+  assert.equal(decision.packet.packet_id, active.packet_id);
+  const consumed = codexDispatchDecision([{ ...source, recovery_state: "RECOVERY_VERIFIED_COMPLETE" }, { ...active, outcome: "completed" }], "root", rootObjective);
+  assert.equal(consumed.decision, "RECOVERY_VERIFIED_COMPLETE");
+});
+
+test("lifecycle settlement accepts the exact provisional child binding", () => {
+  assert.equal(reservationMatchesChild({ provisional_child_session_id: "child" }, "child"), true);
+  assert.equal(reservationMatchesChild({ child_session_id: "child" }, "child"), true);
+  assert.equal(reservationMatchesChild({ provisional_child_session_id: "other" }, "child"), false);
+  assert.equal(reservationMatchesChild({ child_session_id: "child", provisional_child_session_id: "other" }, "child"), true);
+});
 const withState = async (fn) => {
   const root = await mkdtemp(join(tmpdir(), "openai-lifecycle-"));
   const previous = process.env.OPENAI_TEAM_STATE_ROOT;
@@ -22,8 +79,16 @@ const withState = async (fn) => {
 };
 
 test("work packet lease round-trips and canonical ID updates the real packet", () => withState(async () => {
-  const packet = await createWorkPacket("call-roundtrip", { task_lease_id: "lease-roundtrip", phase: "admitted" });
+  const packet = await createWorkPacket("call-roundtrip", { task_lease_id: "lease-roundtrip", master_parent_session_id: "root-session", delegation_scope: "architecture", recovery_continuation: true, recovery_source_packet_id: "source-packet", recovery_source_task_fingerprint: "source-fingerprint", recovery_source_baseline_head: "abc123", recovery_source_baseline_dirty: false, repository_realpath: "/fixture", baseline_head: "abc123", baseline_dirty: false, phase: "admitted" });
   assert.equal((await listWorkPackets()).find((entry) => entry.packet_id === packet.packet_id).task_lease_id, "lease-roundtrip");
+  assert.equal((await listWorkPackets()).find((entry) => entry.packet_id === packet.packet_id).delegation_scope, "architecture");
+  const persisted = (await listWorkPackets()).find((entry) => entry.packet_id === packet.packet_id);
+  assert.equal(persisted.recovery_continuation, true);
+  assert.equal(persisted.recovery_source_packet_id, "source-packet");
+  assert.equal(persisted.recovery_source_task_fingerprint, "source-fingerprint");
+  assert.equal(persisted.recovery_source_baseline_head, "abc123");
+  assert.equal(persisted.recovery_source_baseline_dirty, false);
+  assert.equal(persisted.master_parent_session_id, "root-session");
   const updated = await updateWorkPacketByID(packet.packet_id, { phase: "codex_running" });
   assert.equal(updated.packet_id, packet.packet_id);
   assert.equal((await listWorkPackets()).find((entry) => entry.packet_id === packet.packet_id).phase, "codex_running");

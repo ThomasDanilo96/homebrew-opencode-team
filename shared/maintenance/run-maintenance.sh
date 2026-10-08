@@ -21,7 +21,7 @@ fi
 export OPENCODE_TEAM_PYTHON
 
 case "$TASK" in
-  best-tool-output-gc|best-retention|best-memory-safety|openai-retention|runtime-gc) ;;
+  best-tool-output-gc|best-retention|best-memory-safety|openai-retention|runtime-gc|playwright-gc|host-storage-gc) ;;
   *) printf 'Unknown maintenance task: %s\n' "$TASK" >&2; exit 2 ;;
 esac
 
@@ -212,6 +212,12 @@ case "$TASK" in
       RUNTIME_ROOT="${RUNTIME_ROOT:-${CACHE_ROOT:-$STATE_ROOT/cache}/runtime}" \
       PACKAGE_ROOT="$PACKAGE_ROOT" DATA_ROOT="$DATA_ROOT" STATE_ROOT="$STATE_ROOT" \
       CACHE_ROOT="${CACHE_ROOT:-$STATE_ROOT/cache}" DEPENDENCY_ROOT="${DEPENDENCY_ROOT:-$DATA_ROOT/dependencies}" \
-      node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" rotate --apply
+       node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" rotate --apply
+    ;;
+  playwright-gc)
+    DATA_ROOT="$DATA_ROOT" node "$PACKAGE_ROOT/shared/maintenance/playwright-gc.mjs"
+    ;;
+  host-storage-gc)
+    node "$PACKAGE_ROOT/shared/maintenance/host-storage-gc.mjs" --apply
     ;;
 esac

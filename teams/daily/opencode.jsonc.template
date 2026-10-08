@@ -1,7 +1,7 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "openai/gpt-5.6-luna",
-  "small_model": "openai/gpt-5.6-luna",
+  "model": "openai/gpt-6-luna",
+  "small_model": "openai/gpt-6-luna",
   "default_agent": "openai_orchestrator",
   "subagent_depth": 1,
   "enabled_providers": ["openai"],
@@ -13,8 +13,14 @@
   ],
   "share": "disabled",
   "autoupdate": "notify",
+  "permission": { "*": "allow", "external_directory": "allow", "doom_loop": "allow" },
   "compaction": { "auto": true, "prune": true, "reserved": 24000 },
+  "browser_automation_engine": {
+    "provider": "playwright",
+    "playwright_mcp_args": ["--headless", "--isolated", "--output-dir", "@DATA_ROOT@/daily/playwright/output"]
+  },
   "plugin": [
+    "@OMO_PLUGIN@",
     "@PACKAGE_ROOT@/teams/openai/config/opencode/openai-team-tools.js",
     "@PACKAGE_ROOT@/teams/openai/config/opencode/openai-authorship-guard.js"
   ],
@@ -22,21 +28,21 @@
     "openai_orchestrator": {
       "mode": "primary",
       "description": "Fast, autonomous OpenAI Daily orchestrator.",
-      "model": "openai/gpt-5.6-luna",
-      "permission": { "task": "allow", "bash": "allow", "edit": "deny", "write": "deny", "skill": "deny", "skill_mcp": "deny", "codegraph_*": "deny", "interactive_bash": "allow" },
+      "model": "openai/gpt-6-luna",
+      "permission": { "task": "allow", "bash": "allow", "edit": "deny", "write": "deny", "skill": "allow", "skill_mcp": "allow", "codegraph_*": "deny", "interactive_bash": "allow" },
       "tools": { "task": true, "bash": true, "interactive_bash": true, "openai_run_codex": false, "call_omo_agent": false },
-      "prompt_append": "For repository-mutating objectives, delegate immediately to codex_executor as your first operational tool call. Do not inspect, read, glob, grep, search, use Serena, run shell commands, or write todos before that delegation. Do not attempt repository mutation directly. You are the OPENAI DAILY orchestrator. Optimize for time-to-useful-answer, not exhaustive certainty. Collect the minimum evidence needed for a defensible answer and stop as soon as the requested question is supported, no material contradiction remains, and remaining searches are only confirmatory. Do not perform a final broad pass. Classify before acting: TRIVIAL is direct with no child and about 5 meaningful operations; NORMAL repository work is never direct: repository mutations must use exactly one codex_executor child first, and read-only repository objectives must use exactly one openai_explore child first; do not launch a second repository child and about 12 weighted operations; COMPLEX uses at most two independent useful children and reassesses at about 20 weighted operations; HEAVY uses at most three children; EXTREME is rare and should be redirected to BEST or OPENAI when exhaustive work is actually required. Launch independent children concurrently, never serially, and only when saved root latency exceeds startup cost. Never begin routine analysis with Glob **/*, broad repository grep, package-lock searches, or binary strings. Prefer exact symbol/path, targeted search, narrow directory, then bounded widening. Do not repeat equivalent searches. Read-only reviews are not certification. For coding tasks inspect narrowly, implement, run the focused relevant test first, and broaden only for shared-core, release-critical, high-risk, or unresolved behavior. Keep depth at one. Use Luna first; use Terra only for a concrete reasoning or review gap; use Sol only for critical/high-risk ambiguity. Do not use Astra. A completed TASK_CACHE_HIT must not be retried. A successful child must not be rerun. Keep handoffs compact: result, evidence, files/symbols, tests, blocker. Codex terminal next_agents is authoritative; when tester is required launch exactly one tester for that exact packet_id; never report final success until every required gate is terminal. Do not ask confirmation for routine reversible development steps. Never use non-OpenAI providers. CodeGraph and skill_mcp are unavailable in DAILY; use the normal read-only repository tools instead."
+      "prompt_append": "For repository-mutating objectives, delegate immediately to codex_executor as your first operational tool call. Do not inspect, read, glob, grep, search, use Serena, run shell commands, or write todos before that delegation. Do not attempt repository mutation directly. You are the OPENAI DAILY orchestrator. Optimize for time-to-useful-answer, not exhaustive certainty. Collect the minimum evidence needed for a defensible answer and stop as soon as the requested question is supported, no material contradiction remains, and remaining searches are only confirmatory. Do not perform a final broad pass. Classify before acting: TRIVIAL is direct with no child and about 5 meaningful operations; NORMAL repository work is never direct: repository mutations must use exactly one codex_executor child first, and read-only repository objectives must use exactly one openai_explore child first; do not launch a second repository child and about 12 weighted operations; COMPLEX uses at most two independent useful children and reassesses at about 20 weighted operations; HEAVY uses at most three children; EXTREME is rare and should be redirected to BEST or OPENAI when exhaustive work is actually required. Launch independent children concurrently, never serially, and only when saved root latency exceeds startup cost. Never begin routine analysis with Glob **/*, broad repository grep, package-lock searches, or binary strings. Prefer exact symbol/path, targeted search, narrow directory, then bounded widening. Do not repeat equivalent searches. Read-only reviews are not certification. For coding tasks inspect narrowly, implement, run the focused relevant test first, and broaden only for shared-core, release-critical, high-risk, or unresolved behavior. Keep depth at one. Use Luna first; use Terra only for a concrete reasoning or review gap; use Sol only for critical/high-risk ambiguity. Do not use Astra. A completed TASK_CACHE_HIT must not be retried. A successful child must not be rerun. Keep handoffs compact: result, evidence, files/symbols, tests, blocker. Codex terminal next_agents is authoritative; when tester is required launch exactly one tester for that exact packet_id; never report final success until every required gate is terminal. Do not ask confirmation for routine reversible development steps. Never use non-OpenAI providers. CodeGraph remains unavailable in DAILY; browser work may load the Playwright skill and call its skill_mcp server without granting repository, Codex, or remote-mutation authority."
     },
     "openai_explore": {
       "description": "Fast read-only repository explorer.",
-      "model": "openai/gpt-5.6-luna",
-      "permission": { "edit": "deny", "write": "deny", "skill_mcp": "deny", "codegraph_*": "deny", "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny" },
+      "model": "openai/gpt-6-luna",
+      "permission": { "edit": "deny", "write": "deny", "skill": "allow", "skill_mcp": "allow", "codegraph_*": "deny", "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false },
-      "prompt_append": "Use Serena first for symbols, references, structure, and diagnostics. Own only the assigned repository slice and return compact evidence. Do not invoke CodeGraph or skill_mcp; use the normal read-only repository tools."
+        "prompt_append": "Use Serena first for symbols, references, structure, and diagnostics. Own only the assigned repository slice and return compact evidence. Do not invoke CodeGraph; browser work may use the loaded Playwright skill through skill_mcp without changing repository or remote-mutation permissions."
     },
     "openai_librarian": {
       "description": "Fast OpenAI-only documentation researcher.",
-      "model": "openai/gpt-5.6-luna",
+      "model": "openai/gpt-6-luna",
       "permission": { "serena_*": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false },
       "prompt_append": "Research only the assigned external documentation slice and return source, finding, and consequence compactly."
@@ -44,38 +50,38 @@
     "openai_ops": {
       "description": "OpenAI-only read-only remote investigator.",
       "mode": "subagent",
-      "model": "openai/gpt-5.6-luna",
+      "model": "openai/gpt-6-luna",
       "permission": { "edit": "deny", "write": "deny", "bash": "deny", "task": "deny", "skill": "deny", "serena_*": "deny" },
       "tools": { "openai_remote_read": true, "openai_run_codex": false, "call_omo_agent": false, "bash": false, "task": false, "skill": false }
     },
     "tester": {
       "description": "Focused test and verification worker.",
-      "model": "openai/gpt-5.6-luna",
+      "model": "openai/gpt-6-luna",
       "permission": { "apply_patch": "deny", "edit": "deny", "write": "deny", "delete": "deny", "serena_*": "deny", "interactive_bash": "deny", "task": "deny", "skill": "deny" },
       "tools": { "bash": true, "openai_run_codex": false, "call_omo_agent": false, "apply_patch": false, "edit": false, "write": false, "task": false }
     },
     "reviewer": {
       "description": "Balanced read-only correctness and security reviewer.",
-      "model": "openai/gpt-5.6-terra",
+      "model": "openai/gpt-6-terra",
       "permission": { "edit": "deny", "write": "deny", "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false }
     },
     "reviewer_critical": {
       "description": "Rare critical-risk read-only reviewer.",
-      "model": "openai/gpt-5.6-sol",
+      "model": "openai/gpt-6-sol",
       "permission": { "edit": "deny", "write": "deny", "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false }
     },
     "specialist": {
       "description": "Balanced specialist for difficult independent reasoning.",
-      "model": "openai/gpt-5.6-terra",
+      "model": "openai/gpt-6-terra",
       "permission": { "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false }
     },
     "codex_executor": {
       "description": "OpenAI Daily Luna wrapper around the isolated Codex lane.",
       "mode": "subagent",
-      "model": "openai/gpt-5.6-luna",
+      "model": "openai/gpt-6-luna",
       "permission": {
         "openai_run_codex": "allow",
         "todowrite": "deny",
@@ -94,6 +100,7 @@
         "command": "deny",
         "task": "deny",
         "skill": "deny",
+        "skill_mcp": "deny",
         "webfetch": "deny",
         "websearch": "deny",
         "web": "deny",

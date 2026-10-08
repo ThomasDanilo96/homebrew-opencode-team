@@ -20,7 +20,28 @@ const tuiTeams = fs.readdirSync(path.join(root, "teams"), { withFileTypes: true 
 
 const best = read("best");
 const bestOmo = JSON.parse(fs.readFileSync(path.join(home, "config", "best", "xdg-config", "opencode", "oh-my-openagent.jsonc"), "utf8"));
-same(best.model, "openai/gpt-5.6-luna", "BEST model");
+const assertSkillMcp = (team, agent) => {
+  const env = {
+    ...process.env,
+    OPENCODE_CONFIG: path.join(home, "config", team, "opencode.jsonc"),
+    OPENCODE_CONFIG_DIR: path.join(home, "config", team),
+    OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+    OPENCODE_DISABLE_CLAUDE_CODE: "1",
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(home, "config", team, "xdg-config"),
+    XDG_DATA_HOME: path.join(home, "data", team, "data"),
+    XDG_CACHE_HOME: path.join(home, "cache", team),
+    XDG_STATE_HOME: path.join(home, "state", team),
+  };
+  const resolved = spawnSync("opencode", ["debug", "agent", agent], { cwd: root, env, encoding: "utf8" });
+  assert(resolved.status === 0, `${team}/${agent} runtime config rejected: ${resolved.stderr}`);
+  const effective = JSON.parse(resolved.stdout);
+  const allowed = Array.isArray(effective.permission)
+    ? effective.permission.some((entry) => entry.permission === "skill_mcp" && entry.action === "allow")
+    : effective.permission?.skill_mcp === "allow";
+  assert(allowed, `${team}/${agent} effective skill_mcp capability missing`);
+};
+same(best.model, "openai/gpt-6-luna", "BEST model");
 same(best.small_model, "opencode-go/mimo-v2.5", "BEST small_model");
 same(best.default_agent, "OpenCode-Builder", "BEST default_agent");
 same(best.tools.call_omo_agent, false, "BEST profile legacy delegation tool");
@@ -35,6 +56,9 @@ same(bestOmo.agents["OpenCode-Builder"].tools.call_omo_agent, false, "BEST OMO B
 same(best.agent.explore.model, "opencode-go/qwen3.7-plus", "BEST explore model");
 same(best.agent.librarian.model, "opencode-go/qwen3.7-plus", "BEST librarian model");
 same(best.compaction, { auto: true, prune: true, reserved: 10000 }, "BEST compaction");
+assert(bestOmo.browser_automation_engine?.provider === "playwright", "BEST Playwright provider missing");
+assert(bestOmo.browser_automation_engine?.playwright_mcp_args?.includes("--isolated"), "BEST Playwright isolation missing");
+assert(bestOmo.browser_automation_engine?.playwright_mcp_args?.some((value) => value.endsWith("/best/playwright/output")), "BEST Playwright output path missing");
 assert(best.mcp?.serena?.enabled === true, "BEST Serena MCP missing");
 assert(path.isAbsolute(best.mcp.serena.command[0]) && (best.mcp.serena.command[0].startsWith(path.join(home, "data")) || best.mcp.serena.command[0].startsWith(dependencyRoot)), "BEST Serena path invalid");
 assert(best.provider?.["opencode-go"]?.options?.timeout === 300000, "BEST provider options missing");
@@ -45,6 +69,11 @@ same(go.model, "opencode-go/mimo-v2.5", "GO model");
 same(go.small_model, "opencode-go/mimo-v2.5", "GO small_model");
 same(go.default_agent, "OpenCode-Builder", "GO default_agent");
 same(go.compaction, { auto: true, prune: true, reserved: 10000 }, "GO compaction");
+const goOmo = JSON.parse(fs.readFileSync(path.join(home, "config", "go", "xdg-config", "opencode", "oh-my-openagent.jsonc"), "utf8"));
+assert(goOmo.browser_automation_engine?.provider === "playwright", "GO Playwright provider missing");
+assert(goOmo.browser_automation_engine?.playwright_mcp_args?.some((value) => value.endsWith("/go/playwright/output")), "GO Playwright output path missing");
+assertSkillMcp("best", "OpenCode-Builder");
+assertSkillMcp("go", "OpenCode-Builder");
 assert(go.disabled_providers.includes("openai"), "GO provider policy missing");
 assert(go.mcp?.serena?.enabled === true, "GO Serena MCP missing");
 assert(path.isAbsolute(go.mcp.serena.command[0]) && (go.mcp.serena.command[0].startsWith(path.join(home, "data")) || go.mcp.serena.command[0].startsWith(dependencyRoot)), "GO Serena path invalid");
@@ -52,27 +81,33 @@ assert(go.provider?.["opencode-go"]?.options?.max_tokens === 32768, "GO provider
 assert(go.plugin.length === 1 && path.isAbsolute(go.plugin[0]), "GO plugin order/path invalid");
 
 const openai = read("openai");
-same(openai.model, "openai/gpt-5.6-sol", "OPENAI model");
-same(openai.small_model, "openai/gpt-5.6-luna-fast", "OPENAI small_model");
+const openaiOmo = JSON.parse(fs.readFileSync(path.join(home, "config", "openai", "xdg-config", "opencode", "oh-my-openagent.jsonc"), "utf8"));
+same(openai.model, "openai/gpt-6-sol", "OPENAI model");
+same(openai.small_model, "openai/gpt-6-luna-fast", "OPENAI small_model");
 same(openai.default_agent, "openai_orchestrator", "OPENAI default_agent");
 same(Object.keys(openai.agent).sort(), ["codex_executor", "openai_explore", "openai_librarian", "openai_ops", "openai_orchestrator", "reviewer", "reviewer_critical", "specialist", "tester"], "OPENAI agents");
 same(openai.enabled_providers, ["openai"], "OPENAI enabled providers");
 same(openai.compaction, { auto: true, prune: true, reserved: 10000 }, "OPENAI compaction");
+assert(openaiOmo.browser_automation_engine?.provider === "playwright", "OPENAI Playwright provider missing");
+assert(openaiOmo.browser_automation_engine?.playwright_mcp_args?.some((value) => value.endsWith("/openai/playwright/output")), "OPENAI Playwright output path missing");
 assert(openai.mcp?.serena?.enabled === true, "OPENAI Serena MCP missing");
 assert(path.isAbsolute(openai.mcp.serena.command[0]) && (openai.mcp.serena.command[0].startsWith(path.join(home, "data")) || openai.mcp.serena.command[0].startsWith(dependencyRoot)), "OPENAI Serena path invalid");
 assert(openai.plugin.length === 3 && openai.plugin.every(path.isAbsolute), "OPENAI plugin paths invalid");
 
 const daily = read("daily");
-same(daily.model, "openai/gpt-5.6-luna", "OPENAI DAILY model");
-same(daily.small_model, "openai/gpt-5.6-luna", "OPENAI DAILY small_model");
+const dailyOmo = JSON.parse(fs.readFileSync(path.join(home, "config", "daily", "xdg-config", "opencode", "oh-my-openagent.jsonc"), "utf8"));
+same(daily.model, "openai/gpt-6-luna", "OPENAI DAILY model");
+same(daily.small_model, "openai/gpt-6-luna", "OPENAI DAILY small_model");
 same(daily.default_agent, "openai_orchestrator", "OPENAI DAILY default_agent");
 same(Object.keys(daily.agent).sort(), ["codex_executor", "openai_explore", "openai_librarian", "openai_ops", "openai_orchestrator", "reviewer", "reviewer_critical", "specialist", "tester"], "OPENAI DAILY agents");
 same(daily.enabled_providers, ["openai"], "OPENAI DAILY enabled providers");
 same(daily.compaction, { auto: true, prune: true, reserved: 24000 }, "OPENAI DAILY compaction");
+assert(dailyOmo.browser_automation_engine?.provider === "playwright", "DAILY Playwright provider missing");
+assert(dailyOmo.browser_automation_engine?.playwright_mcp_args?.some((value) => value.endsWith("/daily/playwright/output")), "DAILY Playwright output path missing");
 assert(daily.mcp?.serena?.enabled === true, "OPENAI DAILY Serena MCP missing");
 assert(path.isAbsolute(daily.mcp.serena.command[0]) && (daily.mcp.serena.command[0].startsWith(path.join(home, "data")) || daily.mcp.serena.command[0].startsWith(dependencyRoot)), "OPENAI DAILY Serena path invalid");
-assert(daily.plugin.length === 2 && daily.plugin.every(path.isAbsolute), "OPENAI DAILY plugin paths invalid");
-assert(daily.plugin[0].endsWith("/teams/openai/config/opencode/openai-team-tools.js"), "OPENAI DAILY shared tools path invalid");
+assert(daily.plugin.length === 3 && daily.plugin.every(path.isAbsolute), "OPENAI DAILY plugin paths invalid");
+assert(daily.plugin[1].endsWith("/teams/openai/config/opencode/openai-team-tools.js"), "OPENAI DAILY shared tools path invalid");
 
 const serenaMutationPatterns = ["serena_replace_*", "serena_insert_*", "serena_rename_*", "serena_delete_*", "serena_write_*", "serena_safe_delete_*", "serena_edit_*"];
 const serenaReadTools = ["serena_get_symbols_overview", "serena_find_symbol", "serena_find_declaration", "serena_find_implementations", "serena_find_referencing_symbols", "serena_get_diagnostics_for_file", "serena_search_for_pattern", "serena_read_memory", "serena_get_current_config", "serena_activate_project"];
@@ -102,8 +137,10 @@ for (const team of ["openai", "daily"]) {
     const resolved = spawnSync("opencode", ["debug", "agent", agent], { cwd: root, env, encoding: "utf8" });
     assert(resolved.status === 0, `${team}/${agent} runtime config rejected: ${resolved.stderr}`);
     const effective = JSON.parse(resolved.stdout);
-    const denied = new Set((effective.permission || []).filter((entry) => entry.action === "deny").map((entry) => entry.permission));
-    assert(denied.has("skill_mcp"), `${team}/${agent} effective skill_mcp surface`);
+    const permissionEntries = Array.isArray(effective.permission) ? effective.permission : [];
+    const denied = new Set(permissionEntries.filter((entry) => entry.action === "deny").map((entry) => entry.permission));
+    const allowsSkillMcp = permissionEntries.some((entry) => entry.permission === "skill_mcp" && entry.action === "allow");
+    assert(allowsSkillMcp, `${team}/${agent} effective skill_mcp capability missing`);
     assert(denied.has("codegraph_*"), `${team}/${agent} effective codegraph surface`);
   }
   const codexResolved = spawnSync("opencode", ["debug", "agent", "codex_executor"], { cwd: root, env, encoding: "utf8" });
@@ -127,6 +164,8 @@ for (const team of ["openai", "daily"]) {
     effectivePermissionAllowsCodex,
     `${team}/codex_executor effective openai_run_codex permission missing`,
   );
+  const codexDenied = new Set((Array.isArray(codexEffective.permission) ? codexEffective.permission : []).filter((entry) => entry.action === "deny").map((entry) => entry.permission));
+  assert(codexDenied.has("skill_mcp"), `${team}/codex_executor skill_mcp surface`);
 
   assert(
     codexEffective.tools?.openai_run_codex !== false,
@@ -154,7 +193,7 @@ for (const team of ["openai", "daily"]) {
   assert(["primary", "all"].includes(effective.mode), `BEST Builder mode invalid: ${effective.mode}`);
   assert(effective.hidden !== true, "BEST Builder hidden");
   if (effective.model !== undefined) {
-    same(effective.model, { providerID: "openai", modelID: "gpt-5.6-luna" }, "BEST effective Builder model");
+    same(effective.model, { providerID: "openai", modelID: "gpt-6-luna" }, "BEST effective Builder model");
   }
   const effectiveCallOmoDenied = Array.isArray(effective.permission)
     ? effective.permission.some(

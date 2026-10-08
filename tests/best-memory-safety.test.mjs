@@ -23,7 +23,7 @@ test("memory safety compacts a risky idle session once", async () => {
     if (request.url === "/session/status") return response.end("{}");
     if (request.url === `/session/${sessionID}/message`) unboundedMessageFetch = true;
     if (request.url.startsWith(`/session/${sessionID}/message`)) {
-      return response.end(JSON.stringify([{ info: { providerID: "openai", modelID: "gpt-5.6-luna" }, parts: summarized ? [{ type: "compaction", auto: false }] : [] }]));
+      return response.end(JSON.stringify([{ info: { providerID: "openai", modelID: "gpt-6-luna" }, parts: summarized ? [{ type: "compaction", auto: false }] : [] }]));
     }
     if (request.url === `/session/${sessionID}/summarize` && request.method === "POST") {
       summarizeCalls += 1;
@@ -45,7 +45,7 @@ test("memory safety compacts a risky idle session once", async () => {
     await writeFile(join(runDir, "server.pid"), `${process.pid}\n`);
     const db = new DatabaseSync(dbPath);
     db.exec("CREATE TABLE message (id TEXT, session_id TEXT, data TEXT, time_created INTEGER); CREATE TABLE part (id TEXT, session_id TEXT, data TEXT, time_created INTEGER); CREATE TABLE todo (session_id TEXT, status TEXT);");
-    db.prepare("INSERT INTO message VALUES (?, ?, ?, ?)").run("m1", sessionID, JSON.stringify({ providerID: "openai", modelID: "gpt-5.6-luna" }), 1);
+    db.prepare("INSERT INTO message VALUES (?, ?, ?, ?)").run("m1", sessionID, JSON.stringify({ providerID: "openai", modelID: "gpt-6-luna" }), 1);
     db.prepare("INSERT INTO part VALUES (?, ?, ?, ?)").run("p1", sessionID, JSON.stringify({ type: "text" }), 1);
     db.close();
     const env = { ...process.env, RUNTIME_ROOT: root, BEST_OPENCODE_DB: dbPath, BEST_MEMORY_SAFETY_METADATA: join(root, "metadata"), BEST_MEMORY_SAFETY_LOCKS: join(root, "locks"), BEST_MEMORY_MAX_MESSAGES: "1", BEST_MEMORY_MAX_MESSAGES_SINCE_COMPACTION: "2", BEST_MEMORY_POLL_INTERVAL_MS: "1", BEST_MEMORY_POLL_ATTEMPTS: "5", BEST_MEMORY_RECOVERY_GRACE_MS: "1", BEST_MEMORY_WARN_RSS_BYTES: "999999999999", BEST_MEMORY_BLOCK_RSS_BYTES: "999999999999", BEST_MEMORY_WARN_AVAILABLE_BYTES: "1", BEST_MEMORY_BLOCK_AVAILABLE_BYTES: "1" };
@@ -110,7 +110,7 @@ const runMarkerScenario = async ({ beforeAuto = null, afterAuto = null, statusBo
     await writeFile(join(runDir, "server.pid"), `${process.pid}\n`);
     const db = new DatabaseSync(dbPath);
     db.exec("CREATE TABLE message (id TEXT, session_id TEXT, data TEXT, time_created INTEGER); CREATE TABLE part (id TEXT, session_id TEXT, data TEXT, time_created INTEGER);");
-    db.prepare("INSERT INTO message VALUES (?, ?, ?, ?)").run("m1", sessionID, JSON.stringify({ providerID: "openai", modelID: "gpt-5.6-luna" }), 1);
+    db.prepare("INSERT INTO message VALUES (?, ?, ?, ?)").run("m1", sessionID, JSON.stringify({ providerID: "openai", modelID: "gpt-6-luna" }), 1);
     db.prepare("INSERT INTO part VALUES (?, ?, ?, ?)").run("p1", sessionID, JSON.stringify({ type: "text" }), 1);
     if (beforeAuto !== null) db.prepare("INSERT INTO part VALUES (?, ?, ?, ?)").run("before", sessionID, JSON.stringify({ type: "compaction", auto: beforeAuto }), Date.now() - 1000);
     db.close();

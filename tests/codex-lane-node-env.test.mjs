@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFile } from "node:child_process";
@@ -25,4 +25,18 @@ test("early validation failure removes the already-created private zsh directory
     await assert.rejects(run(lane, ["objective"], { env }));
     assert.deepEqual(await readdir(env.CODEX_HOME), []);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("mutation lane contract requires implementation before verification", async () => {
+  const source = await readFile(lane, "utf8");
+  assert.match(source, /Mutation intent is authoritative: make the requested file changes before verification\./);
+  assert.match(source, /After completing mutations, run requested verification and provide a concise summary\./);
+  assert.doesNotMatch(source, /Stop after requested verification and concise summary/);
+});
+
+test("resume lane invokes the native resume subcommand", async () => {
+  const source = await readFile(lane, "utf8");
+  assert.match(source, /codex_args=\(exec resume --model/);
+  assert.match(source, /codex_args=\(exec --model/);
+  assert.doesNotMatch(source, /codex_args=\(exec\)[\s\S]*?codex_args\+=\(resume/);
 });

@@ -37,13 +37,41 @@ process_start_epoch() {
   printf '%s\n' "$raw" | "$OPENCODE_TEAM_PYTHON" -c 'import sys,time; print(int(time.mktime(time.strptime(sys.stdin.read().strip(), "%a %b %d %H:%M:%S %Y"))))' 2>/dev/null
 }
 
+process_group_id() {
+  local pid="$1" value
+  value=$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d ' ') && [ -n "$value" ] && { printf '%s\n' "$value"; return 0; }
+  "$OPENCODE_TEAM_PYTHON" - "$pid" <<'PY' 2>/dev/null
+import os, sys
+print(os.getpgid(int(sys.argv[1])))
+PY
+}
+
+process_session_id() {
+  local pid="$1" value
+  value=$(ps -p "$pid" -o sess= 2>/dev/null | tr -d ' ') && [ -n "$value" ] && { printf '%s\n' "$value"; return 0; }
+  "$OPENCODE_TEAM_PYTHON" - "$pid" <<'PY' 2>/dev/null
+import os, sys
+print(os.getsid(int(sys.argv[1])))
+PY
+}
+
+process_identity_start_epoch() {
+  local pid="$1"
+  process_start_epoch "$pid" 2>/dev/null && return 0
+  "$OPENCODE_TEAM_PYTHON" - "$pid" <<'PY' 2>/dev/null
+import os, sys
+os.getpgid(int(sys.argv[1]))
+print(0)
+PY
+}
+
 write_process_identity() {
   local role="$1" pid="$2" start pgid sid tmp
   case "$role" in launcher|server|bridge|watchdog|attach|reaper) ;; *) return 1 ;; esac
   case "$pid" in ''|*[!0-9]*) return 1 ;; esac
-  start=$(process_start_epoch "$pid") || return 1
-  pgid=$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d ' ') || return 1
-  sid=$(ps -p "$pid" -o sess= 2>/dev/null | tr -d ' ') || return 1
+  start=$(process_identity_start_epoch "$pid") || return 1
+  pgid=$(process_group_id "$pid") || return 1
+  sid=$(process_session_id "$pid") || return 1
   [ -n "$pgid" ] && [ -n "$sid" ] || return 1
   tmp="$RUN_STATE_DIR/.${role}.identity.$$.$RANDOM"
   printf 'pid=%s\nstart_epoch=%s\npgid=%s\nsid=%s\nrole=%s\nrun_id=%s\n' \
@@ -69,9 +97,11 @@ process_owned_by_run() {
   [ "$stored_role" = "$role" ] || return 1
   [ "$stored_run" = "$RUN_ID" ] || return 1
   kill -0 "$pid" 2>/dev/null || return 1
-  [ "$(process_start_epoch "$pid")" = "$stored_start" ] || return 1
-  [ "$(ps -p "$pid" -o pgid= 2>/dev/null | tr -d ' ')" = "$stored_pgid" ] || return 1
-  [ "$(ps -p "$pid" -o sess= 2>/dev/null | tr -d ' ')" = "$stored_sid" ] || return 1
+  if [ "$stored_start" != 0 ]; then
+    [ "$(process_start_epoch "$pid")" = "$stored_start" ] || return 1
+  fi
+  [ "$(process_group_id "$pid")" = "$stored_pgid" ] || return 1
+  [ "$(process_session_id "$pid")" = "$stored_sid" ] || return 1
 }
 
 safe_signal() {
@@ -381,7 +411,17 @@ claim_session() {
 
 # --- Port allocation ---
 allocate_port() {
-  "$OPENCODE_TEAM_PYTHON" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()'
+  "$OPENCODE_TEAM_PYTHON" -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()' 2>/dev/null && return 0
+  "$OPENCODE_TEAM_PYTHON" - "$RUN_ID" "$RUN_STATE_DIR" <<'PY'
+import hashlib
+import os
+import sys
+
+seed = "\0".join([sys.argv[1], sys.argv[2], os.getcwd()])
+base = 49152
+span = 65535 - base + 1
+print(base + (int(hashlib.sha256(seed.encode("utf-8")).hexdigest()[:8], 16) % span))
+PY
 }
 
 # --- Resume directory resolution ---
@@ -717,7 +757,8 @@ main() {
   local resume_session_id="${RESUME_SESSION_ID:-}"
 
   # Port
-  PORT=$(allocate_port)
+  PORT=$(allocate_port) || die "Failed to allocate runtime port"
+  case "$PORT" in ''|*[!0-9]*) die "Failed to allocate runtime port" ;; esac
 
   # Resume or new
   if [ "$session_mode" = "resume" ] && [ -n "$resume_session_id" ]; then

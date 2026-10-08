@@ -88,12 +88,28 @@ test("foreground exact child binding is fenced, packet-persistent, and idempoten
 
 test("session.created correlation only treats authoritative identifiers as durable", () => {
   assert.equal(sessionCreatedCorrelationDecision({ background: false, candidateCallIDs: ["call-1"] }), "provisional");
+  assert.equal(sessionCreatedCorrelationDecision({ background: false, agent: "codex_executor", candidateCallIDs: ["call-1"] }), "durable");
   assert.equal(sessionCreatedCorrelationDecision({ background: false, explicitCallID: "call-1", candidateCallIDs: ["call-1"] }), "durable");
   assert.equal(sessionCreatedCorrelationDecision({ background: true, candidateCallIDs: ["call-1"] }), "durable");
   assert.equal(sessionCreatedCorrelationDecision({ background: true, explicitCallID: "other", candidateCallIDs: ["call-1"] }), "rejected");
   const provisional = { task_call_id: "call-1", provisional_child_session_id: "child-1" };
   assert.equal(reservationEligibleForSessionCreated(provisional), false);
   assert.equal(sessionCreatedCorrelationDecision({ background: false, candidateCallIDs: reservationEligibleForSessionCreated(provisional) ? ["call-1"] : [] }), "none");
+});
+
+test("recovery continuation cannot reuse the source child", async () => {
+  const pending = { ...reservation(), recovery_continuation: true, recovery_source_packet_id: "source-packet" };
+  await assert.rejects(() => bindExactChildReservation(pending, "ses_source", {
+    readWorkPacketByID: async () => ({ packet_id: "source-packet", child_session_id: "ses_source" }),
+    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null, agent: "codex_executor", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
+    advanceTask: async () => {}, updateWorkPacket: async () => ({ packet_id: "packet-1" }),
+  }), /RECOVERY_CONTINUATION_CHILD_REUSE_DENIED/);
+  await bindExactChildReservation(pending, "ses_continuation", {
+    readWorkPacketByID: async () => ({ packet_id: "source-packet", child_session_id: "ses_source" }),
+    readTask: async () => ({ state: "ADMITTED", version: 7, child_session_id: null, agent: "codex_executor", parent_session_id: "parent-1", packet_id: "packet-1", attempt: 2, lease_id: "lease-1" }),
+    advanceTask: async () => {}, updateWorkPacket: async () => ({ packet_id: "packet-1" }),
+  });
+  assert.equal(pending.child_session_id, "ses_continuation");
 });
 
 test("tester finalization uses the durable child when after metadata is absent", () => {
@@ -127,6 +143,19 @@ test("background exact-after sequence binds before policy and routing side effec
   const policy = sequence.indexOf("await ensurePolicy");
   const mapping = sequence.indexOf("packetCallBySession.set");
   assert.ok(bind >= 0 && bind < policy && bind < mapping);
+});
+
+test("native mandatory tester admission does not pre-create a competing child", async () => {
+  const source = await readFile(new URL("../teams/openai/config/opencode/openai-team-tools.js", import.meta.url), "utf8");
+  const ordinaryTesterBranch = source.slice(
+    source.indexOf('if (agent === "tester" && testTaskID && !nativeTesterAdmission)'),
+    source.indexOf('    } catch (error) {', source.indexOf('if (agent === "tester" && testTaskID && !nativeTesterAdmission)')),
+  );
+  const nativeAdmission = source.slice(source.indexOf('nativeMandatoryTesterAdmission = async'), source.indexOf('  plugin.drainReconciliations'));
+  assert.match(ordinaryTesterBranch, /!nativeTesterAdmission/);
+  assert.match(ordinaryTesterBranch, /phase: "foreground_binding"/);
+  assert.match(nativeAdmission, /phase: "foreground_bound"/);
+  assert.doesNotMatch(nativeAdmission, /phase: "foreground_binding"/);
 });
 
 test("completed exact binding is idempotent and still fences identity", async () => {

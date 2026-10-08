@@ -117,7 +117,8 @@ function describeChild(session, messagesSource, partsSource, sessions, statuses,
       if (described) nested.push(described);
     }
   }
-  const child = { session, agent: session.agent, lastMessage, text, launchOrder, busy: sessionIsBusy(statuses.get(session.id)), nested };
+  const terminalAssistant = assistants.some((message) => ["stop", "length", "content-filter"].includes(message?.finish));
+  const child = { session, agent: session.agent, lastMessage, text, launchOrder, busy: sessionIsBusy(statuses.get(session.id)) && !terminalAssistant, nested };
   return child;
 }
 
@@ -150,6 +151,11 @@ export function exportLatestResponse({ parentSession, messages, parts, sessions 
     const described = describeChild(child, messages, parts, sessions, statuses, visited, task.order);
     if (described) selectedChildren.push(described);
   }
+  for (const child of sessions.values()) {
+    if (child?.parentID !== parentSession.id || visited.has(child.id)) continue;
+    const described = describeChild(child, messages, parts, sessions, statuses, visited, [Number.MAX_SAFE_INTEGER, selectedChildren.length]);
+    if (described) selectedChildren.push(described);
+  }
 
   const children = flattenChildren(selectedChildren).sort((a, b) => {
     const length = Math.max(a.launchOrder.length, b.launchOrder.length);
@@ -163,6 +169,7 @@ export function exportLatestResponse({ parentSession, messages, parts, sessions 
   if (children.some((child) => child.busy)) return { status: "busy", text: "", user, children };
 
   const final = finalTexts.filter((text, index, all) => !parentTexts.includes(text) && all.indexOf(text) === index);
+  if (!final.length && parentTexts.length) final.push(parentTexts[parentTexts.length - 1]);
   const text = formatTranscript({
     parent: { ...parentSession, lastMessage: assistants.at(-1) },
     parentVisible: parentTexts,

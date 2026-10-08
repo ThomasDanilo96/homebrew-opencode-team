@@ -13,7 +13,7 @@ class OpencodeTeam < Formula
   depends_on "uv"
 
   def install
-    libexec.install "bin", "core", "shared", "teams", "tests", "VERSION"
+    libexec.install "benchmarks", "bin", "core", "shared", "teams", "tests", "VERSION"
     (bin/"opencode-team").write <<~EOS
       #!/bin/bash
       export PATH="#{formula_opt_bin("node@22")}:$PATH"

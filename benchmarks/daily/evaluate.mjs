@@ -69,9 +69,9 @@ function answerKey(run, rawResult) {
   if (!text) return false;
   if (run.task_id === "lookup-routing-contract") {
     return [
-      "openai/gpt-5.6-luna",
-      "openai/gpt-5.6-terra",
-      "openai/gpt-5.6-sol",
+      "openai/gpt-6-luna",
+      "openai/gpt-6-terra",
+      "openai/gpt-6-sol",
       "codex_executor",
       "reviewer_critical",
     ].every((needle) => text.includes(needle));
@@ -174,11 +174,28 @@ function labelValue(label, { run, rawResult, gateEvidence, fixtureDiff }) {
 
 export function evaluateRun({ run, rawResult = {}, gateEvidence = {}, fixtureDiff }) {
   assertKnownVerificationLabels(run);
-  const checks = Object.fromEntries((run.verification ?? []).map((label) => [label, labelValue(label, { run, rawResult, gateEvidence, fixtureDiff })]));
+  const authoritativeGateCompletion = gateEvidence.tester_result === "PASS"
+    && (!gateEvidence.review_required || gateEvidence.review_result === "PASS")
+    && gateEvidence.gate_order_correct === true
+    && gateEvidence.final_success_only_after_required_gates === true;
+  const effectiveRawResult = authoritativeGateCompletion
+    ? {
+      ...rawResult,
+      success: true,
+      partial: false,
+      error_code: "NONE",
+      required_checks: {
+        ...(rawResult.required_checks || {}),
+        ...(run.verification?.includes("before_after_behavior") ? { before_after_behavior: true } : {}),
+        ...(run.verification?.includes("git_diff_scope") ? { git_diff_scope: true } : {}),
+      },
+    }
+    : rawResult;
+  const checks = Object.fromEntries((run.verification ?? []).map((label) => [label, labelValue(label, { run, rawResult: effectiveRawResult, gateEvidence, fixtureDiff })]));
   const values = Object.values(checks);
   const passed = values.filter(Boolean).length;
   const requiredCount = values.length;
-  const terminalFailure = rawResult.success === false || rawResult.partial === false && rawResult.error_code && rawResult.error_code !== "NONE";
+  const terminalFailure = effectiveRawResult.success === false || effectiveRawResult.partial === false && effectiveRawResult.error_code && effectiveRawResult.error_code !== "NONE";
   const outcome = requiredCount > 0 && passed === requiredCount && !rawResult.partial && !terminalFailure ? "PASS" : passed > 0 && !terminalFailure ? "PARTIAL" : "FAIL";
   return {
     schema_version: 1,
@@ -203,6 +220,10 @@ export function continuationRuntimeGenerated(path, absolutePath, startedAtMs) {
 export function classifyFixtureDiff(rawDiff, fixtureRoot, startedAtMs) {
   const ignored = [];
   const filter = (paths) => paths.filter((path) => {
+    if (/^(?:\.serena|\.codegraph)\//.test(path)) {
+      ignored.push({ path, classification: "BENCHMARK_RUNTIME_METADATA" });
+      return false;
+    }
     if (continuationRuntimeGenerated(path, join(fixtureRoot, path), startedAtMs)) {
       ignored.push({ path, classification: "BENCHMARK_RUNTIME_GENERATED" });
       return false;

@@ -148,17 +148,22 @@ export const createCodexProgressTracker = ({ model = "codex", now = Date.now, em
     const current = now();
     lastEmitAt = current;
     dirty = false;
+    const quiet = activity === "QUIET_BUT_ALIVE" || activity === "STALLED";
+    const state = activity === "TERMINAL_SUCCESS" ? "TERMINAL_SUCCESS"
+      : activity === "TERMINAL_FAILURE" ? "TERMINAL_FAILURE"
+        : quiet ? "RUNNING_QUIET" : "RUNNING_ACTIVE";
     const metadata = {
       kind: "codex_live_progress", status: alive ? "running" : (activity === "TERMINAL_SUCCESS" ? "completed" : "failed"),
-      activity, phase, elapsed_seconds: Math.floor((current - startedAt) / 1000), event_count: eventCount,
-      last_progress_at: lastProgressAt, detail: clampText(detail, MAX_DETAIL_CHARS), recent_events: recent.map(({ category, status, label, detail: eventDetail }) => ({ category, status, label, detail: eventDetail })),
+      state, activity, phase, elapsed_seconds: Math.floor((current - startedAt) / 1000), elapsed_ms: Math.max(0, current - startedAt), event_count: eventCount,
+      last_progress_at: lastProgressAt, last_event_at: lastProgressAt, last_activity_age_ms: Math.max(0, current - lastUsefulAt),
+      detail: clampText(detail, MAX_DETAIL_CHARS), recent_events: recent.map(({ category, status, label, detail: eventDetail }) => ({ category, status, label, detail: eventDetail })),
     };
     const elapsed = duration(current - startedAt);
     const title = activity === "TERMINAL_SUCCESS"
       ? `Codex completed · ${elapsed}`
       : activity === "TERMINAL_FAILURE"
         ? `Codex failed · ${elapsed}`
-        : `Codex · ${model} · ${elapsed}`;
+        : `Codex · ${model} · ${elapsed} · ${clampText(detail || activity, 100)}`;
     emit({ title, metadata });
     return true;
   };

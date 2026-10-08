@@ -1,0 +1,9 @@
+<!doctype html>
+<meta charset="utf-8">
+<button id="toggle" type="button">Enable</button>
+<output id="state">initial</output>
+<script>
+  document.querySelector("#toggle").addEventListener("click", () => {
+    document.querySelector("#state").textContent = "clicked";
+  });
+</script>

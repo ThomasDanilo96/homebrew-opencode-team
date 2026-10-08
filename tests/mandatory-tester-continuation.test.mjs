@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { codexResult, createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, retainParentCallReservation, discoverWorkspaceVerificationCommands, terminalCodexFailureForRootObjective, enforcePendingMandatoryTesterGate, findPendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, testerSettlementCanProceed, testerSettlementPacketPatch, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext, isMandatoryTesterPacketForSession, resolveMandatoryTesterPacketForSession, mandatoryTesterToolDecision, mandatoryTesterCommandOnlyError, OpenAITeamTools } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { codexResult, createMandatoryTesterRootDriver, driveMandatoryTesterContinuation, observeMandatoryTesterContinuation, observeMandatoryReviewerContinuation, reviewerHasExecutionEvidence, reviewerReservationIsStale, reviewerBindGraceMs, retainParentCallReservation, discoverWorkspaceVerificationCommands, terminalCodexFailureForRootObjective, enforcePendingMandatoryTesterGate, findPendingMandatoryTesterGate, mandatoryTesterDispatchTrigger, testerSettlementCanProceed, testerSettlementPacketPatch, promoteVerificationCommands, resolveUpdatedUserMessageText, handleMandatoryTesterContinuation, handleMandatoryReviewerContinuation, exactMandatoryTesterObjective, decideDelegatedTaskAgent, testerEvidenceFromMessages, validatedVerificationAuthorization, isAuthorizedTesterVerificationCommand, testerVerificationMetadata, isExactMandatoryTesterGate, resolveDelegatedTaskRoute, taskRouteAdmissionContext, isMandatoryTesterPacketForSession, resolveMandatoryTesterPacketForSession, mandatoryTesterToolDecision, mandatoryTesterCommandOnlyError, OpenAITeamTools } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { verificationCommandCategory, parseVerificationEvidence } from "../teams/openai/config/opencode/execution-policy.js";
 import { gateTerminalPacketPatch } from "../teams/openai/config/opencode/gate-state.js";
 import { claimTask, completeTask, readTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
@@ -374,6 +374,32 @@ test("mandatory continuation observes only the exact requested gate", async () =
   assert.equal(packets[0].tester_dispatch_state, "observed");
 });
 
+test("mandatory reviewer continuation is durably observed for the exact review gate", async () => {
+  const packets = [{ packet_id: packetID, parent_session_id: root, review_required: true, review_status: "pending", tester_status: "passed", outcome: "pending", review_dispatch_state: "requested" }];
+  const event = { properties: { sessionID: root, info: { role: "user", sessionID: root, id: "review-message" }, parts: [{ type: "text", text: `<!-- OMO_INTERNAL_INITIATOR --> MANDATORY_REVIEW_GATE review_task_id=${packetID}` }] } };
+  const result = await handleMandatoryReviewerContinuation(event, {
+    client: { session: {} },
+    observe: async (rootID, id) => {
+      assert.equal(rootID, root);
+      assert.equal(id, packetID);
+      packets[0].review_dispatch_state = "observed";
+      return { matched: true, packet: packets[0] };
+    },
+  });
+  assert.equal(result.handled, true);
+  assert.equal(packets[0].review_dispatch_state, "observed");
+});
+
+test("reviewer reclaim distinguishes active, recent, and stale unbound packets", () => {
+  const now = Date.now();
+  const base = { outcome: "pending", updated_at: new Date(now - reviewerBindGraceMs({ OPENAI_REVIEWER_BIND_GRACE_MS: "1000" }) - 1).toISOString() };
+  assert.equal(reviewerHasExecutionEvidence({ ...base, child_session_id: "review-child" }), true);
+  assert.equal(reviewerHasExecutionEvidence({ ...base, provisional_child_session_id: "review-child" }), true);
+  assert.equal(reviewerReservationIsStale({ ...base, updated_at: new Date(now).toISOString() }, now, 1000), false);
+  assert.equal(reviewerReservationIsStale(base, now, 1000), true);
+  assert.equal(reviewerReservationIsStale({ ...base, outcome: "running" }, now, 1000), false);
+});
+
 test("spoofed and wrong-packet continuations fail closed", async () => {
   let observed = 0;
   const findGate = async () => ({ ...gate(), tester_dispatch_state: "requested" });
@@ -519,7 +545,7 @@ test("foreground tester PASS keeps a review gate pending for one exact reviewer 
     assert.equal(reviewerPrompts.length, 1);
 
     const reviewerCallID = `${rootSessionID}:reviewer-call`;
-    const reviewerOutput = { args: { subagent_type: "reviewer_critical", prompt: reviewPrompt } };
+    const reviewerOutput = { args: { subagent_type: "reviewer_critical", prompt: reviewPrompt, run_in_background: true } };
     const pendingGate = await readWorkPacketByID(targetPacket.packet_id);
     const { parent_session_id, review_required, review_status, risk, tester_status, outcome, phase } = pendingGate;
     assert.deepEqual({ parent_session_id, review_required, review_status, risk, tester_status, outcome, phase }, {
@@ -527,8 +553,10 @@ test("foreground tester PASS keeps a review gate pending for one exact reviewer 
     });
     const reviewerPlugin = await OpenAITeamTools({ client });
     await reviewerPlugin["tool.execute.before"]({ tool: "task", sessionID: rootSessionID, callID: reviewerCallID, agent: "openai_orchestrator" }, reviewerOutput);
+    await reviewerPlugin["tool.execute.after"]({ tool: "task", sessionID: rootSessionID, callID: reviewerCallID }, { metadata: {} });
     reviewerMessages = true;
-    await reviewerPlugin["tool.execute.after"]({ tool: "task", sessionID: rootSessionID, callID: reviewerCallID }, { metadata: { sessionID: reviewerChildID } });
+    await reviewerPlugin.event({ event: { type: "session.created", properties: { info: { id: reviewerChildID, parentID: rootSessionID, agent: "reviewer_critical", reservation_id: reviewerCallID } } } });
+    await reviewerPlugin.event({ event: { type: "session.idle", properties: { sessionID: reviewerChildID } } });
 
     gate = await readWorkPacketByID(targetPacket.packet_id);
     assert.equal(gate.review_status, "approved");
@@ -537,11 +565,11 @@ test("foreground tester PASS keeps a review gate pending for one exact reviewer 
     assert.equal(gate.tester_status, "passed");
     assert.equal(gate.verification_status, "passed");
     assert.equal((await readTask(taskFingerprint)).state, "COMPLETED");
-    const reviewerPackets = (await listWorkPackets()).filter((packet) => packet.agent === "reviewer_critical" && packet.review_task_id === targetPacket.packet_id);
-    assert.equal(reviewerPackets.length, 1);
-    assert.equal(reviewerPackets[0].outcome, "completed");
-    await reviewerPlugin["tool.execute.after"]({ tool: "task", sessionID: rootSessionID, callID: reviewerCallID }, { metadata: { sessionID: reviewerChildID } });
-    assert.equal((await listWorkPackets()).filter((packet) => packet.agent === "reviewer_critical" && packet.review_task_id === targetPacket.packet_id).length, 1);
+     const reviewerPackets = (await listWorkPackets()).filter((packet) => packet.agent === "reviewer_critical" && packet.review_task_id === targetPacket.packet_id);
+     assert.equal(reviewerPackets.length, 1);
+     assert.equal(reviewerPackets[0].outcome, "completed");
+     await reviewerPlugin.event({ event: { type: "session.idle", properties: { sessionID: reviewerChildID } } });
+     assert.equal((await listWorkPackets()).filter((packet) => packet.agent === "reviewer_critical" && packet.review_task_id === targetPacket.packet_id).length, 1);
   } finally {
     if (previousStateRoot === undefined) delete process.env.OPENAI_TEAM_STATE_ROOT;
     else process.env.OPENAI_TEAM_STATE_ROOT = previousStateRoot;

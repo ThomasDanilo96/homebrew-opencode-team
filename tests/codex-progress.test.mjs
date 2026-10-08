@@ -26,8 +26,9 @@ test("structured progress becomes a visible native metadata update", () => {
   const [event] = parser.push(line(commandRecord("cmd-1", "pytest tests/test_small.py")));
   tracker.ingest(event);
   assert.equal(updates.at(-1).metadata.activity, "ACTIVE");
+  assert.equal(updates.at(-1).metadata.state, "RUNNING_ACTIVE");
   assert.equal(updates.at(-1).metadata.recent_events[0].category, "TEST");
-  assert.match(updates.at(-1).title, /^Codex · gpt-test ·/);
+  assert.match(updates.at(-1).title, /^Codex · gpt-test · .*running tests/);
 });
 
 test("edit events expose only a bounded concise path and action", () => {
@@ -96,6 +97,7 @@ test("heartbeat is emitted only for a quiet live execution", () => {
   clock = 5_000;
   assert.equal(tracker.tick(), true);
   assert.equal(updates.at(-1).metadata.activity, "QUIET_BUT_ALIVE");
+  assert.equal(updates.at(-1).metadata.state, "RUNNING_QUIET");
   assert.match(updates.at(-1).metadata.detail, /last activity 5s ago/);
 });
 

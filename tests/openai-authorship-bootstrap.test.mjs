@@ -139,3 +139,37 @@ test("Codex bootstrap denies when the candidate never becomes visible", async ()
     if (previousPoll === undefined) delete process.env.OPENAI_CODEX_CANDIDATE_POLL_MS; else process.env.OPENAI_CODEX_CANDIDATE_POLL_MS = previousPoll;
   }
 });
+
+test("Codex recovery continuation accepts a distinct OpenCode child", async () => {
+  const root = await mkdtemp(join(tmpdir(), "openai-recovery-child-"));
+  const previous = process.env.OPENAI_TEAM_STATE_ROOT;
+  process.env.OPENAI_TEAM_STATE_ROOT = root;
+  try {
+    const sourceChild = "source-child";
+    const objective_sha256 = createHash("sha256").update(prompt).digest("hex");
+    const sourceClaim = await claimTask({ task_fingerprint: "recovery-source", objective_sha256, parent_session_id: parent, agent: "codex_executor" });
+    const sourceAdmitted = await transitionTask(sourceClaim.record.task_fingerprint, { expectedVersion: sourceClaim.record.version, expectedStates: ["CLAIMED"], leaseId: sourceClaim.record.lease_id, patch: { state: "ADMITTED" } });
+    const sourceTask = await transitionTask(sourceClaim.record.task_fingerprint, { expectedVersion: sourceAdmitted.version, expectedStates: ["ADMITTED"], leaseId: sourceClaim.record.lease_id, patch: { state: "FAILED", child_session_id: sourceChild } });
+    const sourcePacket = { agent: "codex_executor", parent_session_id: parent, objective_sha256, phase: "background_completion", outcome: "error", child_session_id: sourceChild, task_fingerprint: sourceTask.task_fingerprint, task_lease_id: sourceTask.lease_id, attempt: sourceTask.attempt, packet_id: sourceTask.packet_id, task_call_id: "source-call", recovery_state: "RECOVERY_CONTINUATION_REQUIRED" };
+    const continuationClaim = await claimTask({ task_fingerprint: "recovery-continuation", objective_sha256, parent_session_id: parent, agent: "codex_executor" });
+    const continuationAdmitted = await transitionTask(continuationClaim.record.task_fingerprint, { expectedVersion: continuationClaim.record.version, expectedStates: ["CLAIMED"], leaseId: continuationClaim.record.lease_id, patch: { state: "ADMITTED" } });
+    const continuationTask = await transitionTask(continuationClaim.record.task_fingerprint, { expectedVersion: continuationAdmitted.version, expectedStates: ["ADMITTED"], leaseId: continuationClaim.record.lease_id, patch: { state: "BOUND", child_session_id: child } });
+    const continuationPacket = { agent: "codex_executor", parent_session_id: parent, objective_sha256, phase: "foreground_bound", outcome: "running", child_session_id: child, task_fingerprint: continuationTask.task_fingerprint, task_lease_id: continuationTask.lease_id, attempt: continuationTask.attempt, packet_id: continuationTask.packet_id, task_call_id: "continuation-call", recovery_continuation: true, recovery_source_packet_id: sourcePacket.packet_id, recovery_source_task_fingerprint: sourceTask.task_fingerprint };
+    const packets = [sourcePacket, continuationPacket];
+    const result = await bootstrapCodexPolicy({
+      ...baseInput(),
+      listWorkPackets: async () => packets,
+      readWorkPacketByID: async (packetID) => packets.find((packet) => packet.packet_id === packetID) || null,
+      updateWorkPacketByID: async (packetID, fields) => ({ ...packets.find((packet) => packet.packet_id === packetID), ...fields, child_session_id: fields.child_session_id || child }),
+    }, child, "codex_executor");
+    assert.equal(result.reason, null);
+    assert.equal(result.policy.session_id, child);
+    assert.equal(result.policy.task_fingerprint, continuationTask.task_fingerprint);
+    assert.equal(result.policy.packet_id, continuationTask.packet_id);
+    assert.equal(result.policy.task_lease_id, continuationTask.lease_id);
+  } finally {
+    if (previous === undefined) delete process.env.OPENAI_TEAM_STATE_ROOT;
+    else process.env.OPENAI_TEAM_STATE_ROOT = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});

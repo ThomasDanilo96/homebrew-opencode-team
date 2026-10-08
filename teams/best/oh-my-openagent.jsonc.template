@@ -3,6 +3,10 @@
   "sisyphus_agent": {
     "default_builder_enabled": true
   },
+  "browser_automation_engine": {
+    "provider": "playwright",
+    "playwright_mcp_args": ["--headless", "--isolated", "--output-dir", "@DATA_ROOT@/best/playwright/output"]
+  },
   "agents": {
     "OpenCode-Builder": {
       "mode": "primary",

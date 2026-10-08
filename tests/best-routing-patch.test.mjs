@@ -223,7 +223,7 @@ test("BEST requirements and fallback controller fail closed for Builder, Explore
         session,
         agent,
         agent === "sisyphus" ? "openai" : "opencode-go",
-        agent === "sisyphus" ? "gpt-5.6-luna" : "qwen3.7-plus",
+        agent === "sisyphus" ? "gpt-6-luna" : "qwen3.7-plus",
       ),
       false,
     );
@@ -245,7 +245,7 @@ test("BEST delegate resolver discards configured fallbacks while preserving its 
   );
   for (const agent of ["sisyphus", "explore", "librarian"]) {
     const primary = agent === "sisyphus"
-      ? "openai/gpt-5.6-luna"
+      ? "openai/gpt-6-luna"
       : "opencode-go/qwen3.7-plus";
 
     const result = await resolve(agent, { model: primary }, {
@@ -265,7 +265,7 @@ test("BEST delegate resolver discards configured fallbacks while preserving its 
     assert.deepEqual(
       result.categoryModel,
       agent === "sisyphus"
-        ? { providerID: "openai", modelID: "gpt-5.6-luna" }
+        ? { providerID: "openai", modelID: "gpt-6-luna" }
         : { providerID: "opencode-go", modelID: "qwen3.7-plus" },
     );
 
@@ -276,7 +276,7 @@ test("BEST delegate resolver discards configured fallbacks while preserving its 
 test("BEST primary failure makes no alternate model attempts", () => {
   for (const agent of ["sisyphus", "explore", "librarian"]) {
     const primary = agent === "sisyphus"
-      ? "openai/gpt-5.6-luna"
+      ? "openai/gpt-6-luna"
       : "opencode-go/qwen3.7-plus";
 
     const attempts = [];

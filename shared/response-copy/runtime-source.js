@@ -25,16 +25,19 @@ function taskPartsForLogicalResponse(messages, parts) {
     }
   }
   if (userIndex < 0) return [];
-  const logicalUserIDs = new Set();
+  let logicalEnd = messages.length;
   for (let index = userIndex; index < messages.length; index += 1) {
     const message = messages[index];
     if (message?.role !== "user") continue;
-    if (index !== userIndex && isLogicalTurnUser(message, parts)) break;
-    logicalUserIDs.add(message.id);
+    if (index !== userIndex && isLogicalTurnUser(message, parts)) {
+      logicalEnd = index;
+      break;
+    }
   }
   const tasks = [];
-  for (const message of messages) {
-    if (message?.role !== "assistant" || !logicalUserIDs.has(message.parentID)) continue;
+  for (let index = userIndex; index < logicalEnd; index += 1) {
+    const message = messages[index];
+    if (message?.role !== "assistant") continue;
     for (const part of parts.get(message.id) ?? []) {
       if (part?.type === "tool" && part.tool === "task") tasks.push(part);
     }
@@ -68,6 +71,12 @@ export async function loadResponseGraph(api, parentSessionID) {
       const taskParentID = task.state?.metadata?.parentSessionId;
       if (typeof childID !== "string" || (taskParentID && taskParentID !== sessionID)) continue;
       await loadSession(childID, sessionID);
+    }
+    if (typeof api.client.session.list === "function") {
+      const listed = responseData(await api.client.session.list()) ?? [];
+      for (const child of listed.filter((candidate) => candidate?.parentID === sessionID)) {
+        await loadSession(child.id, sessionID);
+      }
     }
   }
 

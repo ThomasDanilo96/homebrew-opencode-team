@@ -18,6 +18,40 @@ PARENT_SESSION_ID=ses_recycle_fixture
 SESSION_DIRECTORY="$STATE/workdir"
 mkdir -p "$RUN_STATE_DIR" "$SESSION_DIRECTORY"
 
+FAKE_BIN="$STATE/fake-bin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/ps" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+chmod +x "$FAKE_BIN/ps"
+ORIGINAL_PATH="$PATH"
+PATH="$FAKE_BIN:$PATH" write_process_identity watchdog "$$"
+grep -qx 'start_epoch=0' "$RUN_STATE_DIR/watchdog.identity"
+PATH="$FAKE_BIN:$PATH" process_owned_by_run watchdog "$$"
+PATH="$ORIGINAL_PATH"
+
+REAL_PYTHON="$OPENCODE_TEAM_PYTHON"
+FAKE_PYTHON="$FAKE_BIN/python-deny-socket"
+cat > "$FAKE_PYTHON" <<SH
+#!/usr/bin/env bash
+if [ "\${1:-}" = "-c" ]; then
+  case "\${2:-}" in
+    *'s.bind(("127.0.0.1",0))'*)
+      printf '%s\n' 'PermissionError: [Errno 1] Operation not permitted' >&2
+      exit 1
+      ;;
+  esac
+fi
+exec "$REAL_PYTHON" "\$@"
+SH
+chmod +x "$FAKE_PYTHON"
+OPENCODE_TEAM_PYTHON="$FAKE_PYTHON"
+PORT="$(allocate_port)"
+OPENCODE_TEAM_PYTHON="$REAL_PYTHON"
+case "$PORT" in ''|*[!0-9]*) exit 1 ;; esac
+[ "$PORT" -ge 49152 ] && [ "$PORT" -le 65535 ]
+
 sleep 300 &
 OLD_PID=$!
 SERVER_PID=$OLD_PID

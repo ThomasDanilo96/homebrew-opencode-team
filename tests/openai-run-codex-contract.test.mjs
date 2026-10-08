@@ -5,7 +5,10 @@ import { join } from "node:path";
 import test from "node:test";
 
 import { readPolicy, CODEX_RUNNING } from "../teams/openai/config/opencode/codex-authority.js";
-import { OpenAITeamTools, codexCompatibilityHintIsBound } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { OpenAITeamTools, codexCompatibilityHintIsBound, codexExecutorWrapperFallbackDecision } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { runHostEffect } from "../teams/openai/config/opencode/plugin-api.js";
+
+const { Effect } = await import(`${process.env.OPENAI_DEPENDENCY_ROOT}/node_modules/effect/dist/index.js`);
 
 const AUTHORITATIVE_OBJECTIVE = "Add multiply(a, b) to calculator.js, export it with the existing module style, and add a focused calculator test.";
 
@@ -42,6 +45,18 @@ const withHarness = async (authority = AUTHORITATIVE_OBJECTIVE) => {
 };
 
 const execute = (harness, args = {}) => harness.plugin.tool.openai_run_codex.execute(args, harness.context);
+
+test("runHostEffect executes host Effects exactly once and passes through plain values", async () => {
+  assert.equal(await runHostEffect(undefined), undefined);
+  assert.equal(await runHostEffect("plain value"), "plain value");
+  let executions = 0;
+  const effect = Effect.sync(() => {
+    executions += 1;
+    return "effect value";
+  });
+  assert.equal(await runHostEffect(effect), "effect value");
+  assert.equal(executions, 1);
+});
 
 test("openai_run_codex accepts optional task/objective compatibility hints but uses only server authority", async () => {
   for (const args of [
@@ -109,4 +124,19 @@ test("openai_run_codex fails closed for missing authority, duplicate calls, and 
   } finally {
     await root.cleanup();
   }
+});
+
+test("codex executor idle fallback defers after the real single lane call starts", () => {
+  assert.deepEqual(
+    codexExecutorWrapperFallbackDecision({ role: "codex_executor", codex_tool_call_count: 1 }),
+    { action: "defer", reason: "codex_tool_call_in_progress" },
+  );
+  assert.deepEqual(
+    codexExecutorWrapperFallbackDecision({ role: "codex_executor", codex_tool_in_flight: true }),
+    { action: "defer", reason: "codex_tool_call_in_progress" },
+  );
+  assert.deepEqual(
+    codexExecutorWrapperFallbackDecision({ role: "codex_executor" }),
+    { action: "run", reason: "missing_codex_tool_call" },
+  );
 });

@@ -177,6 +177,19 @@ printf '%s\n' sqlite >"$OPENCODE_TEAM_HOME/data/best/data/opencode/opencode.db"
 printf '%s\n' wal >"$OPENCODE_TEAM_HOME/data/best/data/opencode/opencode.db-wal"
 printf '%s\n' graph >"$OPENCODE_TEAM_HOME/data/best/data/opencode/codegraph.db"
 printf '%s\n' graphwal >"$OPENCODE_TEAM_HOME/data/best/data/opencode/codegraph.db-wal"
+chrome_fixture="$TEST_ROOT/chrome-temp"
+mkdir -p "$chrome_fixture/com.google.Chrome.code_sign_clone"
+printf '%s\n' clone >"$chrome_fixture/com.google.Chrome.code_sign_clone/stale"
+touch -t 202001010000 "$chrome_fixture/com.google.Chrome.code_sign_clone" "$chrome_fixture/com.google.Chrome.code_sign_clone/stale"
+OPENCODE_TEAM_CHROME_CLONE_ROOTS="$chrome_fixture" OPENCODE_TEAM_LSOF=/usr/sbin/lsof OPENCODE_CHROME_CLONE_RETENTION_HOURS=1 \
+  node "$ROOT/shared/maintenance/host-storage-gc.mjs" --apply >"$TEST_ROOT/host-storage-gc.json"
+jq -e '.CHROME_CODE_SIGN_CLONE_RECLAIMABLE_BYTES > 0 and .CHROME_CODE_SIGN_CLONE_REMOVED_BYTES > 0' "$TEST_ROOT/host-storage-gc.json" >/dev/null
+test ! -e "$chrome_fixture/com.google.Chrome.code_sign_clone"
+mkdir -p "$chrome_fixture/com.google.Chrome.code_sign_clone"
+printf '%s\n' clone >"$chrome_fixture/com.google.Chrome.code_sign_clone/stale"
+OPENCODE_TEAM_CHROME_CLONE_ROOTS="$chrome_fixture" OPENCODE_TEAM_LSOF=/usr/sbin/lsof \
+  "$ROOT/bin/opencode-team" storage-accounting >"$TEST_ROOT/storage-host.json"
+jq -e '.categories["chrome-code-sign-clone"].bytes > 0' "$TEST_ROOT/storage-host.json" >/dev/null
 "$ROOT/bin/opencode-team" storage-accounting >"$TEST_ROOT/storage.json"
 jq -e '.categories["db-wal"].files["best:opencode:opencode.db"].bytes > 0' "$TEST_ROOT/storage.json" >/dev/null
 jq -e '.categories["db-wal"].files["best:codegraph:codegraph.db-wal"].bytes > 0' "$TEST_ROOT/storage.json" >/dev/null

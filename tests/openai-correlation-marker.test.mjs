@@ -25,3 +25,15 @@ test("internal task cycles preserve a terminal Codex failure latch, genuine root
   const genuine = beginRequestCycle(internal, "A genuinely new user request", Date.now(), process.env);
   assert.equal(genuine.codexFailureTerminal, false);
 });
+
+test("recovery continuation preserves the authoritative root cycle", () => {
+  const state = { ...createGuardrailState(), authoritativeObjective: "Implement the calculator change", codexFailureTerminal: true };
+  const continuation = beginRequestCycle(
+    state,
+    "Resume the authoritative recovery packet for this same objective. Do not start a new repository worker.",
+    Date.now(),
+    process.env,
+    { preserveCodexFailureTerminal: true },
+  );
+  assert.equal(continuation, state);
+});

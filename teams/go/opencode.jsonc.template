@@ -4,12 +4,17 @@
   "model": "opencode-go/mimo-v2.5",
   "small_model": "opencode-go/mimo-v2.5",
   "default_agent": "OpenCode-Builder",
+  "permission": { "*": "allow", "skill_mcp": "allow", "external_directory": "allow", "doom_loop": "allow" },
   "disabled_providers": [
     "openai", "anthropic", "google", "opencode-omniroute", "openrouter", "bedrock",
     "vertex", "xai", "mistral", "groq", "cohere", "fireworks", "together",
     "deepinfra", "cerebras", "perplexity", "voyage", "ollama", "lmstudio", "litellm"
   ],
   "compaction": { "auto": true, "prune": true, "reserved": 10000 },
+  "browser_automation_engine": {
+    "provider": "playwright",
+    "playwright_mcp_args": ["--headless", "--isolated", "--output-dir", "@DATA_ROOT@/go/playwright/output"]
+  },
   "mcp": {
     "serena": {
       "type": "local",

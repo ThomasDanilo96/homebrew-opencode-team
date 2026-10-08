@@ -33,7 +33,7 @@ const terminal = (record) => record.state === "COMPLETED" || (record.state === "
 const legalTransitions = {
   CLAIMED: ["ADMITTED", "PENDING_REVIEW", "PENDING_VERIFICATION", "COMPLETED", "FAILED"], ADMITTED: ["BOUND", "RUNNING", "PENDING_REVIEW", "PENDING_VERIFICATION", "COMPLETED", "FAILED"], BOUND: ["RUNNING", "PENDING_REVIEW", "PENDING_VERIFICATION", "COMPLETED", "FAILED"],
   RUNNING: ["PENDING_REVIEW", "PENDING_VERIFICATION", "COMPLETED", "FAILED"], PENDING_REVIEW: ["PENDING_VERIFICATION", "COMPLETED", "FAILED"],
-  PENDING_VERIFICATION: ["PENDING_REVIEW", "COMPLETED", "FAILED"], COMPLETED: ["FAILED"], FAILED: [],
+  PENDING_VERIFICATION: ["PENDING_REVIEW", "COMPLETED", "FAILED"], COMPLETED: ["FAILED"], FAILED: ["PENDING_VERIFICATION"],
 };
 const expired = (record) => Date.parse(record.lease_expires_at) <= Date.now();
 const safeRecord = (record) => ({ ...record, result_summary: redact(record.result_summary) });

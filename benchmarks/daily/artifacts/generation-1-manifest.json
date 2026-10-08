@@ -1,0 +1,13 @@
+{
+  "generation": 1,
+  "status": "forensic_evidence_only",
+  "rescore": "IMPOSSIBLE",
+  "reason": "Generation 1 contains aggregate mutation counts but no per-run fixture diff, changed-path manifest, work packet, session event, gate state, or terminal finalization evidence.",
+  "artifacts": {
+    "openai-daily-real-comparison-v0.1.14.json": "76fca50a75f96fe17aaa127edda8ee45c2255bcf1a9cddcbd9db9ef23b17c81d",
+    "openai-daily-real-paired-v0.1.14.jsonl": "f723397a69f36e4a74f965b5ee85b4184989cf1aeeee341a310141dd7039ed29",
+    "daily-real-task-results-v0.1.14.json": "759f4f9887f1666cb9a8f2119dd97ff6b94a1148da839c35a5a7706767d9676d",
+    "daily-baseline-v0.1.14.json": "d6ca1cf48d007cbf8c5aad4a4fd5108d79e2153b56cfc3915727b90661045d51",
+    "daily-baseline-v0.1.14.md": "eb8bc2956ce8f9547f91b2aa366fd3c8786c2ca5ce83067d76eb6d45108350d3"
+  }
+}
