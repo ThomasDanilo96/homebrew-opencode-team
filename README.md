@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: release `v0.1.31`.
+Status: release `v0.1.32`.
 
 ## Goal
 

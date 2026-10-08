@@ -30,21 +30,6 @@ if filepath.startswith(os.path.abspath(BEST_SANDBOX)):
 with open(filepath, "r") as f:
     src = f.read()
 
-_FALLBACK_ENTRIES = '''      { providers: ["openai"], model: "gpt-6-luna-fast", variant: "low" },
-      { providers: ["deepseek"], model: "deepseek-v4-flash", variant: "max" },
-      { providers: ["opencode-go", "bailian-coding-plan"], model: "qwen3.7-plus" },
-      { providers: ["vercel"], model: "minimax-m2.7-highspeed" },
-      { providers: ["opencode-go", "vercel"], model: "minimax-m3" },
-      { providers: ["minimax-coding-plan", "minimax-cn-coding-plan"], model: "MiniMax-M3" },
-      { providers: ["opencode-go", "vercel"], model: "minimax-m2.7" },
-      { providers: ["anthropic", "github-copilot", "vercel"], model: "claude-haiku-4-5" },
-      { providers: ["openai", "vercel"], model: "gpt-5.4-nano" }'''
-def requirement_block(agent, empty=False):
-    chain = "[]" if empty else f"[\n{_FALLBACK_ENTRIES}\n    ]"
-    return f'''  {agent}: {{
-    fallbackChain: {chain}
-  }},'''
-
 def _matching_delimiter(text, start, opener="[", closer="]"):
     depth = 0
     quote = None
@@ -171,31 +156,25 @@ def empty_agent_fallback_chain(agent):
 def patch_model_routes():
     global src
     changed = False
-    # Layer 1: exact OMO 4.19.4 object-literal source shape.
-    old_explore, old_librarian = requirement_block("explore"), requirement_block("librarian")
-    empty_explore, empty_librarian = requirement_block("explore", True), requirement_block("librarian", True)
+    # Locate agent fallback arrays structurally; upstream model entries change between OMO releases.
     sentinel_count = src.count(MODEL_ROUTE_SENTINEL)
-    old_counts = (src.count(old_explore), src.count(old_librarian))
-    empty_counts = (src.count(empty_explore), src.count(empty_librarian))
+    if sentinel_count > 1:
+        print("REFUSED: duplicate BEST agent-requirement sentinel", file=sys.stderr); sys.exit(1)
+
+    explore_changed = empty_agent_fallback_chain("explore")
+    librarian_changed = empty_agent_fallback_chain("librarian")
+
     if sentinel_count == 1:
-        if old_counts != (0, 0) or empty_counts != (1, 1):
+        if explore_changed or librarian_changed:
             print("REFUSED: contradictory BEST agent-requirement protection state", file=sys.stderr); sys.exit(1)
-    elif sentinel_count == 0 and old_counts == (1, 1) and empty_counts == (0, 0):
-        anchor = "var AGENT_MODEL_REQUIREMENTS = {"
-        if src.count(anchor) != 1:
-            print("REFUSED: AGENT_MODEL_REQUIREMENTS anchor count != 1", file=sys.stderr); sys.exit(1)
-        src = src.replace(old_explore, empty_explore, 1).replace(old_librarian, empty_librarian, 1)
-        src = src.replace(anchor, f"{MODEL_ROUTE_SENTINEL}\n{anchor}", 1)
-        changed = True
-    elif sentinel_count == 0 and old_counts == (0, 0) and empty_counts == (1, 1):
-        # Deterministically complete the known manual BEST hotfix by adding its missing sentinel.
-        anchor = "var AGENT_MODEL_REQUIREMENTS = {"
-        if src.count(anchor) != 1:
-            print("REFUSED: AGENT_MODEL_REQUIREMENTS anchor count != 1", file=sys.stderr); sys.exit(1)
-        src = src.replace(anchor, f"{MODEL_ROUTE_SENTINEL}\n{anchor}", 1)
-        changed = True
+    elif explore_changed != librarian_changed:
+        print("REFUSED: partial BEST agent-requirement protection state", file=sys.stderr); sys.exit(1)
     else:
-        print(f"REFUSED: unexpected BEST agent-requirement source state old={old_counts} empty={empty_counts}", file=sys.stderr); sys.exit(1)
+        anchor = "var AGENT_MODEL_REQUIREMENTS = {"
+        if src.count(anchor) != 1:
+            print("REFUSED: AGENT_MODEL_REQUIREMENTS anchor count != 1", file=sys.stderr); sys.exit(1)
+        src = src.replace(anchor, f"{MODEL_ROUTE_SENTINEL}\n{anchor}", 1)
+        changed = True
 
     # BEST Builder is OMO's Sisyphus agent. Its configured fallback chain
     # must also be fail-closed so the selected Builder model cannot silently

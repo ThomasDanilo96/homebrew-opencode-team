@@ -172,7 +172,7 @@ test("BEST migration protects Builder, Explore and Librarian and is idempotent",
   assert.match(first.patched, /  sisyphus: \{\n    fallbackChain: \[\]/);
   assert.match(first.patched, /  explore: \{\n    fallbackChain: \[\]\n  \},/);
   assert.match(first.patched, /  librarian: \{\n    fallbackChain: \[\]\n  \},/);
-  assert.match(first.output, /MIGRATED|ALREADY_PATCHED/);
+  assert.match(first.output, /PATCHED|MIGRATED|ALREADY_PATCHED/);
 
   const second = runPatcher(first.patched);
   assert.equal(second.status, 0, second.output);
@@ -188,7 +188,7 @@ test("BEST migration refuses partial and unexpected source states without writin
   assert.match(partialResult.output, /REFUSED/);
   assert.equal(partialResult.patched, partial);
 
-  const unknown = source.replace('model: "deepseek-v4-flash"', 'model: "unexpected-upstream-model"');
+  const unknown = source.replace("var AGENT_MODEL_REQUIREMENTS = {", "var UNKNOWN_AGENT_MODEL_REQUIREMENTS = {");
   const unknownResult = runPatcher(unknown);
   assert.notEqual(unknownResult.status, 0);
   assert.match(unknownResult.output, /REFUSED/);
