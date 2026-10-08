@@ -198,26 +198,36 @@ jobs:
               tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
               exit 1
             fi
+            for _ in $(seq 1 15); do
+              if [ -s "$run_state_dir/attach.pid" ] && [ -f "$run_state_dir/attach.identity" ]; then break; fi
+              sleep 1
+            done
+            if [ ! -s "$run_state_dir/attach.pid" ] || [ ! -f "$run_state_dir/attach.identity" ]; then
+              echo "Runtime smoke could not find the $team attach process" >&2
+              tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
+              exit 1
+            fi
             run_id="$(cat "$run_state_dir/run_id")"
-            launcher_pid="$(cat "$run_state_dir/launcher.pid")"
-            launcher_identity="$run_state_dir/launcher.identity"
-            if [ -z "$run_id" ] || [ -z "$launcher_pid" ] || [ ! -f "$launcher_identity" ]; then
-              echo "Runtime smoke cannot verify the $team launcher identity" >&2
+            attach_pid="$(cat "$run_state_dir/attach.pid")"
+            attach_identity="$run_state_dir/attach.identity"
+            if [ -z "$run_id" ] || [ -z "$attach_pid" ] || [ ! -f "$attach_identity" ]; then
+              echo "Runtime smoke cannot verify the $team attach identity" >&2
               tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
               exit 1
             fi
-            identity_pid="$(awk -F= '$1 == "pid" { print $2 }' "$launcher_identity")"
-            identity_run_id="$(awk -F= '$1 == "run_id" { print $2 }' "$launcher_identity")"
-            identity_start_epoch="$(awk -F= '$1 == "start_epoch" { print $2 }' "$launcher_identity")"
-            launcher_start="$(LC_ALL=C ps -p "$launcher_pid" -o lstart= 2>/dev/null || true)"
-            launcher_start_epoch="$(LC_ALL=C date -j -f "%a %b %d %T %Y" "$launcher_start" "+%s" 2>/dev/null || true)"
-            if [ "$identity_pid" != "$launcher_pid" ] || [ "$identity_run_id" != "$run_id" ] || [ "$identity_start_epoch" != "$launcher_start_epoch" ]; then
-              echo "Runtime smoke refused to signal an unverified $team launcher" >&2
+            identity_pid="$(awk -F= '$1 == "pid" { print $2 }' "$attach_identity")"
+            identity_run_id="$(awk -F= '$1 == "run_id" { print $2 }' "$attach_identity")"
+            identity_start_epoch="$(awk -F= '$1 == "start_epoch" { print $2 }' "$attach_identity")"
+            identity_role="$(awk -F= '$1 == "role" { print $2 }' "$attach_identity")"
+            attach_start="$(LC_ALL=C ps -p "$attach_pid" -o lstart= 2>/dev/null || true)"
+            attach_start_epoch="$(LC_ALL=C date -j -f "%a %b %d %T %Y" "$attach_start" "+%s" 2>/dev/null || true)"
+            if [ "$identity_pid" != "$attach_pid" ] || [ "$identity_run_id" != "$run_id" ] || [ "$identity_start_epoch" != "$attach_start_epoch" ] || [ "$identity_role" != "attach" ]; then
+              echo "Runtime smoke refused to signal an unverified $team attach process" >&2
               tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
               exit 1
             fi
-            if ! kill -TERM "$launcher_pid"; then
-              echo "Runtime smoke could not signal the verified $team launcher $launcher_pid" >&2
+            if ! kill -TERM "$attach_pid"; then
+              echo "Runtime smoke could not signal the verified $team attach process $attach_pid" >&2
               tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
               exit 1
             fi
@@ -227,7 +237,7 @@ jobs:
               sleep 1
             done
             if [ "$runtime_stopped" -ne 1 ]; then
-              echo "Runtime smoke did not cleanly stop $team launcher $launcher_pid" >&2
+              echo "Runtime smoke did not cleanly stop $team attach process $attach_pid" >&2
               cat "$log" >&2
             fi
             tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
