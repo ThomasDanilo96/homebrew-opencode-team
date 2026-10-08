@@ -905,6 +905,10 @@ install_time_machine_exclusions() {
 
 install_terminal_notifier() {
   [ "$(uname -s)" = Darwin ] || return 0
+  if [ "${CI:-}" = true ]; then
+    printf '  %-18s SKIPPED (CI has no notification permission prompt)\n' "macOS notifications"
+    return 0
+  fi
 
   local prefix source_app target_app notifier_bin first_install=0
   prefix="$(brew --prefix terminal-notifier 2>/dev/null)" || {
