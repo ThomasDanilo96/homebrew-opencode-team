@@ -2,7 +2,7 @@ class OpencodeTeam < Formula
   desc "Portable runtime foundation for OpenCode Team"
   homepage "https://github.com/ThomasDanilo96/homebrew-opencode-team"
   url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.34.tar.gz"
-  sha256 "7683f43228af4a9132665794346ad4495eb52168de0e49817ce7c881fc68e5fb"
+  sha256 "827ec0d8f832466eb011589c09a255de27d381df85df727331029e41d6eb475a"
   license "MIT"
 
   depends_on "git"
