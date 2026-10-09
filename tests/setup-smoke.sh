@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="${OPENCODE_TEAM_PACKAGE_ROOT:-$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 if [ -x /opt/homebrew/opt/node@22/bin/node ]; then
   PATH="/opt/homebrew/opt/node@22/bin:$PATH"
   export PATH
@@ -129,7 +129,7 @@ for team in best go openai daily; do
 done
 
 rm -rf "$TEAM_HOME/cache/runtime/best"
-TEAM_RUNTIME_HEADLESS=1 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" best >"$TEST_ROOT/upgrade-start.out" 2>&1 &
+TEAM_RUNTIME_HEADLESS=1 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" best-opencode >"$TEST_ROOT/upgrade-start.out" 2>&1 &
 upgrade_pid=$!
 upgrade_ready=0
 upgrade_run_rel=""

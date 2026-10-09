@@ -8,6 +8,8 @@ expected_version="$(tr -d '[:space:]' < VERSION)"
 grep -Fq 'expected_version="$(tr -d '\''[:space:]'\'' < VERSION)"' "$workflow"
 grep -Fq 'test "$(opencode-team version)" = "OpenCode Team $expected_version"' "$workflow"
 grep -Fq 'if [ "$team" = best ]; then launch_team=best-opencode; fi' "$workflow"
+grep -Fq 'OPENCODE_TEAM_PACKAGE_ROOT="$package_root"' "$workflow"
+grep -Fq '"$ROOT/bin/opencode-team" best-opencode' "${workflow%/*}/../../tests/setup-smoke.sh"
 if grep -En '0\.1\.17|v0\.1\.17' "$workflow"; then
   echo "workflow contains a stale release version" >&2
   exit 1

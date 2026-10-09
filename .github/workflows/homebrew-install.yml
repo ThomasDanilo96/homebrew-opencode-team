@@ -146,7 +146,7 @@ jobs:
            node --test "$package_root/shared/response-copy/tests/"*.test.mjs
            OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" bash "$GITHUB_WORKSPACE/tests/config-parity.sh"
            OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team doctor
-           OPENCODE_TEAM_TEST_DEPENDENCY_ROOT="$test_home/setup-smoke-dependencies" bash "$package_root/tests/setup-smoke.sh"
+           OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_TEST_DEPENDENCY_ROOT="$test_home/setup-smoke-dependencies" bash "$GITHUB_WORKSPACE/tests/setup-smoke.sh"
           bash "$package_root/tests/runtime-readiness.test.sh"
           if rg -n '/Users/|\.opencode-team-staging|go-final-ux-v1|best-shared-v1' "$test_home/config" "$test_home/state" "$test_home/cache/runtime"; then
             exit 1
