@@ -40,7 +40,7 @@ usage() {
     '  opencode-team time-machine-exclude [--apply]' \
     '  opencode-team time-machine-status' \
     '  opencode-team legacy-classify [path ...]' \
-    '  opencode-team maintenance <best-tool-output-gc|best-retention|openai-retention|runtime-gc|status>' \
+    '  opencode-team maintenance <best-tool-output-gc|best-retention|openai-retention|runtime-gc|version-check|status>' \
     '  opencode-team version'
 }
 
@@ -471,7 +471,7 @@ ensure_profile_roots() {
 }
 
 maintenance_tasks() {
-  printf '%s\n' best-tool-output-gc best-retention openai-retention runtime-gc playwright-gc host-storage-gc
+  printf '%s\n' best-tool-output-gc best-retention openai-retention runtime-gc playwright-gc host-storage-gc version-check
 }
 
 maintenance_label() {
@@ -482,6 +482,7 @@ maintenance_label() {
     runtime-gc) printf '%s\n' 'it.danilodantoni.opencode-team.runtime-gc' ;;
     playwright-gc) printf '%s\n' 'it.danilodantoni.opencode-team.playwright-gc' ;;
     host-storage-gc) printf '%s\n' 'it.danilodantoni.opencode-team.host-storage-gc' ;;
+    version-check) printf '%s\n' 'it.danilodantoni.opencode-team.version-check' ;;
     *) return 1 ;;
   esac
 }
@@ -624,6 +625,7 @@ maintenance_status() {
       runtime-gc) printf '  Runtime GC           %s\n' "$status" ;;
       playwright-gc) printf '  Playwright GC        %s\n' "$status" ;;
       host-storage-gc) printf '  Host storage GC      %s\n' "$status" ;;
+      version-check) printf '  Version check        %s\n' "$status" ;;
     esac
   done
   return "$failed"
@@ -669,8 +671,9 @@ hour, minute = {
     "best-retention": (5, 0),
     "openai-retention": (4, 15),
      "runtime-gc": (5, 30),
-      "playwright-gc": (0, 0),
-      "host-storage-gc": (0, 30),
+    "playwright-gc": (0, 0),
+    "host-storage-gc": (0, 30),
+    "version-check": (0, 0),
 }[task]
 plist = {
     "Label": label,
@@ -684,6 +687,9 @@ if task in {"playwright-gc", "host-storage-gc"}:
     plist["StartInterval"] = 4 * 60 * 60
 else:
     plist["StartCalendarInterval"] = {"Hour": hour, "Minute": minute}
+if task == "version-check":
+    plist["StartInterval"] = 12 * 60 * 60
+    plist["RunAtLoad"] = True
 pathlib.Path(destination).parent.mkdir(parents=True, exist_ok=True)
 with pathlib.Path(destination).open("wb") as stream:
     plistlib.dump(plist, stream, sort_keys=False)
@@ -742,11 +748,13 @@ install_maintenance() {
 
 maintenance_command() {
   setup_roots
-  if ! OPENCODE_BIN="$(resolve_opencode)"; then
-    printf 'OpenCode is required for setup\n' >&2
-    return 1
+  if [ "${1:-}" != version-check ]; then
+    if ! OPENCODE_BIN="$(resolve_opencode)"; then
+      printf 'OpenCode is required for setup\n' >&2
+      return 1
+    fi
+    export OPENCODE_BIN
   fi
-  export OPENCODE_BIN
   export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
   if [ "${1:-}" = status ]; then
     [ "$#" -eq 1 ] || { usage >&2; return 2; }
@@ -755,10 +763,10 @@ maintenance_command() {
   fi
   [ "$#" -eq 1 ] || { usage >&2; return 2; }
   case "$1" in
-    best-tool-output-gc|best-retention|openai-retention|runtime-gc|playwright-gc|host-storage-gc)
+    best-tool-output-gc|best-retention|openai-retention|runtime-gc|playwright-gc|host-storage-gc|version-check)
       local team=best
       [ "$1" = openai-retention ] && team=openai
-      if [ "$1" != runtime-gc ] && [ ! -f "$CONFIG_ROOT/$team/team-runtime.conf" ]; then
+      if [ "$1" != runtime-gc ] && [ "$1" != version-check ] && [ ! -f "$CONFIG_ROOT/$team/team-runtime.conf" ]; then
         printf 'Maintenance is not configured: %s\n' "$1" >&2
         return 1
       fi

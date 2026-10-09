@@ -21,7 +21,7 @@ fi
 export OPENCODE_TEAM_PYTHON
 
 case "$TASK" in
-  best-tool-output-gc|best-retention|best-memory-safety|openai-retention|runtime-gc|playwright-gc|host-storage-gc) ;;
+  best-tool-output-gc|best-retention|best-memory-safety|openai-retention|runtime-gc|playwright-gc|host-storage-gc|version-check) ;;
   *) printf 'Unknown maintenance task: %s\n' "$TASK" >&2; exit 2 ;;
 esac
 
@@ -219,5 +219,9 @@ case "$TASK" in
     ;;
   host-storage-gc)
     node "$PACKAGE_ROOT/shared/maintenance/host-storage-gc.mjs" --apply
+    ;;
+  version-check)
+    PACKAGE_ROOT="$PACKAGE_ROOT" STATE_ROOT="$STATE_ROOT" \
+      node "$PACKAGE_ROOT/shared/maintenance/version-check.mjs"
     ;;
 esac

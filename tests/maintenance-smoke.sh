@@ -18,13 +18,22 @@ export OPENCODE_TEAM_EXECUTABLE=/opt/homebrew/bin/opencode-team
 "$CLI" setup >/tmp/opencode-team-maintenance-setup.out
 
 agent_root="$TEST_ROOT/state/maintenance/launchagents"
-for task in best-tool-output-gc best-retention openai-retention runtime-gc playwright-gc host-storage-gc; do
+for task in best-tool-output-gc best-retention openai-retention runtime-gc playwright-gc host-storage-gc version-check; do
   plist="$agent_root/it.danilodantoni.opencode-team.$task.plist"
   test -f "$plist"
   plutil -lint "$plist"
   rg -q "/opt/homebrew/bin/opencode-team" "$plist"
   ! rg -q '/Users/|\.opencode-team-staging|/Cellar/' "$plist"
 done
+python3 - "$agent_root/it.danilodantoni.opencode-team.version-check.plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as stream:
+    plist = plistlib.load(stream)
+assert plist["StartInterval"] == 12 * 60 * 60
+assert plist["RunAtLoad"] is True
+PY
 
 before="$(shasum -a 256 "$agent_root"/*.plist)"
 "$CLI" setup >/tmp/opencode-team-maintenance-setup-second.out
@@ -35,8 +44,10 @@ test "$(< "$TEST_ROOT/state/maintenance/status/best-tool-output-gc")" = DEFERRED
 test "$(< "$TEST_ROOT/state/maintenance/status/best-retention")" = DEFERRED
 test "$(< "$TEST_ROOT/state/maintenance/status/openai-retention")" = DEFERRED
 test "$(< "$TEST_ROOT/state/maintenance/status/runtime-gc")" = INSTALLED
+test "$(< "$TEST_ROOT/state/maintenance/status/version-check")" = INSTALLED
 OPENCODE_TEAM_LEGACY_MAINTENANCE=1 "$CLI" maintenance status >"$TEST_ROOT/maintenance-status.out"
 rg -q 'BEST tool-output GC  DEFERRED' "$TEST_ROOT/maintenance-status.out"
+rg -q 'Version check[[:space:]]+INSTALLED' "$TEST_ROOT/maintenance-status.out"
 
 unset OPENCODE_TEAM_LEGACY_MAINTENANCE
 

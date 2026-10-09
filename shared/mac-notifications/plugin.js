@@ -1,5 +1,5 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { accessSync, constants, readFileSync } from "node:fs";
+import { delimiter, join } from "node:path";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
@@ -15,7 +15,8 @@ function shellQuote(value) {
   return `'${String(value).replaceAll("'", "'\\''")}'`;
 }
 
-export function notificationArgs({ teamName, runID, sessionID, runStateDir, tmuxPrefix, tmuxBin, nodePath = process.execPath, handlerPath = OPEN_SESSION }) {
+export function notificationArgs({ teamName, runID, sessionID, sessionTitle, runStateDir, tmuxPrefix, tmuxBin, nodePath = process.execPath, handlerPath = OPEN_SESSION }) {
+  const shortID = String(sessionID).split("_").at(-1).slice(-8);
   const clickCommand = [
     nodePath,
     handlerPath,
@@ -28,10 +29,53 @@ export function notificationArgs({ teamName, runID, sessionID, runStateDir, tmux
 
   return [
     "-title", `OpenCode Team · ${teamName}`,
-    "-message", `La chat ${sessionID.slice(-8)} ha terminato la risposta. Clicca per tornare alla chat.`,
+    "-subtitle", sessionTitle || `Chat ${shortID}`,
+    "-message", "La risposta è pronta. Clicca per riaprire questa chat.",
     "-group", `${teamName}-${sessionID}`,
     "-execute", clickCommand,
   ];
+}
+
+function executableNodePath(env) {
+  if (env.OPENCODE_TEAM_NODE) return env.OPENCODE_TEAM_NODE;
+  for (const directory of String(env.PATH || "").split(delimiter)) {
+    if (!directory) continue;
+    const candidate = join(directory, "node");
+    try {
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch {}
+  }
+  return process.execPath;
+}
+
+function cleanSessionTitle(value) {
+  return String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 88);
+}
+
+async function sessionTitleForNotification(event, sessionID, runStateDir, env) {
+  const eventInfo = event?.properties?.info;
+  const eventTitle = cleanSessionTitle(eventInfo?.title);
+  if (eventInfo?.id === sessionID && eventTitle && eventTitle !== "New session") return eventTitle;
+
+  try {
+    const cached = cleanSessionTitle(readFileSync(join(runStateDir, "session_title"), "utf8"));
+    if (cached && cached !== "New session") return cached;
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+
+  if (env.OPENCODE_SERVER_URL) {
+    try {
+      const response = await fetch(`${env.OPENCODE_SERVER_URL}/session/${encodeURIComponent(sessionID)}`, { signal: AbortSignal.timeout(1500) });
+      if (response.ok) {
+        const info = await response.json();
+        const title = cleanSessionTitle(info?.title);
+        if (title && title !== "New session") return title;
+      }
+    } catch {}
+  }
+  return `Chat ${sessionID.slice(-8)}`;
 }
 
 function notify(args, spawnProcess = spawn, notifierPath = process.env.OPENCODE_TEAM_TERMINAL_NOTIFIER || "terminal-notifier") {
@@ -64,7 +108,8 @@ export function createMacNotificationPlugin({ env = process.env, spawnProcess = 
       }
 
       try {
-        await notify(notificationArgs({ teamName, runID, sessionID: rootSessionID, runStateDir, tmuxPrefix, tmuxBin }), spawnProcess, env.OPENCODE_TEAM_TERMINAL_NOTIFIER || "terminal-notifier");
+        const sessionTitle = await sessionTitleForNotification(event, rootSessionID, runStateDir, env);
+        await notify(notificationArgs({ teamName, runID, sessionID: rootSessionID, sessionTitle, runStateDir, tmuxPrefix, tmuxBin, nodePath: executableNodePath(env) }), spawnProcess, env.OPENCODE_TEAM_TERMINAL_NOTIFIER || "terminal-notifier");
       } catch (error) {
         logger.error(`[mac-notifications] ${error.message}`);
       }

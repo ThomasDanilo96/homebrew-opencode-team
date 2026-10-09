@@ -129,6 +129,7 @@ for team in best free go openai daily; do
   test -f "$success_home/config/$team/opencode.jsonc"
 done
 test -f "$success_home/state/maintenance/launchagents/it.danilodantoni.opencode-team.runtime-gc.plist"
+test -f "$success_home/state/maintenance/launchagents/it.danilodantoni.opencode-team.version-check.plist"
 
 rm -rf "$success_home/config" "$success_home/state/maintenance"
 run_setup "$success_home" "$success_dependencies" "$success_bin" "$TEST_ROOT/recovery.out"

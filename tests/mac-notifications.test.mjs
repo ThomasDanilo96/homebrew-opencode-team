@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -14,6 +14,7 @@ import {
   findTerminalBundle,
   openChatFromNotification,
   parseTmuxClients,
+  selectTmuxClient,
 } from "../shared/mac-notifications/open-session.mjs";
 
 test("macOS completion notifications are limited to the run's root session", () => {
@@ -27,6 +28,7 @@ test("completion hook sends a clickable notification only for the root chat", as
   const stateDir = join(directory, "run state");
   mkdirSync(stateDir);
   writeFileSync(join(stateDir, "parent_session_id"), "ses_root123\n");
+  writeFileSync(join(stateDir, "session_title"), "Fix flaky integration tests\n");
   const calls = [];
   const spawnProcess = (command, args) => {
     calls.push({ command, args });
@@ -35,7 +37,7 @@ test("completion hook sends a clickable notification only for the root chat", as
     return child;
   };
   const plugin = createMacNotificationPlugin({
-    env: { RUNTIME_RUN_STATE_DIR: stateDir, TEAM_NAME: "best", RUN_ID: "a1b2c3d4", TMUX_PREFIX: "oc-best", TMUX_BIN: "/opt/homebrew/bin/tmux", OPENCODE_TEAM_TERMINAL_NOTIFIER: "/Users/test/Applications/terminal-notifier.app/Contents/MacOS/terminal-notifier" },
+    env: { RUNTIME_RUN_STATE_DIR: stateDir, TEAM_NAME: "best", RUN_ID: "a1b2c3d4", TMUX_PREFIX: "oc-best", TMUX_BIN: "/opt/homebrew/bin/tmux", OPENCODE_TEAM_NODE: "/opt/node/bin/node", OPENCODE_TEAM_TERMINAL_NOTIFIER: "/Users/test/Applications/terminal-notifier.app/Contents/MacOS/terminal-notifier" },
     spawnProcess,
     logger: { error: (message) => assert.fail(message) },
   });
@@ -45,7 +47,9 @@ test("completion hook sends a clickable notification only for the root chat", as
   await plugin.event({ event: { type: "session.idle", properties: { sessionID: "ses_root123" } } });
   assert.equal(calls.length, 1);
   assert.equal(calls[0].command, "/Users/test/Applications/terminal-notifier.app/Contents/MacOS/terminal-notifier");
+  assert.equal(calls[0].args[calls[0].args.indexOf("-subtitle") + 1], "Fix flaky integration tests");
   assert.ok(calls[0].args.includes("-execute"));
+  assert.ok(calls[0].args.at(-1).includes("'/opt/node/bin/node'"));
   assert.ok(calls[0].args.at(-1).includes(`'${stateDir}'`));
   rmSync(directory, { recursive: true, force: true });
 });
@@ -74,6 +78,9 @@ test("tmux client lookup and process ancestry support arbitrary terminal app bun
     return "1 /Applications/Example Terminal.app/Contents/MacOS/terminal";
   });
   assert.equal(bundle, "/Applications/Example Terminal.app");
+  assert.deepEqual(selectTmuxClient("oc-openai-other|122|/dev/ttys005\noc-best-other|124|/dev/ttys006", "oc-best-target", "oc-best"), {
+    session: "oc-best-other", pid: 124, tty: "/dev/ttys006",
+  });
 });
 
 test("notification click opens the matching tmux client and rejects stale sessions", () => {
@@ -88,9 +95,24 @@ test("notification click opens the matching tmux client and rejects stale sessio
     return "";
   };
   openChatFromNotification({ runID: "a1b2c3d4", sessionID: "ses_root123", runStateDir: directory, tmuxPrefix: "oc-best", tmuxBin: "/opt/homebrew/bin/tmux" }, runCommand);
-  assert.deepEqual(calls.map(([command]) => command), ["/opt/homebrew/bin/tmux", "/bin/ps", "/usr/bin/open", "/opt/homebrew/bin/tmux"]);
-  assert.deepEqual(calls.at(-1)[1], ["switch-client", "-c", "/dev/ttys004", "-t", "oc-best-a1b2c3d4"]);
+  assert.deepEqual(calls.map(([command]) => command), ["/opt/homebrew/bin/tmux", "/opt/homebrew/bin/tmux", "/bin/ps", "/usr/bin/open"]);
+  assert.deepEqual(calls[1][1], ["switch-client", "-c", "/dev/ttys004", "-t", "oc-best-a1b2c3d4"]);
   assert.throws(() => openChatFromNotification({ runID: "a1b2c3d4", sessionID: "ses_other", runStateDir: directory, tmuxPrefix: "oc-best", tmuxBin: "/opt/homebrew/bin/tmux" }, runCommand), /no longer matches/);
+  rmSync(directory, { recursive: true, force: true });
+});
+
+test("notification click opens a detached chat in Terminal when no tmux client is attached", () => {
+  const directory = mkdtempSync(join(tmpdir(), "opencode-notification-detached-"));
+  writeFileSync(join(directory, "run_id"), "a1b2c3d4\n");
+  writeFileSync(join(directory, "parent_session_id"), "ses_root123\n");
+  const calls = [];
+  const runCommand = (command, args) => { calls.push([command, args]); return ""; };
+  const result = openChatFromNotification({ runID: "a1b2c3d4", sessionID: "ses_root123", runStateDir: directory, tmuxPrefix: "oc-best", tmuxBin: "/opt/homebrew/bin/tmux" }, runCommand);
+  assert.equal(result.clientTTY, null);
+  assert.equal(calls[0][0], "/opt/homebrew/bin/tmux");
+  assert.equal(calls[1][0], "/usr/bin/osascript");
+  assert.match(calls[1][1].at(-1), /attach-session -t 'oc-best-a1b2c3d4'/);
+  assert.match(readFileSync(join(directory, "notification-click.log"), "utf8"), /opened detached session=oc-best-a1b2c3d4/);
   rmSync(directory, { recursive: true, force: true });
 });
 
@@ -114,6 +136,7 @@ test("clickable notification uses a shell-quoted handler command", () => {
     tmuxBin: "/opt/homebrew/bin/tmux",
   });
   const command = args[args.indexOf("-execute") + 1];
+  assert.equal(args[args.indexOf("-subtitle") + 1], "Chat root123");
   assert.match(command, /'\/tmp\/team state'/);
   assert.match(command, /'\/opt\/team root\/open-session\.mjs'/);
   assert.match(command, /'\/opt\/homebrew\/bin\/tmux'/);

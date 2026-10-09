@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: release `v0.1.44`.
+Status: release `v0.1.45`.
 
 ## Goal
 
@@ -25,6 +25,15 @@ opencode-team setup
 opencode-team doctor
 opencode-team best
 ```
+
+`setup` installs a macOS LaunchAgent that checks the latest published Git tag
+every 12 hours. It sends one notification per newer version, with the Homebrew
+upgrade and setup commands; it never upgrades automatically. Chat completion
+notifications show the profile and session title, and open the target tmux chat
+when clicked. Their banner duration is controlled by macOS: choose **Alerts**
+for terminal-notifier under System Settings → Notifications to keep them visible
+until dismissed. The terminal-notifier `-timeout` option only controls waits for
+interactive replies; macOS has no per-notification banner-duration setting.
 
 To use the separate BEST-based profile with OpenCode Zen's currently free models,
 launch `opencode-team free` and run `/connect` inside that profile to

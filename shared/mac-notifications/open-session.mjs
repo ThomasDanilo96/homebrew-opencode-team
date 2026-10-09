@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { appendFileSync, chmodSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,11 +30,19 @@ function parseArguments(args) {
   return result;
 }
 
-export function parseTmuxClients(output, sessionName) {
+export function parseTmuxClients(output, sessionName = "") {
   return output.split("\n").map((line) => {
     const [session, pid, tty] = line.split("|");
     return { session, pid: Number(pid), tty };
-  }).filter((client) => client.session === sessionName && Number.isInteger(client.pid) && client.pid > 0 && client.tty?.startsWith("/dev/"));
+  }).filter((client) => (!sessionName || client.session === sessionName) && Number.isInteger(client.pid) && client.pid > 0 && client.tty?.startsWith("/dev/"));
+}
+
+export function selectTmuxClient(output, sessionName, tmuxPrefix) {
+  const clients = parseTmuxClients(output);
+  return clients.find((client) => client.session === sessionName)
+    || clients.find((client) => client.session.startsWith(`${tmuxPrefix}-`))
+    || clients[0]
+    || null;
 }
 
 export function findTerminalBundle(clientPID, run = execFileSync) {
@@ -57,6 +65,31 @@ function run(command, args, runCommand) {
   runCommand(command, args, { stdio: "ignore" });
 }
 
+function shellQuote(value) {
+  return `'${String(value).replaceAll("'", "'\\''")}'`;
+}
+
+function writeClickLog(runStateDir, message) {
+  try {
+    const path = join(runStateDir, "notification-click.log");
+    appendFileSync(path, `${new Date().toISOString()} ${message}\n`, { mode: 0o600 });
+    chmodSync(path, 0o600);
+  } catch {}
+}
+
+function openNewTerminalSession(args, sessionName, runCommand) {
+  const command = `${shellQuote(args.tmuxBin)} attach-session -t ${shellQuote(sessionName)}`;
+  const script = [
+    "on run argv",
+    "  tell application \"Terminal\"",
+    "    activate",
+    "    do script (item 1 of argv)",
+    "  end tell",
+    "end run",
+  ].join("\n");
+  runCommand("/usr/bin/osascript", ["-e", script, command], { stdio: "ignore" });
+}
+
 export function openChatFromNotification(args, runCommand = execFileSync) {
   const { runID, sessionID, runStateDir, tmuxPrefix } = args;
   if (readFileSync(join(runStateDir, "run_id"), "utf8").trim() !== runID
@@ -66,18 +99,33 @@ export function openChatFromNotification(args, runCommand = execFileSync) {
 
   const sessionName = `${tmuxPrefix}-${runID}`;
   const clientsOutput = runCommand(args.tmuxBin, ["list-clients", "-F", "#{session_name}|#{client_pid}|#{client_tty}"], { encoding: "utf8" });
-  const client = parseTmuxClients(clientsOutput, sessionName)[0];
-  if (!client) throw new Error(`no attached terminal client for ${sessionName}`);
+  const client = selectTmuxClient(clientsOutput, sessionName, tmuxPrefix);
+  if (!client) {
+    openNewTerminalSession(args, sessionName, runCommand);
+    writeClickLog(runStateDir, `opened detached session=${sessionName} in Terminal.app`);
+    return { sessionName, clientTTY: null, terminalBundle: "com.apple.Terminal" };
+  }
 
-  const terminalBundle = findTerminalBundle(client.pid, runCommand);
-  run("/usr/bin/open", ["-a", terminalBundle], runCommand);
   run(args.tmuxBin, ["switch-client", "-c", client.tty, "-t", sessionName], runCommand);
+  let terminalBundle = "";
+  try {
+    terminalBundle = findTerminalBundle(client.pid, runCommand);
+    run("/usr/bin/open", ["-a", terminalBundle], runCommand);
+  } catch {
+    run("/usr/bin/open", ["-a", "Terminal"], runCommand);
+  }
+  writeClickLog(runStateDir, `switched client=${client.tty} session=${sessionName}`);
+  return { sessionName, clientTTY: client.tty, terminalBundle };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   try {
     openChatFromNotification(parseArguments(process.argv.slice(2)));
   } catch (error) {
+    try {
+      const args = parseArguments(process.argv.slice(2));
+      writeClickLog(args.runStateDir, `failed session=${args.tmuxPrefix}-${args.runID}: ${error.message}`);
+    } catch {}
     console.error(`[mac-notifications] ${error.message}`);
     process.exitCode = 1;
   }

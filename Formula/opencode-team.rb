@@ -1,7 +1,7 @@
 class OpencodeTeam < Formula
   desc "Portable runtime foundation for OpenCode Team"
   homepage "https://github.com/ThomasDanilo96/homebrew-opencode-team"
-  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.44.tar.gz"
+  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.45.tar.gz"
   sha256 "c61655e8dcc73104f8860eeb3d6988987868100b54f81128f45b09c1c282d20e"
   license "MIT"
 
@@ -30,7 +30,7 @@ class OpencodeTeam < Formula
   end
 
   test do
-    assert_match "OpenCode Team 0.1.44", shell_output("#{bin}/opencode-team version")
+    assert_match "OpenCode Team 0.1.45", shell_output("#{bin}/opencode-team version")
     help = shell_output("#{bin}/opencode-team --help")
     assert_match "BEST profile", help
     assert_match "free", help
@@ -38,6 +38,7 @@ class OpencodeTeam < Formula
     assert_match "best-native", help
     assert_predicate libexec/"core/lib/runtime-lifecycle.mjs", :file?
     assert_predicate libexec/"core/lib/runtime-reaper.sh", :file?
+    assert_predicate libexec/"shared/maintenance/version-check.mjs", :file?
     ENV["HOME"] = (testpath/"user-home").to_s
     (testpath/"user-home").mkpath
     shared = testpath/"shared-dependencies"
@@ -46,6 +47,7 @@ class OpencodeTeam < Formula
     ENV["OPENCODE_TEAM_DEPENDENCY_ROOT"] = shared.to_s
     ENV["OPENCODE_TEAM_HOME"] = first.to_s
     system bin/"opencode-team", "setup"
+    assert_predicate first/"state/maintenance/launchagents/it.danilodantoni.opencode-team.version-check.plist", :file?
     ENV["OPENCODE_TEAM_HOME"] = second.to_s
     system bin/"opencode-team", "setup"
     assert_empty (second/"data").glob("**/node_modules/oh-my-openagent")
