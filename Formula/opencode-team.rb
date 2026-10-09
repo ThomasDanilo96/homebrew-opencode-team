@@ -14,7 +14,8 @@ class OpencodeTeam < Formula
   depends_on "uv"
 
   def install
-    zsh_completion.install "completions/_opencode-team"
+    zsh_completion.mkpath
+    cp "completions/_opencode-team", zsh_completion/"_opencode-team"
     libexec.install "benchmarks", "bin", "completions", "core", "shared", "teams", "tests", "VERSION"
     (bin/"opencode-team").write <<~EOS
       #!/bin/bash
