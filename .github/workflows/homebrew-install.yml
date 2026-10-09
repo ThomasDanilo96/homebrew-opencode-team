@@ -20,6 +20,9 @@ jobs:
           ruby -c Formula/opencode-team.rb
           node --check shared/response-copy/exporter.js
           node --check shared/response-copy/runtime-source.js
+          node --check teams/best/best-native-router.mjs
+          node --check teams/best/best-router-contract.mjs
+          node --test tests/best-native-router.test.mjs
 
   release_state:
     runs-on: ubuntu-latest
@@ -83,6 +86,7 @@ jobs:
           trap 'rm -rf "$test_home"' EXIT
            shared_dependencies="$test_home/shared-dependencies"
            OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup
+           test "$(HOME="$test_home" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team best --version)" = "5.1.27"
 
            opencode --version
           opencode_prefix="$(brew --prefix opencode)"
@@ -128,6 +132,11 @@ jobs:
             "$package_root/shared/response-copy/response-copy-plugin.js" \
              "$package_root/teams/best/tui.json.template" \
              "$package_root/teams/best/oh-my-openagent.jsonc.template" \
+             "$package_root/teams/best/omo.jsonc.template" \
+             "$package_root/teams/best/best-native-router.mjs" \
+             "$package_root/teams/best/best-router-contract.mjs" \
+             "$package_root/tests/best-native-router.test.mjs" \
+             "$package_root/tests/best-omo-v5-patch.test.mjs" \
              "$package_root/teams/go/tui.json.template" \
             "$package_root/teams/openai/tui.json.template" \
             "$package_root/core/lib/runtime-manifest.mjs" \
@@ -178,8 +187,10 @@ jobs:
             run_dir="$(mktemp -d)"
             log="$run_dir/runtime.log"
             session="opencode-team-ci-$team-$$"
+            launch_team="$team"
+            if [ "$team" = best ]; then launch_team=best-opencode; fi
             tmux -L "$tmux_socket" new-session -d -s "$session" \
-              "cd '$run_dir' && HOME='$test_home' OPENCODE_TEAM_HOME='$test_home' OPENCODE_TEAM_DEPENDENCY_ROOT='$shared_dependencies' opencode-team '$team' >'$log' 2>&1"
+              "cd '$run_dir' && HOME='$test_home' OPENCODE_TEAM_HOME='$test_home' OPENCODE_TEAM_DEPENDENCY_ROOT='$shared_dependencies' opencode-team '$launch_team' >'$log' 2>&1"
             ready=0
             for _ in $(seq 1 45); do
               readiness="$(HOME="$test_home" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team runtime-readiness 2>/dev/null || true)"

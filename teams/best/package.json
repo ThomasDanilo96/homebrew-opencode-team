@@ -3,6 +3,8 @@
   "private": true,
   "dependencies": {
     "@opencode-ai/plugin": "1.18.21",
-    "oh-my-openagent": "4.19.4"
+    "oh-my-openagent": "5.1.27",
+    "omo-ai": "5.1.27",
+    "bun": "1.4.2"
   }
 }

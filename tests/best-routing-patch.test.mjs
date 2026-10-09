@@ -398,3 +398,28 @@ test("BEST source config enables the primary Builder through OMO and denies lega
   assert.match(opencodeTemplate, /"tools": \{\s*"call_omo_agent": false\s*\}/);
   assert.match(opencodeTemplate, /"OpenCode-Builder": \{[\s\S]*"tools": \{[\s\S]*"call_omo_agent": false/);
 });
+
+test("BEST OMO 5 profile enables persistent memory and retains BEST-specific OpenCode settings", () => {
+  const template = readFileSync(join(root, "teams/best/omo.jsonc.template"), "utf8");
+  const config = JSON.parse(template.replaceAll("@DATA_ROOT@", "/tmp/best-data"));
+  const native = config.profiles["best-native"]["[native]"];
+  assert.equal(native.memory.enabled, true);
+  assert.equal(native.memory.reflection.enabled, true);
+  assert.deepEqual(native.memory.reflection.trigger, { step_count: 25, on_compaction: true });
+  assert.equal(native.memory.recall.enabled, true);
+  assert.equal(native.model_profile, "chatgpt-subscription/gpt-6-luna");
+  assert.equal(native.task.default_concurrency, 4);
+  assert.equal(native.task.max_depth, 1);
+  assert.equal(native.categories["deep-high"].models.length, 1);
+  assert.equal(native.agents["openai-architect"].tools.task, false);
+  assert.equal(native.agents["openai-reviewer"].tools.write, false);
+  assert.deepEqual(config._migrations, [
+    "2026-07-opencode-config-unification",
+    "2026-08-reasoning-unification",
+  ]);
+  const opencode = config.profiles["best-team"]["[opencode]"];
+  assert.equal(opencode.sisyphus_agent.default_builder_enabled, true);
+  assert.equal(opencode.browser_automation_engine.provider, "playwright");
+  assert.equal(opencode.agents["OpenCode-Builder"].permission.task, "allow");
+  assert.equal(opencode.agents["OpenCode-Builder"].tools.call_omo_agent, false);
+});

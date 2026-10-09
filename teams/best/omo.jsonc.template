@@ -1,0 +1,144 @@
+{
+  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/omo.schema.json",
+  "_migrations": [
+    "2026-07-opencode-config-unification",
+    "2026-08-reasoning-unification"
+  ],
+  "profiles": {
+    "best-team": {
+      "[opencode]": {
+        "sisyphus_agent": {
+          "default_builder_enabled": true
+        },
+        "browser_automation_engine": {
+          "provider": "playwright",
+          "playwright_mcp_args": [
+            "--headless",
+            "--isolated",
+            "--output-dir",
+            "@DATA_ROOT@/best/playwright/output"
+          ]
+        },
+        "agents": {
+          "OpenCode-Builder": {
+            "mode": "primary",
+            "permission": {
+              "task": "allow",
+              "call_omo_agent": "deny",
+              "serena_initial_instructions": "allow",
+              "serena_get_current_config": "allow"
+            },
+            "tools": {
+              "call_omo_agent": false
+            }
+          }
+        }
+      }
+    },
+    "best-native": {
+      "[native]": {
+        "model_profile": "chatgpt-subscription/gpt-6-luna",
+        "task": {
+          "default_concurrency": 4,
+          "global_concurrency": 4,
+          "provider_concurrency": {
+            "chatgpt-subscription": 1,
+            "opencode-go": 2
+          },
+          "max_depth": 1,
+          "resume_children": true
+        },
+        "memory": {
+          "enabled": true,
+          "reflection": {
+            "enabled": true,
+            "trigger": {
+              "step_count": 25,
+              "on_compaction": true
+            }
+          },
+          "recall": {
+            "enabled": true,
+            "max_items": 2
+          }
+        },
+        "agents": {
+          "explore": {
+            "models": ["opencode-go/qwen3.7-plus"],
+            "reasoning": "medium"
+          },
+          "librarian": {
+            "models": ["opencode-go/qwen3.7-plus"],
+            "reasoning": "medium"
+          },
+          "openai-architect": {
+            "description": "BEST architecture consultant. Read-only; return a plan and risks.",
+            "models": ["chatgpt-subscription/gpt-6-luna"],
+            "reasoning": "high",
+            "tools": {"task": false, "bash": false, "edit": false, "write": false}
+          },
+          "openai-reviewer": {
+            "description": "BEST independent requirements and edge-case reviewer. Read-only.",
+            "models": ["chatgpt-subscription/gpt-6-luna"],
+            "reasoning": "high",
+            "tools": {"task": false, "bash": false, "edit": false, "write": false}
+          }
+        },
+        "categories": {
+          "quick": {
+            "models": ["opencode-go/mimo-v2.5"],
+            "reasoning": "low"
+          },
+          "coding": {
+            "models": ["opencode-go/qwen3.7-plus"],
+            "reasoning": "medium"
+          },
+          "architecture": {
+            "models": ["chatgpt-subscription/gpt-6-luna"],
+            "reasoning": "high"
+          },
+          "architect": {
+            "models": ["chatgpt-subscription/gpt-6-luna"],
+            "reasoning": "high"
+          },
+          "artistry": {
+            "models": ["chatgpt-subscription/gpt-6-luna"],
+            "reasoning": "medium"
+          },
+          "deep-high": {
+            "models": ["chatgpt-subscription/gpt-6-luna"],
+            "reasoning": "high"
+          },
+          "review": {
+            "models": ["chatgpt-subscription/gpt-6-luna"],
+            "reasoning": "high"
+          },
+          "deep-low": {
+            "models": ["chatgpt-subscription/gpt-6-luna"],
+            "reasoning": "medium"
+          },
+          "unspecified-low": {
+            "models": ["opencode-go/mimo-v2.5"],
+            "reasoning": "low"
+          },
+          "unspecified-high": {
+            "models": ["chatgpt-subscription/gpt-6-luna"],
+            "reasoning": "high"
+          },
+          "visual-engineering": {
+            "models": ["chatgpt-subscription/gpt-6-luna"],
+            "reasoning": "high"
+          },
+          "writing": {
+            "models": ["opencode-go/qwen3.7-plus"],
+            "reasoning": "medium"
+          },
+          "ultrabrain": {
+            "models": ["chatgpt-subscription/gpt-6-luna"],
+            "reasoning": "high"
+          }
+        }
+      }
+    }
+  }
+}

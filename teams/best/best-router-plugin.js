@@ -4,6 +4,9 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir } from "node:os";
 import { guardToolExecution } from "../../shared/tool-output-guard.js";
+import { routeGuidanceFor } from "./best-router-contract.mjs";
+
+export { routeGuidanceFor };
 
 const PROFILE_ROOT = dirname(fileURLToPath(import.meta.url));
 const ROUTER = process.env.BEST_ROUTER_PATH ?? join(PROFILE_ROOT, "router-classify.sh");
@@ -54,14 +57,6 @@ export const memoryCircuitOpen = () => {
     return state.result === "BLOCK_FANOUT" && Number.isFinite(checkedAt) && Date.now() - checkedAt >= 0 && Date.now() - checkedAt <= maxAge;
   } catch { return false; }
 };
-const ROUTE_GUIDANCE = {
-  EXPLORE: "BEST ROUTE EXPLORE: FIRST and ONLY route-satisfying action: issue exactly one native task(subagent_type=\"explore\", run_in_background=true). The task schema requires both fields; do not omit run_in_background. Do not use general, do not retry, do not launch a duplicate explore task, do not attempt semantic repository tools first, and do not attempt call_omo_agent.",
-  LIBRARIAN: "BEST ROUTE LIBRARIAN: FIRST and ONLY route-satisfying action: issue exactly one native task(subagent_type=\"librarian\", run_in_background=true). The task schema requires both fields; do not omit run_in_background. Do not use general, do not retry, do not launch a duplicate librarian task, do not attempt documentation tools first, and do not attempt call_omo_agent.",
-  BOTH: "BEST ROUTE BOTH: FIRST and ONLY route-satisfying actions: issue exactly two native task calls, one task(subagent_type=\"explore\", run_in_background=true) and one task(subagent_type=\"librarian\", run_in_background=true). The task schema requires both fields; do not use general, do not retry, do not launch duplicates, do not attempt repository or documentation tools first, and do not attempt call_omo_agent.",
-  FOUR: "BEST ROUTE FOUR: FIRST and ONLY route-satisfying actions: launch exactly four native tasks in parallel: \"explore\" and \"librarian\" on Go, plus \"openai-architect\" and \"openai-reviewer\" on OpenAI, each with run_in_background=true. Give explore the task of locating relevant code and existing patterns; librarian the task of checking relevant official guidance; openai-architect the task of proposing an implementation plan and risks; openai-reviewer the task of independently reviewing requirements and likely edge cases. Do not begin direct repository work until all four task calls have been launched. Do not use general; do not retry; do not launch duplicate tasks; do not call call_omo_agent."
-};
-
-export const routeGuidanceFor = (route) => ROUTE_GUIDANCE[route] || "";
 
 const KNOWN_READ_FILES = new Set([
   "teams/best/patch-omo-core.py",
@@ -226,7 +221,7 @@ export default async function bestRouterPlugin(input) {
         ...source,
         id: `${source.id}:best-router`,
         type: "text",
-         text: `${ROUTE_GUIDANCE[classification]}\n${route}`,
+         text: `${routeGuidanceFor(classification)}\n${route}`,
         synthetic: true
       });
       const required_agents = classification === "BOTH"

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-apply_best_omo_patch.py — Build candidate OMO for BEST from unpatched 4.19.4 baseline.
+apply_best_omo_patch.py — Build candidate OMO for BEST from supported unpatched OMO bundles.
 Applies: four no_attach sentinels + Builder task:allow.
 Does NOT apply: V2 worker_done (BEST uses router completion), fg_only, clickability.
 """
@@ -17,6 +17,8 @@ BUILDER_TASK_SENTINEL = "_GO_BUILDER_TASK_ALLOW_V1"
 MODEL_ROUTE_SENTINEL = "const _BEST_CONFIGURED_AGENT_NO_FALLBACK_V1 = true;"
 DELEGATE_SENTINEL = "const _BEST_DELEGATE_NO_FALLBACK_V1 = true;"
 CONTROLLER_SENTINEL = "const _BEST_MODEL_FALLBACK_CONTROLLER_GUARD_V1 = true;"
+MIGRATION_ISOLATION_SENTINEL = "const _BEST_TEAM_OMO_MIGRATION_ISOLATION_V1 = true;"
+OMO_HOME_OVERRIDE_SENTINEL = "const _BEST_TEAM_OMO_HOME_OVERRIDE_V1 = true;"
 
 BEST_SANDBOX = os.path.realpath(os.path.expanduser("~/.opencode-best-team"))
 
@@ -360,11 +362,35 @@ def patch_model_routes():
 
     return changed
 
+
+def patch_migration_isolation():
+    global src
+    v5_signature = "async function executeSync(args, toolContext, ctx, deps = defaultDeps6,"
+    if src.count(v5_signature) != 1:
+        return False
+    workspace_migration_call = "    deps.migrateLegacyWorkspaceDirectory(input.directory);"
+    migration_call = "    startupMigration ??= deps.runOpenCodeStartupMigration({ cwd: input.directory });"
+    home_resolver = "function resolveHomeDir(env = process.env) {\n  const homeDir = env.HOME ?? env.USERPROFILE ?? process.cwd();"
+    home_override = f"{OMO_HOME_OVERRIDE_SENTINEL}\nfunction resolveHomeDir(env = process.env) {{\n  const homeDir = env.BEST_TEAM_OMO_HOME ?? env.HOME ?? env.USERPROFILE ?? process.cwd();"
+    migration_bypass = f"    {MIGRATION_ISOLATION_SENTINEL}\n    startupMigration ??= {{ error: void 0, journalResumed: false, migratedFrom: [], skippedConflictCount: 0 }};"
+    sentinel_count = src.count(MIGRATION_ISOLATION_SENTINEL)
+    if sentinel_count == 0:
+        if src.count(workspace_migration_call) != 1 or src.count(migration_call) != 1 or src.count(home_resolver) != 1:
+            print("REFUSED: v5 OpenCode migration anchors are missing or ambiguous", file=sys.stderr); sys.exit(1)
+        src = src.replace(workspace_migration_call, "    // BEST migration isolation: do not write legacy files into user workspaces.\n", 1)
+        src = src.replace(migration_call, migration_bypass, 1)
+        src = src.replace(home_resolver, home_override, 1)
+        return True
+    if sentinel_count != 1 or src.count(migration_bypass) != 1 or src.count(workspace_migration_call) != 0 or src.count(OMO_HOME_OVERRIDE_SENTINEL) != 1 or src.count(home_override) != 1:
+        print("REFUSED: contradictory BEST migration isolation state", file=sys.stderr); sys.exit(1)
+    return False
+
 v1_count = src.count(OLD_V1_SENTINEL)
 if v1_count != 0:
     print("REFUSED: old foreground V1 sentinel present", file=sys.stderr); sys.exit(1)
 
 model_routes_changed = patch_model_routes()
+migration_isolation_changed = patch_migration_isolation()
 
 nc = src.count(NATIVE_SENTINEL)
 tc = src.count(TASK_SENTINEL)
@@ -386,7 +412,7 @@ if all(x == 1 for x in all_native) and bt == 1:
             f.write(src)
         print("MIGRATED")
     else:
-        if model_routes_changed:
+        if model_routes_changed or migration_isolation_changed:
             with open(filepath, "w") as f:
                 f.write(src)
         print("ALREADY_PATCHED")
@@ -397,16 +423,94 @@ elif not all(x == 0 for x in all_native):
 def patch(anchor, replacement, label):
     global src
     c = src.count(anchor)
+    if c != 1 and label == "B1:func":
+        signature = "async function executeSyncTask(args, ctx, executorCtx, parentContext, agentToUse, categoryModel, systemContent, modelInfo, fallbackChain, deps = syncTaskDeps) {"
+        declarations = "  const { client, directory, syncPollTimeoutMs } = executorCtx;\n  const toastManager = getTaskToastManager();\n  let taskId;\n  let syncSessionID;\n  let spawnReservation;\n  let concurrencyAcquired = false;"
+        reserve = "    const spawn = await reserveSyncSubagentSpawn(executorCtx, parentContext);"
+        if src.count(signature) != 1 or src.count(declarations) != 1 or src.count(reserve) != 1:
+            print("REFUSED: unsupported v5 sync-task structure", file=sys.stderr); sys.exit(1)
+        if src.count("const { client, directory, syncPollTimeoutMs } = executorCtx;") != 1:
+            print("REFUSED: v5 sync-task client binding is ambiguous", file=sys.stderr); sys.exit(1)
+        if src.count("spawnReservation = spawn.reservation;") != 1 or src.count("const { spawnContext } = spawn;") != 1 or src.count("const createSessionResult = await deps.createSyncSession(client, {") != 1:
+            print("REFUSED: v5 sync-task reservation contract changed", file=sys.stderr); sys.exit(1)
+        setup = '''      {
+        const _fs = __require("fs"), _path = __require("path"), _os = __require("os");
+        const _goSandbox = _path.join(_os.homedir(), ".opencode-best-team");
+        const _runsDir = _path.join(_goSandbox, "state", "runs");
+        if (!_fs.existsSync(_runsDir)) throw new Error("[GO_TASK_NATIVE_UI] GO runs directory not found");
+        if (typeof parentContext.sessionID !== "string" || !parentContext.sessionID.startsWith("ses_")) throw new Error("[GO_TASK_NATIVE_UI] invalid or missing parent session ID");
+        let _matchCount = 0, _matchedDir = "";
+        for (const _re of _fs.readdirSync(_runsDir)) {
+          const _f = _path.join(_runsDir, _re, "parent_session_id");
+          if (_fs.existsSync(_f) && _fs.readFileSync(_f, "utf8").trim() === parentContext.sessionID) { _matchCount++; _matchedDir = _path.join(_runsDir, _re); }
+        }
+        if (_matchCount !== 1) throw new Error(`[GO_TASK_NATIVE_UI] run resolution failed: match_count=${_matchCount}, parent=${parentContext.sessionID}`);
+        _taskRunDir = _matchedDir;
+        _taskHoldOwner = __require("crypto").randomUUID();
+        _fs.mkdirSync(_path.join(_matchedDir, "attach_holds"), { recursive: true });
+        _fs.mkdirSync(_path.join(_matchedDir, "no_attach"), { recursive: true });
+        _fs.writeFileSync(_path.join(_matchedDir, "attach_holds", _taskHoldOwner + ".hold"), "");
+      }
+'''
+        src = src.replace(signature, signature + "\n  const _GO_TASK_NATIVE_UI_NO_ATTACH_PATCH_V1 = true;", 1)
+        src = src.replace("const { client, directory, syncPollTimeoutMs } = executorCtx;", "const { client: client3, directory, syncPollTimeoutMs } = executorCtx;", 1)
+        src = src.replace(declarations, declarations + "\n  let _taskHoldOwner = null;\n  let _taskRunDir = null;\n  let _taskRetainHold = false;", 1)
+        src = src.replace(reserve, setup + reserve.replace("const spawn =", "const spawn5 ="), 1)
+        src = src.replace("spawnReservation = spawn.reservation;", "spawnReservation = spawn5.reservation;", 1)
+        src = src.replace("const { spawnContext } = spawn;", "const { spawnContext } = spawn5;", 1)
+        src = src.replace("const createSessionResult = await deps.createSyncSession(client, {", "const createSessionResult = await deps.createSyncSession(client3, {", 1)
+        return
+    if c != 1 and label == "D1:func":
+        signature = "async function executeBackground(args, toolContext, manager, client, fallbackChain, model) {"
+        message_dir = "    const messageDir = getMessageDir(toolContext.sessionID);"
+        if src.count(signature) != 1 or src.count(message_dir) != 1:
+            print("REFUSED: unsupported v5 call_omo_agent background structure", file=sys.stderr); sys.exit(1)
+        setup = '''    {
+      const _fs = __require("fs"), _path = __require("path"), _os = __require("os");
+      const _goSandbox = _path.join(_os.homedir(), ".opencode-best-team");
+      const _runsDir = _path.join(_goSandbox, "state", "runs");
+      if (!_fs.existsSync(_runsDir)) throw new Error("[GO_CALL_OMO_BG] GO runs directory not found");
+      if (typeof toolContext.sessionID !== "string" || !toolContext.sessionID.startsWith("ses_")) throw new Error("[GO_CALL_OMO_BG] invalid or missing parent session ID");
+      let _matchCount = 0, _matchedDir = "";
+      for (const _re of _fs.readdirSync(_runsDir)) {
+        const _f = _path.join(_runsDir, _re, "parent_session_id");
+        if (_fs.existsSync(_f) && _fs.readFileSync(_f, "utf8").trim() === toolContext.sessionID) { _matchCount++; _matchedDir = _path.join(_runsDir, _re); }
+      }
+      if (_matchCount !== 1) throw new Error(`[GO_CALL_OMO_BG] run resolution failed: match_count=${_matchCount}, parent=${toolContext.sessionID}`);
+      _callBgRunDir = _matchedDir;
+      _callBgHoldOwner = __require("crypto").randomUUID();
+      _fs.mkdirSync(_path.join(_matchedDir, "attach_holds"), { recursive: true });
+      _fs.mkdirSync(_path.join(_matchedDir, "no_attach"), { recursive: true });
+      _fs.writeFileSync(_path.join(_matchedDir, "attach_holds", _callBgHoldOwner + ".hold"), "");
+    }
+'''
+        src = src.replace(signature, signature + "\n  const _GO_CALL_OMO_BACKGROUND_NATIVE_UI_NO_ATTACH_PATCH_V1 = true;\n  let _callBgHoldOwner = null;\n  let _callBgRunDir = null;\n  let _callBgRetainHold = false;", 1)
+        src = src.replace(message_dir, setup + message_dir, 1)
+        return
     if c != 1:
         print(f"ERROR: {label} anchor matched {c} times", file=sys.stderr); sys.exit(1)
     src = src.replace(anchor, replacement, 1)
 
 # PATCH A: call_omo_agent executeSync (no_attach)
+# v5 renamed this local dependency bundle; normalize only this function signature
+# while applying the shared transformation, then restore the upstream identifier.
+v5_execute_sync_signature = "async function executeSync(args, toolContext, ctx, deps = defaultDeps6, fallbackChain, spawnReservation, model) {"
+v5_execute_sync_normalized = "async function executeSync(args, toolContext, ctx, deps = defaultDeps7, fallbackChain, spawnReservation, model) {"
+v5_execute_sync = src.count(v5_execute_sync_signature) == 1
+if v5_execute_sync:
+    src = src.replace(v5_execute_sync_signature, v5_execute_sync_normalized, 1)
+
 patch(
     'async function executeSync(args, toolContext, ctx, deps = defaultDeps7, fallbackChain, spawnReservation, model) {\n  let sessionID;\n  let createdSessionForExecution = false;\n  let appliedFallbackChain = false;\n  try {\n    const session = await deps.createOrGetSession(args, toolContext, ctx, model);',
     'async function executeSync(args, toolContext, ctx, deps = defaultDeps7, fallbackChain, spawnReservation, model) {\n  const _GO_NATIVE_UI_NO_ATTACH_PATCH_V1 = true;\n  let sessionID;\n  let createdSessionForExecution = false;\n  let appliedFallbackChain = false;\n  let _noAttachHoldOwner = null;\n  let _noAttachRunDir = null;\n  let _noAttachRetainHold = false;\n  try {\n    {\n      const _fs = __require("fs"), _path = __require("path"), _os = __require("os");\n      const _goSandbox = _path.join(_os.homedir(), ".opencode-best-team");\n      const _runsDir = _path.join(_goSandbox, "state", "runs");\n      if (!_fs.existsSync(_runsDir)) {\n        throw new Error("[GO_NATIVE_UI] GO runs directory not found");\n      }\n      if (typeof toolContext.sessionID !== "string" || !toolContext.sessionID.startsWith("ses_")) {\n        throw new Error("[GO_NATIVE_UI] invalid or missing parent session ID");\n      }\n      let _matchCount = 0, _matchedDir = "";\n      for (const _re of _fs.readdirSync(_runsDir)) {\n        const _f = _path.join(_runsDir, _re, "parent_session_id");\n        if (_fs.existsSync(_f) && _fs.readFileSync(_f, "utf8").trim() === toolContext.sessionID) {\n          _matchCount++;\n          _matchedDir = _path.join(_runsDir, _re);\n        }\n      }\n      if (_matchCount !== 1) {\n        throw new Error(`[GO_NATIVE_UI] run resolution failed: match_count=${_matchCount}, parent=${toolContext.sessionID}`);\n      }\n      _noAttachRunDir = _matchedDir;\n      _noAttachHoldOwner = __require("crypto").randomUUID();\n      _fs.mkdirSync(_path.join(_matchedDir, "attach_holds"), { recursive: true });\n      _fs.mkdirSync(_path.join(_matchedDir, "no_attach"), { recursive: true });\n      const _holdPath = _path.join(_matchedDir, "attach_holds", _noAttachHoldOwner + ".hold");\n      _fs.writeFileSync(_holdPath, "");\n      log2("[GO_NATIVE_UI] attach_hold created", { owner: _noAttachHoldOwner, runDir: _matchedDir });\n    }\n    const session = await deps.createOrGetSession(args, toolContext, ctx, model);',
     "A1:func"
 )
+if v5_execute_sync:
+    patched_execute_sync = v5_execute_sync_normalized + "\n  const _GO_NATIVE_UI_NO_ATTACH_PATCH_V1 = true;"
+    restored_execute_sync = v5_execute_sync_signature + "\n  const _GO_NATIVE_UI_NO_ATTACH_PATCH_V1 = true;"
+    if src.count(patched_execute_sync) != 1:
+        print("REFUSED: v5 executeSync restoration anchor count != 1", file=sys.stderr); sys.exit(1)
+    src = src.replace(patched_execute_sync, restored_execute_sync, 1)
 
 patch(
     '  } finally {\n    if (sessionID && appliedFallbackChain) {',

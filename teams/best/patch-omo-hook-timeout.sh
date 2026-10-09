@@ -6,7 +6,7 @@ if [ -z "$OMO" ] && [ -n "${SANDBOX:-}" ]; then
 BEST_DEPENDENCY_ROOT="${OPENCODE_TEAM_DEPENDENCY_ROOT:-$(cd "$SANDBOX/../dependencies" && pwd)}"
 OMO="$BEST_DEPENDENCY_ROOT/best/node_modules/oh-my-openagent/dist/index.js"
 fi
-EXPECTED_VERSION="4.19.4"
+SUPPORTED_VERSIONS=("4.19.4" "5.1.27")
 UNPATCHED_SIGNATURE='options.pluginRoot = cmdHook.pluginRoot;'
 PATCHED_SIGNATURE='typeof cmdHook.timeout === "number"'
 
@@ -15,7 +15,10 @@ log() { printf '[hook-timeout-patch] %s\n' "$1"; }
 
 package_json="$(cd "$(dirname "$OMO")/.." && pwd)/package.json"
 version="$(node -p "require('$package_json').version")"
-[ "$version" = "$EXPECTED_VERSION" ] || { log "REFUSED: expected $EXPECTED_VERSION, found $version" >&2; exit 1; }
+case " ${SUPPORTED_VERSIONS[*]} " in
+  *" $version "*) ;;
+  *) log "REFUSED: unsupported oh-my-openagent version $version" >&2; exit 1 ;;
+esac
 
 if rg -q "$PATCHED_SIGNATURE" "$OMO"; then
   log "ALREADY_PATCHED: $OMO"

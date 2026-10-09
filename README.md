@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: release `v0.1.39`.
+Status: release `v0.1.40`.
 
 ## Goal
 
@@ -13,7 +13,7 @@ Package the portable OpenCode Team runtime foundation for distribution through H
 - Node.js
 - Git
 - curl, jq, uv, ripgrep
-- tmux for BEST and GO bridges
+- tmux for GO and the BEST OpenCode fallback
 - Codex and Serena for team integrations; `gh` remains optional
 - Node.js 22.22.2+, Node.js 24.15.0+, or Node.js 26+
 
@@ -25,6 +25,13 @@ opencode-team setup
 opencode-team doctor
 opencode-team best
 ```
+
+`best` launches the OmO Native v5 BEST profile with persistent memory and the
+BEST route-gating extension. On first use, migrate the isolated BEST provider
+and model configuration with `opencode-team best-native-setup`; run it without
+flags to review and approve the import. OpenAI OAuth requires `/login
+chatgpt-subscription` inside OmO. The previous OpenCode runtime remains
+available as `opencode-team best-opencode`.
 
 The install-scoped `HOMEBREW_NO_INSTALL_CLEANUP=1` prevents an unrelated broken
 Homebrew package from aborting this install. It does not change Homebrew's global
@@ -52,20 +59,25 @@ Run `opencode-team daily-report` to summarize completed Daily work packets,
 token usage, estimated cost, model mix, fanout, and latency. Missing telemetry
 is reported as `null`/`unmeasured`.
 
-`best`, `go`, `openai`, and `daily` are aliases for `start <team>`. Resume is forwarded
-to the shared runtime with `--resume ses_...`.
+`go`, `openai`, and `daily` are aliases for `start <team>`. `best` starts OmO
+Native; use `best-opencode` to launch the OpenCode fallback. Native session
+resume uses OmO's `--resume` / `--continue` options.
 
 Profiles:
 
-- `BEST`: general multi-agent OpenCode profile with the certified BEST router.
+- `BEST`: OmO Native v5 with persistent memory, session continuity, and native
+  enforcement of the BEST explore/librarian/four-agent routes.
+- `BEST OpenCode fallback`: the preserved OpenCode v5 profile, launched with
+  `opencode-team best-opencode`.
 - `GO`: OpenCode Go profile with the certified GO OMO patches.
 - `OPENAI`: OpenAI-only orchestration profile with Codex and Serena integration.
 
-## Completion notifications
+## OpenCode completion notifications
 
-All profiles send a macOS notification when the root chat finishes a response.
-Clicking it brings the terminal running that tmux session to the foreground and
-returns to the matching chat. Setup registers Homebrew's `terminal-notifier` app
+The OpenCode profiles (BEST fallback, GO, OPENAI, and DAILY) send a macOS
+notification when the root chat finishes a response. Clicking it brings the
+terminal running that tmux session to the foreground and returns to the matching
+chat. Setup registers Homebrew's `terminal-notifier` app
 in `~/Applications` and sends one test notification to request macOS permission.
 Approve the system prompt; macOS does not allow setup to grant notification
 permission on the user's behalf. To keep notifications visible until clicked,
@@ -93,9 +105,11 @@ OPENCODE_TEAM_HOME="$(mktemp -d)" bin/opencode-team setup
 ```
 
 `setup` provisions a private uv-managed Python 3.13 distribution and installs all
-team dependencies under the isolated data root, installs the version-pinned Serena
-MCP server there, resolves a compatible brewed OpenCode provider, and generates the verified BEST and GO OMO
-bundles. It also schedules package-owned BEST tool-output GC and BEST/OPENAI
+team dependencies under the isolated data root, including the pinned OmO Native
+runtime and its bundled Bun runtime. It installs the version-pinned Serena MCP
+server, resolves a compatible brewed OpenCode provider, and generates the verified
+BEST Native and OpenCode fallback profiles plus the GO OMO bundle. It also schedules
+package-owned BEST tool-output GC and BEST/OPENAI
 retention jobs when no legacy maintenance agents are detected. It refuses unsupported
 Node versions and does not start a runtime.
 

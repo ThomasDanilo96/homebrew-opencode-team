@@ -20,11 +20,14 @@ usage() {
   printf '%s\n' 'OpenCode Team' '' 'Usage:' \
     '  opencode-team setup' \
     '  opencode-team doctor' \
-    '  opencode-team best [--resume SESSION]' \
+    '  opencode-team best [OMO OPTIONS] (OmO Native)' \
+    '  opencode-team best-opencode [--resume SESSION] (OpenCode fallback)' \
+    '  opencode-team best-native [OMO OPTIONS]' \
+    '  opencode-team best-native-setup [--dry-run|--yes]' \
     '  opencode-team go [--resume SESSION]' \
     '  opencode-team openai [--resume SESSION]' \
     '  opencode-team daily [--resume SESSION]' \
-    '  opencode-team start <best|go|openai|daily> [--resume SESSION]' \
+    '  opencode-team start <best|best-opencode|go|openai|daily> [options]' \
     '  opencode-team daily-report [--markdown]' \
     '  opencode-team daily-benchmark <list|validate|prepare|report|execute> [options]' \
     '  opencode-team runtime-status' \
@@ -74,6 +77,52 @@ check_node() {
   fi
   printf '  %-16s %s INCOMPATIBLE\n' "node" "$version"
   printf '  %-16s %s\n' "required" '22.22.2+ in 22.x, 24.15.0+ in 24.x, or >=26'
+  return 1
+}
+
+resolve_native_runtime() {
+  local candidate package_name version major minor
+  case "$(uname -s):$(uname -m)" in
+    Darwin:arm64) package_name=@oven/bun-darwin-aarch64 ;;
+    Darwin:x86_64) package_name=@oven/bun-darwin-x64 ;;
+    Linux:aarch64|Linux:arm64)
+      if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | rg -qi musl; then package_name=@oven/bun-linux-aarch64-musl; else package_name=@oven/bun-linux-aarch64; fi
+      ;;
+    Linux:x86_64)
+      if command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | rg -qi musl; then package_name=@oven/bun-linux-x64-musl; else package_name=@oven/bun-linux-x64; fi
+      ;;
+    MINGW*:x86_64) package_name=@oven/bun-windows-x64 ;;
+    MINGW*:aarch64|MINGW*:arm64) package_name=@oven/bun-windows-aarch64 ;;
+    *) package_name="" ;;
+  esac
+  if [ -n "$package_name" ]; then
+    candidate="$DEPENDENCY_ROOT/best/node_modules/$package_name/bin/bun"
+    [[ "$package_name" == @oven/bun-windows-* ]] && candidate="${candidate}.exe"
+    if [ -x "$candidate" ] && "$candidate" --version >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+  candidate="$(command -v bun 2>/dev/null || true)"
+  if [ -n "$candidate" ]; then
+    version="$("$candidate" --version 2>/dev/null || true)"
+    IFS=. read -r major minor _ <<< "$version"
+    if [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ ]] && { [ "$major" -gt 1 ] || { [ "$major" -eq 1 ] && [ "$minor" -ge 4 ]; }; } && "$candidate" --version >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+  candidate="$(command -v node 2>/dev/null || true)"
+  if [ -n "$candidate" ]; then
+    version="$("$candidate" --version 2>/dev/null || true)"
+    major="${version#v}"
+    major="${major%%.*}"
+    if [[ "$major" =~ ^[0-9]+$ ]] && [ "$major" -ge 24 ] && "$candidate" --version >/dev/null 2>&1; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  fi
+  printf '%s\n' 'BEST Native requires Bun 1.4+ (bundled by setup) or Node.js >=24.' >&2
   return 1
 }
 
@@ -333,6 +382,7 @@ doctor() {
       failed=1
     fi
   done
+  verify_best_native || failed=1
   printf 'Maintenance\n'
   maintenance_status || failed=1
   return "$failed"
@@ -752,6 +802,83 @@ verify_best_omo() {
   printf '  %-18s OK (patched and verified)\n' "best OMO"
 }
 
+verify_best_native() {
+  local entrypoint="$DEPENDENCY_ROOT/best/node_modules/omo-ai/bin/omo.js" version config_file native_runtime
+  config_file="$DATA_ROOT/best/.omo/omo.jsonc"
+  [ -f "$entrypoint" ] || { printf 'BEST Native OMO package missing\n' >&2; return 1; }
+  native_runtime="$(resolve_native_runtime)" || return 1
+  version="$("$native_runtime" "$entrypoint" --version 2>/dev/null)"
+  [[ "$version" == "omo 5.1.27 (engine: senpi "* ]] || {
+    printf 'BEST Native OMO version mismatch: %s\n' "$version" >&2
+    return 1
+  }
+  [ -f "$config_file" ] || { printf 'BEST Native OMO config missing: %s\n' "$config_file" >&2; return 1; }
+  node -e 'const c=JSON.parse(require("fs").readFileSync(process.argv[1],"utf8")); if (!c.profiles?.["best-native"]?.["[native]"]?.memory?.enabled) process.exit(1)' "$config_file" || {
+    printf 'BEST Native OMO profile or persistent-memory config is invalid\n' >&2
+    return 1
+  }
+  printf '  %-18s OK (5.1.27, isolated native memory profile)\n' "best Native OMO"
+}
+
+prepare_best_native() {
+  local native_runtime="$1" patch_script="$DEPENDENCY_ROOT/best/node_modules/omo-ai/bin/senpi-patch.mjs"
+  [ -f "$patch_script" ] || { printf 'BEST Native OMO preparation script missing\n' >&2; return 1; }
+  "$native_runtime" "$patch_script"
+}
+
+best_native_environment() {
+  setup_roots
+  source "$PACKAGE_ROOT/shared/runtime-env/github-token.sh"
+  export BEST_TEAM_SANDBOX="$DATA_ROOT/best"
+  export BEST_TEAM_OMO_HOME="$DATA_ROOT/best"
+  export BEST_ROUTER_PATH="$PACKAGE_ROOT/teams/best/router-classify.sh"
+  export BEST_ROUTER_LOG="$STATE_ROOT/best-native/router-plugin.log"
+  export OMO_CODING_AGENT_DIR="$DATA_ROOT/best/native-agent"
+  export OMO_PROFILE=best-native
+  export OMO_SEND_ANONYMOUS_TELEMETRY=0 OMO_DISABLE_POSTHOG=1
+}
+
+setup_best_native() {
+  best_native_environment
+  local entrypoint="$DEPENDENCY_ROOT/best/node_modules/omo-ai/bin/omo.js" native_runtime
+  [ -f "$entrypoint" ] || { printf 'BEST Native OMO package missing; run opencode-team setup first\n' >&2; return 1; }
+  native_runtime="$(resolve_native_runtime)" || return 1
+  mkdir -p "$CONFIG_ROOT/best/xdg-config/opencode" "$DATA_ROOT/best/native-agent" "$STATE_ROOT/best-native" "$CACHE_ROOT/best-native"
+  HOME="$DATA_ROOT/best" \
+    XDG_CONFIG_HOME="$CONFIG_ROOT/best/xdg-config" \
+    XDG_DATA_HOME="$DATA_ROOT/best/data" \
+    XDG_CACHE_HOME="$CACHE_ROOT/best-native" \
+    XDG_STATE_HOME="$STATE_ROOT/best-native" \
+    OPENCODE_CONFIG="$CONFIG_ROOT/best/opencode.jsonc" \
+    OPENCODE_CONFIG_DIR="$CONFIG_ROOT/best/xdg-config/opencode" \
+    "$native_runtime" "$entrypoint" setup "$@"
+}
+
+start_best_native() {
+  best_native_environment
+  local entrypoint="$DEPENDENCY_ROOT/best/node_modules/omo-ai/bin/omo.js" native_runtime
+  [ -f "$entrypoint" ] || { printf 'BEST Native OMO package missing; run opencode-team setup first\n' >&2; return 1; }
+  native_runtime="$(resolve_native_runtime)" || return 1
+  [ -f "$DATA_ROOT/best/.omo/omo.jsonc" ] || { printf 'BEST Native OMO config missing; run opencode-team setup first\n' >&2; return 1; }
+  mkdir -p "$DATA_ROOT/best/native-agent" "$DATA_ROOT/best/native-home/config" "$DATA_ROOT/best/native-home/data" "$DATA_ROOT/best/native-home/cache" "$STATE_ROOT/best-native" "$CACHE_ROOT/best-native"
+  exec env \
+    HOME="$DATA_ROOT/best" \
+    OMO_CODING_AGENT_DIR="$DATA_ROOT/best/native-agent" \
+    OMO_PROFILE=best-native \
+    OMO_SEND_ANONYMOUS_TELEMETRY=0 \
+    OMO_DISABLE_POSTHOG=1 \
+    BEST_TEAM_SANDBOX="$DATA_ROOT/best" \
+    BEST_TEAM_OMO_HOME="$DATA_ROOT/best" \
+    BEST_ROUTER_PATH="$PACKAGE_ROOT/teams/best/router-classify.sh" \
+    BEST_ROUTER_LOG="$STATE_ROOT/best-native/router-plugin.log" \
+    XDG_CONFIG_HOME="$DATA_ROOT/best/native-home/config" \
+    XDG_DATA_HOME="$DATA_ROOT/best/native-home/data" \
+    XDG_CACHE_HOME="$CACHE_ROOT/best-native" \
+    XDG_STATE_HOME="$STATE_ROOT/best-native" \
+    OPENCODE_CONFIG_DIR="$DATA_ROOT/best/native-home/opencode-config" \
+    "$native_runtime" "$entrypoint" --extension "$PACKAGE_ROOT/teams/best/best-native-router.mjs" "$@"
+}
+
 verify_go_omo() {
   local target="$DEPENDENCY_ROOT/go/node_modules/oh-my-openagent/dist/index.js"
   [ -f "$target" ] || { printf 'GO OMO package missing\n' >&2; return 1; }
@@ -851,6 +978,11 @@ refresh_generated_configs() {
       render_template "$PACKAGE_ROOT/teams/$team/oh-my-openagent.jsonc.template" "$CONFIG_ROOT/$team/xdg-config/opencode/oh-my-openagent.jsonc" || return 1
       chmod 600 "$CONFIG_ROOT/$team/xdg-config/opencode/oh-my-openagent.jsonc"
     fi
+    if [ "$team" = best ] && [ -f "$PACKAGE_ROOT/teams/best/omo.jsonc.template" ]; then
+      mkdir -p "$DATA_ROOT/best/.omo"
+      render_template "$PACKAGE_ROOT/teams/best/omo.jsonc.template" "$DATA_ROOT/best/.omo/omo.jsonc" || return 1
+      chmod 600 "$DATA_ROOT/best/.omo/omo.jsonc"
+    fi
     if [ -f "$PACKAGE_ROOT/teams/$team/tui.json.template" ]; then
       render_template "$PACKAGE_ROOT/teams/$team/tui.json.template" "$CONFIG_ROOT/$team/xdg-config/opencode/tui.json" || return 1
       chmod 600 "$CONFIG_ROOT/$team/xdg-config/opencode/tui.json"
@@ -879,6 +1011,9 @@ ensure_generated_config_current() {
     grep -q '^RUNTIME_ROOT=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
     grep -q '^PERSISTENT_DATA_ROOT=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
   done
+  if [ -f "$CONFIG_ROOT/best/team-runtime.conf" ] && [ -f "$PACKAGE_ROOT/teams/best/omo.jsonc.template" ] && [ ! -f "$DATA_ROOT/best/.omo/omo.jsonc" ]; then
+    config_missing=1
+  fi
   if [ -n "$stale" ] || [ "$config_missing" -eq 1 ]; then
     printf 'Refreshing stale package-owned generated configuration\n' >&2
     refresh_generated_configs || {
@@ -945,6 +1080,7 @@ install_terminal_notifier() {
 }
 
 setup() {
+  local native_runtime
   require_command npm >/dev/null || { printf 'npm is required for setup\n' >&2; return 1; }
   check_node >/dev/null || { printf 'A compatible Node.js runtime is required for setup\n' >&2; return 1; }
   for command_name in git jq tmux uv rg curl terminal-notifier; do
@@ -997,6 +1133,11 @@ setup() {
       render_template "$PACKAGE_ROOT/teams/$team/oh-my-openagent.jsonc.template" "$CONFIG_ROOT/$team/xdg-config/opencode/oh-my-openagent.jsonc"
       chmod 600 "$CONFIG_ROOT/$team/xdg-config/opencode/oh-my-openagent.jsonc"
     fi
+    if [ "$team" = best ] && [ -f "$PACKAGE_ROOT/teams/best/omo.jsonc.template" ]; then
+      mkdir -p "$DATA_ROOT/best/.omo"
+      render_template "$PACKAGE_ROOT/teams/best/omo.jsonc.template" "$DATA_ROOT/best/.omo/omo.jsonc"
+      chmod 600 "$DATA_ROOT/best/.omo/omo.jsonc"
+    fi
     if [ -f "$PACKAGE_ROOT/teams/$team/tui.json.template" ]; then
       mkdir -p "$CONFIG_ROOT/$team/xdg-config/opencode"
       render_template "$PACKAGE_ROOT/teams/$team/tui.json.template" "$CONFIG_ROOT/$team/xdg-config/opencode/tui.json"
@@ -1010,7 +1151,10 @@ setup() {
     install_dependencies "$team"
     printf '  %-18s OK\n' "$team profile"
   done
+  native_runtime="$(resolve_native_runtime)" || return 1
+  prepare_best_native "$native_runtime" || return 1
   verify_best_omo
+  verify_best_native
   verify_go_omo
   printf '  %-18s OK (package-local)\n' "openai OMO"
   install_maintenance || return 1
@@ -1191,12 +1335,36 @@ case "${1:-}" in
   start)
     [ "$#" -ge 2 ] || { usage >&2; exit 2; }
     shift
-    start_team "$@"
+    team="$1"
+    shift
+    if [ "$team" = best ]; then
+      start_best_native "$@"
+    elif [ "$team" = best-opencode ]; then
+      start_team best "$@"
+    else
+      start_team "$team" "$@"
+    fi
     ;;
-  best|go|openai|daily)
+  best)
+    shift
+    start_best_native "$@"
+    ;;
+  go|openai|daily)
     team="$1"
     shift
     start_team "$team" "$@"
+    ;;
+  best-opencode)
+    shift
+    start_team best "$@"
+    ;;
+  best-native)
+    shift
+    start_best_native "$@"
+    ;;
+  best-native-setup)
+    shift
+    setup_best_native "$@"
     ;;
   *)
     usage >&2

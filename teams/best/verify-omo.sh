@@ -2,12 +2,19 @@
 set -euo pipefail
 
 OMO="${1:?usage: verify-omo.sh <omo-dist-index.js>}"
+PACKAGE_JSON="$(cd "$(dirname "$OMO")/.." && pwd)/package.json"
+VERSION="$(node -p "require('$PACKAGE_JSON').version")"
 
 count() {
   rg -o "$1" "$OMO" | wc -l | tr -d ' '
 }
 
 [ -f "$OMO" ]
+case "$VERSION" in
+  4.19.4) expected_migration_isolation=0 ;;
+  5.1.27) expected_migration_isolation=1 ;;
+  *) printf 'REFUSED: unsupported oh-my-openagent version %s\n' "$VERSION" >&2; exit 1 ;;
+esac
 [ "$(count '_GO_NATIVE_UI_NO_ATTACH_PATCH_V1')" = 1 ]
 [ "$(count '_GO_TASK_NATIVE_UI_NO_ATTACH_PATCH_V1')" = 1 ]
 [ "$(count '_GO_TASK_BACKGROUND_NATIVE_UI_NO_ATTACH_PATCH_V1')" = 1 ]
@@ -19,4 +26,8 @@ count() {
 [ "$(count 'opencode-best-team')" = 4 ]
 [ "$(count '_BEST_TEAM_SANDBOX_OVERRIDE_V1')" = 1 ]
 [ "$(count 'typeof cmdHook.timeout === "number"')" = 1 ]
+[ "$(count '_BEST_TEAM_OMO_MIGRATION_ISOLATION_V1')" = "$expected_migration_isolation" ]
+if [ "$VERSION" = "5.1.27" ]; then
+  [ "$(count '_BEST_TEAM_OMO_HOME_OVERRIDE_V1')" = 1 ]
+fi
 node --check "$OMO"
