@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { existsSync, realpathSync, readdirSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { DAILY_PRICING, dailyCost } from "../daily-policy.mjs";
 
@@ -83,7 +83,7 @@ const loadPackets = (stateRoot) => {
 
 const renderMarkdown = (report) => `# OpenAI Daily report\n\n- Completed tasks: ${report.completed_tasks}\n- Estimated total USD: ${report.estimated_total_usd ?? "unmeasured"}\n- Estimated USD/task: ${report.estimated_usd_per_task ?? "unmeasured"}\n- Cache ratio: ${report.cache_ratio_pct ?? "unmeasured"}%\n- P50/P95 duration: ${report.p50_duration_ms ?? "unmeasured"}/${report.p95_duration_ms ?? "unmeasured"} ms\n- Sol escalations: ${report.sol_escalation_count}\n\n\`\`\`json\n${JSON.stringify(report, null, 2)}\n\`\`\`\n`;
 
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+if (process.argv[1] && realpathSync(fileURLToPath(import.meta.url)) === realpathSync(process.argv[1])) {
   const markdown = process.argv.includes("--markdown");
   const stateRoot = process.env.OPENAI_TEAM_STATE_ROOT || "/tmp";
   const report = summarizeDailyPackets(loadPackets(stateRoot));
