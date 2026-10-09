@@ -1,0 +1,128 @@
+#compdef opencode-team opencode-daily-team
+
+_opencode_team__profiles() {
+  local -a profiles
+  profiles=(
+    'best:General OpenCode Team profile'
+    'free:BEST routing with OpenCode Zen free models'
+    'best-opencode:Alias for best'
+    'best-native:Native OMO profile'
+    'go:OpenCode Go profile'
+    'openai:OpenAI-focused profile'
+    'daily:Daily OpenAI profile'
+  )
+  _describe 'profile' profiles
+}
+
+_opencode_team__runtime_options() {
+  _arguments \
+    '(-h --help)'{-h,--help}'[Show help]' \
+    '(-s --resume)'{-s,--resume}'[Resume an existing session]:session ID:'
+}
+
+_opencode_team__daily_alias() {
+  _arguments \
+    '(-h --help)'{-h,--help}'[Show help]' \
+    '(-s --resume)'{-s,--resume}'[Resume an existing DAILY session]:session ID:'
+}
+
+_opencode-team() {
+  local context state state_descr
+  local -a commands maintenance_tasks benchmark_tasks
+
+  if [[ "$words[1]" == opencode-daily-team ]]; then
+    _opencode_team__daily_alias
+    return
+  fi
+
+  _arguments -C \
+    '(-h --help)'{-h,--help}'[Show help]' \
+    '1:command:->command' \
+    '*::argument:->argument'
+
+  case "$state" in
+    command)
+      commands=(
+        'setup:Configure and verify all profiles'
+        'doctor:Check installed configuration and runtime health'
+        'best:Start the BEST profile'
+        'free:Start the FREE OpenCode Zen profile'
+        'best-opencode:Alias for best'
+        'best-native:Start the native OMO profile'
+        'best-native-setup:Set up the native OMO profile'
+        'go:Start the OpenCode Go profile'
+        'openai:Start the OpenAI profile'
+        'daily:Start the DAILY profile'
+        'start:Start a selected profile'
+        'daily-report:Show the DAILY usage report'
+        'daily-benchmark:Manage DAILY benchmarks'
+        'runtime-status:Show active runtimes'
+        'runtime-readiness:Check runtime readiness'
+        'runtime-history:Show runtime history'
+        'runtime-gc:Collect stale runtime data'
+        'storage-accounting:Show storage accounting'
+        'runtime-quota:Show runtime quotas'
+        'time-machine-exclude:Manage Time Machine exclusions'
+        'time-machine-status:Show Time Machine status'
+        'legacy-classify:Classify legacy paths'
+        'maintenance:Run or inspect maintenance tasks'
+        'version:Show the installed version'
+      )
+      _describe 'opencode-team command' commands
+      ;;
+    argument)
+      case "$words[2]" in
+        start)
+          _arguments \
+            '(-h --help)'{-h,--help}'[Show help]' \
+            '1:profile:->profile' \
+            '(-s --resume)'{-s,--resume}'[Resume an existing session]:session ID:'
+          case "$state" in
+            profile) _opencode_team__profiles ;;
+          esac
+          ;;
+        best|free|go|openai|daily|best-opencode)
+          _opencode_team__runtime_options
+          ;;
+        best-native)
+          _arguments '(-h --help)'{-h,--help}'[Show help]' '*:OMO option:'
+          ;;
+        best-native-setup)
+          _arguments '(-h --help)'{-h,--help}'[Show help]' '(-y --yes)'{-y,--yes}'[Apply setup without prompts]' '--dry-run[Preview setup without applying it]'
+          ;;
+        daily-report)
+          _arguments '--markdown[Format the report as Markdown]'
+          ;;
+        daily-benchmark)
+          benchmark_tasks=(
+            'list:List available benchmark tasks'
+            'validate:Validate benchmark data'
+            'prepare:Prepare a benchmark run'
+            'report:Show benchmark results'
+            'execute:Execute a benchmark run'
+          )
+          _describe 'benchmark command' benchmark_tasks
+          ;;
+        runtime-gc)
+          _arguments '--apply[Apply garbage collection]'
+          ;;
+        time-machine-exclude)
+          _arguments '--apply[Apply Time Machine exclusions]'
+          ;;
+        maintenance)
+          maintenance_tasks=(
+            'best-tool-output-gc:Collect BEST tool output'
+            'best-retention:Run BEST retention maintenance'
+            'openai-retention:Run OpenAI retention maintenance'
+            'runtime-gc:Collect runtime data'
+            'playwright-gc:Collect Playwright data'
+            'host-storage-gc:Collect host storage data'
+            'version-check:Check for a new OpenCode Team release'
+            'status:Show maintenance job status'
+          )
+          _describe 'maintenance task' maintenance_tasks
+          ;;
+      esac
+      ;;
+  esac
+}

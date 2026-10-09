@@ -60,6 +60,7 @@ rg -q "dependency root   $DEP_ROOT$" "$TEST_ROOT/root-isolation.out"
 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" setup >/tmp/opencode-team-setup-smoke.out
 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_PACKAGE_ROOT="$ROOT" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" \
   "$ROOT/tests/config-parity.sh"
+bash "$ROOT/tests/zsh-completion.test.sh"
 first_shared_bytes="$(shared_bytes)"
 TUI_FILES=()
 for template in "$ROOT"/teams/*/tui.json.template; do

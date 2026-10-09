@@ -1,7 +1,7 @@
 class OpencodeTeam < Formula
   desc "Portable runtime foundation for OpenCode Team"
   homepage "https://github.com/ThomasDanilo96/homebrew-opencode-team"
-  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.46.tar.gz"
+  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.47.tar.gz"
   sha256 "2cb2b004667a32e9f36dd791e44cedd5b262ebf0a7dc8923a72f8beab99e2247"
   license "MIT"
 
@@ -15,6 +15,7 @@ class OpencodeTeam < Formula
 
   def install
     libexec.install "benchmarks", "bin", "core", "shared", "teams", "tests", "VERSION"
+    zsh_completion.install "completions/_opencode-team"
     (bin/"opencode-team").write <<~EOS
       #!/bin/bash
       export PATH="#{formula_opt_bin("node@22")}:$PATH"
@@ -30,7 +31,7 @@ class OpencodeTeam < Formula
   end
 
   test do
-    assert_match "OpenCode Team 0.1.46", shell_output("#{bin}/opencode-team version")
+    assert_match "OpenCode Team 0.1.47", shell_output("#{bin}/opencode-team version")
     help = shell_output("#{bin}/opencode-team --help")
     assert_match "BEST profile", help
     assert_match "free", help
@@ -39,6 +40,8 @@ class OpencodeTeam < Formula
     assert_predicate libexec/"core/lib/runtime-lifecycle.mjs", :file?
     assert_predicate libexec/"core/lib/runtime-reaper.sh", :file?
     assert_predicate libexec/"shared/maintenance/version-check.mjs", :file?
+    assert_predicate zsh_completion/"_opencode-team", :file?
+    system "zsh", "-n", zsh_completion/"_opencode-team"
     ENV["HOME"] = (testpath/"user-home").to_s
     (testpath/"user-home").mkpath
     shared = testpath/"shared-dependencies"

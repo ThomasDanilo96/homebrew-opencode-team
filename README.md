@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: release `v0.1.46`.
+Status: release `v0.1.47`.
 
 ## Goal
 
@@ -25,6 +25,10 @@ opencode-team setup
 opencode-team doctor
 opencode-team best
 ```
+
+The Homebrew formula also installs Zsh completions for profiles and subcommands.
+Open a new shell after upgrading, or reload completions in the current shell
+with `autoload -Uz compinit && compinit`.
 
 `setup` installs a macOS LaunchAgent that checks the latest published Git tag
 every 12 hours. It sends one notification per newer version, with the Homebrew
