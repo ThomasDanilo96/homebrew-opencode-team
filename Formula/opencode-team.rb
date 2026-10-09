@@ -1,7 +1,7 @@
 class OpencodeTeam < Formula
   desc "Portable runtime foundation for OpenCode Team"
   homepage "https://github.com/ThomasDanilo96/homebrew-opencode-team"
-  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.42.tar.gz"
+  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.43.tar.gz"
   sha256 "0387b373da60d6055d80ea05b8d9d02ec326efd5b50b49e180b782ba8323af47"
   license "MIT"
 
@@ -30,8 +30,11 @@ class OpencodeTeam < Formula
   end
 
   test do
-    assert_match "OpenCode Team 0.1.42", shell_output("#{bin}/opencode-team version")
-    assert_match "opencode-team start", shell_output("#{bin}/opencode-team --help")
+    assert_match "OpenCode Team 0.1.43", shell_output("#{bin}/opencode-team version")
+    help = shell_output("#{bin}/opencode-team --help")
+    assert_match "BEST profile", help
+    assert_match "alias for best", help
+    assert_match "best-native", help
     assert_predicate libexec/"core/lib/runtime-lifecycle.mjs", :file?
     assert_predicate libexec/"core/lib/runtime-reaper.sh", :file?
     ENV["HOME"] = (testpath/"user-home").to_s

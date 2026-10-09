@@ -20,14 +20,14 @@ usage() {
   printf '%s\n' 'OpenCode Team' '' 'Usage:' \
     '  opencode-team setup' \
     '  opencode-team doctor' \
-    '  opencode-team best [OMO OPTIONS] (OmO Native)' \
-    '  opencode-team best-opencode [--resume SESSION] (OpenCode fallback)' \
+    '  opencode-team best [--resume SESSION] (OpenCode BEST profile)' \
+    '  opencode-team best-opencode [--resume SESSION] (alias for best)' \
     '  opencode-team best-native [OMO OPTIONS]' \
     '  opencode-team best-native-setup [--dry-run|--yes]' \
     '  opencode-team go [--resume SESSION]' \
     '  opencode-team openai [--resume SESSION]' \
     '  opencode-team daily [--resume SESSION]' \
-    '  opencode-team start <best|best-opencode|go|openai|daily> [options]' \
+    '  opencode-team start <best|best-opencode|best-native|go|openai|daily> [options]' \
     '  opencode-team daily-report [--markdown]' \
     '  opencode-team daily-benchmark <list|validate|prepare|report|execute> [options]' \
     '  opencode-team runtime-status' \
@@ -1338,16 +1338,18 @@ case "${1:-}" in
     team="$1"
     shift
     if [ "$team" = best ]; then
-      start_best_native "$@"
+      start_team best "$@"
     elif [ "$team" = best-opencode ]; then
       start_team best "$@"
+    elif [ "$team" = best-native ]; then
+      start_best_native "$@"
     else
       start_team "$team" "$@"
     fi
     ;;
   best)
     shift
-    start_best_native "$@"
+    start_team best "$@"
     ;;
   go|openai|daily)
     team="$1"

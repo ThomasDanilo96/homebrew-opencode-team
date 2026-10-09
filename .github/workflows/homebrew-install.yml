@@ -18,6 +18,7 @@ jobs:
           [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           bash tests/homebrew-workflow.test.sh
           ruby -c Formula/opencode-team.rb
+          node --test tests/best-cli-routing.test.mjs
           node --check shared/response-copy/exporter.js
           node --check shared/response-copy/runtime-source.js
           node --check teams/best/best-native-router.mjs

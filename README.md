@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: release `v0.1.42`.
+Status: release `v0.1.43`.
 
 ## Goal
 
@@ -26,12 +26,12 @@ opencode-team doctor
 opencode-team best
 ```
 
-`best` launches the OmO Native v5 BEST profile with persistent memory and the
-BEST route-gating extension. On first use, migrate the isolated BEST provider
-and model configuration with `opencode-team best-native-setup`; run it without
-flags to review and approve the import. OpenAI OAuth requires `/login
-chatgpt-subscription` inside OmO. The previous OpenCode runtime remains
-available as `opencode-team best-opencode`.
+`best` launches the OpenCode BEST profile. `best-opencode` remains an alias for
+the same profile. OmO Native v5, with persistent memory and the BEST
+route-gating extension, is available separately as `best-native`. On first
+Native use, migrate the isolated BEST provider and model configuration with
+`opencode-team best-native-setup`; run it without flags to review and approve
+the import. OpenAI OAuth requires `/login chatgpt-subscription` inside OmO.
 
 The install-scoped `HOMEBREW_NO_INSTALL_CLEANUP=1` prevents an unrelated broken
 Homebrew package from aborting this install. It does not change Homebrew's global
@@ -59,16 +59,18 @@ Run `opencode-team daily-report` to summarize completed Daily work packets,
 token usage, estimated cost, model mix, fanout, and latency. Missing telemetry
 is reported as `null`/`unmeasured`.
 
-`go`, `openai`, and `daily` are aliases for `start <team>`. `best` starts OmO
-Native; use `best-opencode` to launch the OpenCode fallback. Native session
-resume uses OmO's `--resume` / `--continue` options.
+`go`, `openai`, and `daily` are aliases for `start <team>`. Both `best` and
+`start best` launch the OpenCode BEST profile; `best-opencode` is an alias.
+Use `best-native` for OmO Native. Native session resume uses OmO's `--resume` /
+`--continue` options.
 
 Profiles:
 
-- `BEST`: OmO Native v5 with persistent memory, session continuity, and native
-  enforcement of the BEST explore/librarian/four-agent routes.
-- `BEST OpenCode fallback`: the preserved OpenCode v5 profile, launched with
-  `opencode-team best-opencode`.
+- `BEST`: OpenCode v5 profile with BEST routing, launched with `opencode-team
+  best` or `opencode-team start best`.
+- `BEST Native`: OmO Native v5 with persistent memory, session continuity, and
+  native enforcement of the BEST explore/librarian/four-agent routes, launched
+  with `opencode-team best-native`.
 - `GO`: OpenCode Go profile with the certified GO OMO patches.
 - `OPENAI`: OpenAI-only orchestration profile with Codex and Serena integration.
 
