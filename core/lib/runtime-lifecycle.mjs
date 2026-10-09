@@ -13,7 +13,7 @@ const stateRoot = resolve(process.env.STATE_ROOT || join(homedir(), ".local", "s
 const cacheRoot = resolve(process.env.CACHE_ROOT || join(homedir(), ".cache", "opencode-team"));
 const runtimeRoot = resolve(process.env.RUNTIME_ROOT || join(cacheRoot, "runtime"));
 const dependencyRoot = resolve(process.env.DEPENDENCY_ROOT || join(dataRoot, "dependencies"));
-const teams = ["best", "go", "openai", "daily"];
+const teams = ["best", "free", "go", "openai", "daily"];
 const roles = ["launcher", "server", "bridge", "attach", "watchdog", "reaper"];
 const legacyFamily = /^(?:opencode-team-|opencode-daily-|openai-daily-|daily-(?:real|postcommit)-|opencode-daily-cert[.-]|\.opencode-team-daily-|omo-(?:hook-repro|ignore|inspect-npm|pack-name)(?:[-.].*)?$|openai-admit-concurrency-|opencode-(?:auth|best|cutover|maintenance|model|server)-)/i;
 

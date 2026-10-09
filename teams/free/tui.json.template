@@ -1,0 +1,5 @@
+{
+  "plugin": [
+    "@PACKAGE_ROOT@/shared/response-copy"
+  ]
+}

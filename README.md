@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: release `v0.1.43`.
+Status: release `v0.1.44`.
 
 ## Goal
 
@@ -26,6 +26,14 @@ opencode-team doctor
 opencode-team best
 ```
 
+To use the separate BEST-based profile with OpenCode Zen's currently free models,
+launch `opencode-team free` and run `/connect` inside that profile to
+authenticate OpenCode Zen; then restart `free`. Its credentials are
+isolated from the other profiles. It selects Step 5 Preview Free for coding,
+Nemotron 3 Ultra Free for architecture/review, MiMo V2.6 Flash Free for quick
+work, and Ling 3.1 Flash Free for exploration/documentation. Free model
+availability and limits can change; the normal BEST profile is unchanged.
+
 `best` launches the OpenCode BEST profile. `best-opencode` remains an alias for
 the same profile. OmO Native v5, with persistent memory and the BEST
 route-gating extension, is available separately as `best-native`. On first
@@ -42,6 +50,7 @@ OpenCode when none is available. No third-party tap trust step is required.
 Alternative profiles:
 
 ```bash
+opencode-team free
 opencode-team go
 opencode-team openai
 ```
@@ -59,8 +68,8 @@ Run `opencode-team daily-report` to summarize completed Daily work packets,
 token usage, estimated cost, model mix, fanout, and latency. Missing telemetry
 is reported as `null`/`unmeasured`.
 
-`go`, `openai`, and `daily` are aliases for `start <team>`. Both `best` and
-`start best` launch the OpenCode BEST profile; `best-opencode` is an alias.
+`free`, `go`, `openai`, and `daily` are aliases for `start <team>`. Both `best`
+and `start best` launch the OpenCode BEST profile; `best-opencode` is an alias.
 Use `best-native` for OmO Native. Native session resume uses OmO's `--resume` /
 `--continue` options.
 
@@ -68,6 +77,8 @@ Profiles:
 
 - `BEST`: OpenCode v5 profile with BEST routing, launched with `opencode-team
   best` or `opencode-team start best`.
+- `BEST Free`: BEST routing with OpenCode Zen free models, launched with
+  `opencode-team free` or `opencode-team start free`.
 - `BEST Native`: OmO Native v5 with persistent memory, session continuity, and
   native enforcement of the BEST explore/librarian/four-agent routes, launched
   with `opencode-team best-native`.

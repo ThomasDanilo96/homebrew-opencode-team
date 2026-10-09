@@ -64,6 +64,20 @@ assert(path.isAbsolute(best.mcp.serena.command[0]) && (best.mcp.serena.command[0
 assert(best.provider?.["opencode-go"]?.options?.timeout === 300000, "BEST provider options missing");
 assert(best.plugin.length === 3 && path.isAbsolute(best.plugin[0]), "BEST plugin order/path invalid");
 
+const bestFree = read("free");
+same(bestFree.model, "opencode/step-5-preview-free", "BEST FREE model");
+same(bestFree.small_model, "opencode/mimo-v2.6-flash-free", "BEST FREE small_model");
+same(bestFree.default_agent, "OpenCode-Builder", "BEST FREE default_agent");
+same(bestFree.enabled_providers, ["opencode"], "BEST FREE enabled providers");
+same(bestFree.agent.explore.model, "opencode/ling-3.1-flash-free", "BEST FREE explore model");
+same(bestFree.agent.librarian.model, "opencode/ling-3.1-flash-free", "BEST FREE librarian model");
+same(bestFree.agent["openai-architect"].model, "opencode/nemotron-3-ultra-free", "BEST FREE architect model");
+same(bestFree.agent["openai-reviewer"].model, "opencode/nemotron-3-ultra-free", "BEST FREE reviewer model");
+assert(bestFree.disabled_providers.includes("opencode-go"), "BEST FREE paid OpenCode Go provider enabled");
+assert(bestFree.disabled_providers.includes("openai"), "BEST FREE OpenAI provider enabled");
+assert(bestFree.plugin.some((plugin) => plugin.endsWith("/teams/best/best-router-plugin.js")), "BEST FREE router plugin missing");
+assertSkillMcp("free", "OpenCode-Builder");
+
 const go = read("go");
 same(go.model, "opencode-go/mimo-v2.5", "GO model");
 same(go.small_model, "opencode-go/mimo-v2.5", "GO small_model");
@@ -214,7 +228,7 @@ for (const team of ["openai", "daily"]) {
   );
 }
 
-for (const team of ["best", "go", "openai", "daily"]) {
+for (const team of ["best", "free", "go", "openai", "daily"]) {
   const config = read(team);
   const serialized = JSON.stringify(config);
   assert(config.plugin.some((plugin) => plugin === path.join(root, "shared", "mac-notifications", "plugin.js")), `${team} shared macOS notification plugin missing`);

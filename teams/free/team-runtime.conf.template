@@ -1,0 +1,16 @@
+# Best routing and tools with OpenCode Zen free models only.
+TEAM_NAME=free
+OPENCODE_BIN=@OPENCODE_BIN@
+OPENCODE_TEAM_PYTHON=@PYTHON_BIN@
+SANDBOX=@DATA_ROOT@/free
+RUNTIME_ROOT=@CACHE_ROOT@/runtime/free
+PERSISTENT_DATA_ROOT=@DATA_ROOT@/free/data
+TMUX_PREFIX=oc-free
+OMO_PROFILE=free
+OPENCODE_CONFIG=@CONFIG_ROOT@/free/opencode.jsonc
+PRE_SERVER_HOOK=@DATA_ROOT@/free/hooks/patch-omo-hook-timeout.sh
+RUNTIME_ENV_HOOK=@PACKAGE_ROOT@/teams/free/runtime-env.sh
+XDG_CONFIG_HOME_OVERRIDE=@CONFIG_ROOT@/free/xdg-config
+NATIVE_UI_ONLY_AGENTS=explore,librarian,openai-architect,openai-reviewer
+RESUME_ALLOWED_AGENTS=OpenCode-Builder,compaction
+BRIDGE_MODE=tmux

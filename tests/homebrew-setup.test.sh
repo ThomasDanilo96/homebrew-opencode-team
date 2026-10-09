@@ -124,7 +124,7 @@ rg -q 'Setup complete\. No runtime was started\.' "$TEST_ROOT/success.out"
 test -x "$success_home/user-home/Applications/terminal-notifier.app/Contents/MacOS/terminal-notifier"
 rg -q -- '-a .*terminal-notifier.app' "$success_bin/path/open.log"
 rg -q 'macOS notifications[[:space:]]+OK \(registered; notification permission requested\)' "$TEST_ROOT/success.out"
-for team in best go openai daily; do
+for team in best free go openai daily; do
   test -f "$success_home/config/$team/team-runtime.conf"
   test -f "$success_home/config/$team/opencode.jsonc"
 done
@@ -243,7 +243,7 @@ OPENCODE_TEAM_HOME="$fresh_opencode_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$fresh_
   }
 rg -q "OpenCode[[:space:]]+OK \([^,]+, $fresh_core_prefix/bin/opencode\)" "$TEST_ROOT/fresh-opencode-doctor.out"
 rg -q 'OpenCode[[:space:]]+OK \(1\.18\.30,' "$TEST_ROOT/fresh-opencode-doctor.out"
-for team in best go openai daily; do
+for team in best free go openai daily; do
   rg -q "$team profile[[:space:]]+CONFIGURED" "$TEST_ROOT/fresh-opencode-doctor.out"
 done
 

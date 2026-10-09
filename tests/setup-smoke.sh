@@ -41,6 +41,8 @@ rg -q "dependency root   $DEP_ROOT$" "$TEST_ROOT/root-isolation.out"
 ! rg -q '/best/(xdg-config|data|state|cache)/opencode-team' "$TEST_ROOT/root-isolation.out"
 
 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" setup >/tmp/opencode-team-setup-smoke.out
+OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_PACKAGE_ROOT="$ROOT" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" \
+  "$ROOT/tests/config-parity.sh"
 first_shared_bytes="$(shared_bytes)"
 TUI_FILES=()
 for template in "$ROOT"/teams/*/tui.json.template; do
@@ -48,7 +50,7 @@ for template in "$ROOT"/teams/*/tui.json.template; do
   tui_file="$TEAM_HOME/config/$team/xdg-config/opencode/tui.json"
   TUI_FILES+=("$tui_file")
 done
-for team in best go openai daily; do
+for team in best free go openai daily; do
   test -f "$TEAM_HOME/config/$team/team-runtime.conf"
   test -f "$TEAM_HOME/config/$team/opencode.jsonc"
   node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$TEAM_HOME/config/$team/opencode.jsonc"
@@ -68,6 +70,8 @@ second_before_bytes="$(shared_bytes)"
 OPENCODE_TEAM_HOME="$SECOND_TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" setup >/tmp/opencode-team-setup-smoke-third.out
 second_after_bytes="$(shared_bytes)"
 test -d "$DEP_ROOT/best/node_modules/oh-my-openagent"
+test -f "$TEAM_HOME/config/free/opencode.jsonc"
+test "$(grep -c 'step-5-preview-free' "$TEAM_HOME/config/free/opencode.jsonc")" -eq 1
 test -d "$DEP_ROOT/go/node_modules/oh-my-openagent"
 test -d "$DEP_ROOT/openai/node_modules/oh-my-openagent"
 test -x "$DEP_ROOT/bin/serena"
@@ -89,7 +93,7 @@ node - "$TEAM_HOME/config" "$ROOT" "$OLD_ROOT" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const [configRoot, currentRoot, oldRoot] = process.argv.slice(2);
-for (const team of ["best", "go", "openai", "daily"]) {
+for (const team of ["best", "free", "go", "openai", "daily"]) {
   for (const file of ["team-runtime.conf", "opencode.jsonc", "tui.json", "settings.json"]) {
     const matches = [];
     const visit = (directory) => {
@@ -112,7 +116,7 @@ for (const team of ["best", "go", "openai", "daily"]) {
 }
 NODE
 
-for team in best go openai daily; do
+for team in best free go openai daily; do
   rm -rf "$TEAM_HOME/cache/runtime/$team" "$TEAM_HOME/data/$team/data"
 done
 
@@ -122,7 +126,7 @@ if ! OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "
 fi
 ! rg -q '/Cellar/opencode-team/[0-9]' "$TEAM_HOME/config"
 ! rg -q "$OLD_ROOT" "$TEAM_HOME/config"
-for team in best go openai daily; do
+for team in best free go openai daily; do
   test -d "$TEAM_HOME/cache/runtime/$team"
   test -d "$TEAM_HOME/data/$team/data"
   bash -c 'source "$1/core/lib/config.sh"; parse_team_config "$2"' bash "$ROOT" "$TEAM_HOME/config/$team/team-runtime.conf"

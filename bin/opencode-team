@@ -21,13 +21,14 @@ usage() {
     '  opencode-team setup' \
     '  opencode-team doctor' \
     '  opencode-team best [--resume SESSION] (OpenCode BEST profile)' \
+    '  opencode-team free [--resume SESSION] (BEST profile with OpenCode Zen free models)' \
     '  opencode-team best-opencode [--resume SESSION] (alias for best)' \
     '  opencode-team best-native [OMO OPTIONS]' \
     '  opencode-team best-native-setup [--dry-run|--yes]' \
     '  opencode-team go [--resume SESSION]' \
     '  opencode-team openai [--resume SESSION]' \
     '  opencode-team daily [--resume SESSION]' \
-    '  opencode-team start <best|best-opencode|best-native|go|openai|daily> [options]' \
+    '  opencode-team start <best|free|best-opencode|best-native|go|openai|daily> [options]' \
     '  opencode-team daily-report [--markdown]' \
     '  opencode-team daily-benchmark <list|validate|prepare|report|execute> [options]' \
     '  opencode-team runtime-status' \
@@ -374,7 +375,7 @@ doctor() {
   else
     printf '  %-16s OPTIONAL / missing\n' "GitHub CLI"
   fi
-  for team in best go openai daily; do
+  for team in best free go openai daily; do
     if [ -f "$CONFIG_ROOT/$team/team-runtime.conf" ] && [ -f "$CONFIG_ROOT/$team/opencode.jsonc" ]; then
       validate_profile_config "$team" || failed=1
     else
@@ -773,6 +774,7 @@ maintenance_command() {
 install_dependencies() {
   local team="$1" dependency_team="$1"
   [ "$team" = daily ] && dependency_team=openai
+  [ "$team" = free ] && dependency_team=best
   local dependency_root="$DEPENDENCY_ROOT/$dependency_team"
   local package_file="$PACKAGE_ROOT/teams/$dependency_team/package.json"
   local lock_file="$PACKAGE_ROOT/teams/$dependency_team/package-lock.json"
@@ -952,9 +954,10 @@ refresh_generated_configs() {
     printf 'Cannot refresh stale package config: Serena is missing; run setup\n' >&2
     return 1
   }
-  for team in best go openai daily; do
+  for team in best free go openai daily; do
     dependency_team="$team"
     [ "$team" = daily ] && dependency_team=openai
+    [ "$team" = free ] && dependency_team=best
     export OMO_PLUGIN="$DEPENDENCY_ROOT/$dependency_team/node_modules/oh-my-openagent/dist/index.js"
     [ -f "$OMO_PLUGIN" ] || {
       printf 'Cannot refresh stale package config: OMO plugin is missing: %s\n' "$OMO_PLUGIN" >&2
@@ -963,7 +966,7 @@ refresh_generated_configs() {
     ensure_profile_roots "$team"
     mkdir -p "$CONFIG_ROOT/$team/xdg-config/opencode"
     case "$team" in
-      best) hook_source="$PACKAGE_ROOT/teams/best/patch-omo-hook-timeout.sh"; hook_name=patch-omo-hook-timeout.sh ;;
+      best|free) hook_source="$PACKAGE_ROOT/teams/best/patch-omo-hook-timeout.sh"; hook_name=patch-omo-hook-timeout.sh ;;
       go) hook_source="$PACKAGE_ROOT/teams/go/patch-omo-task-completion.sh"; hook_name=patch-omo-task-completion.sh ;;
       *) hook_source=""; hook_name="" ;;
     esac
@@ -1005,7 +1008,7 @@ ensure_generated_config_current() {
   export PYTHON_BIN OPENCODE_TEAM_PYTHON
   local stale config_missing=0 team
   stale="$(stale_generated_package_paths)"
-  for team in best go openai daily; do
+  for team in best free go openai daily; do
     [ -f "$CONFIG_ROOT/$team/team-runtime.conf" ] || continue
     grep -q '^OPENCODE_TEAM_PYTHON=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
     grep -q '^RUNTIME_ROOT=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
@@ -1027,7 +1030,7 @@ install_time_machine_exclusions() {
   [ "$(uname -s)" = Darwin ] || return 0
   command -v tmutil >/dev/null 2>&1 || return 0
   export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
-  for team in best go openai daily; do
+  for team in best free go openai daily; do
     mkdir -p "$DATA_ROOT/$team/playwright/output"
   done
   local result
@@ -1106,13 +1109,14 @@ setup() {
   ensure_python || return 1
   ensure_serena || return 1
   ensure_codex || return 1
-  for team in best go openai daily; do
+  for team in best free go openai daily; do
     dependency_team="$team"
     [ "$team" = daily ] && dependency_team=openai
+    [ "$team" = free ] && dependency_team=best
     export OMO_PLUGIN="$DEPENDENCY_ROOT/$dependency_team/node_modules/oh-my-openagent/dist/index.js"
     ensure_profile_roots "$team"
     case "$team" in
-      best) hook_source="$PACKAGE_ROOT/teams/best/patch-omo-hook-timeout.sh"; hook_name="patch-omo-hook-timeout.sh" ;;
+      best|free) hook_source="$PACKAGE_ROOT/teams/best/patch-omo-hook-timeout.sh"; hook_name="patch-omo-hook-timeout.sh" ;;
       go) hook_source="$PACKAGE_ROOT/teams/go/patch-omo-task-completion.sh"; hook_name="patch-omo-task-completion.sh" ;;
       *) hook_source=""; hook_name="" ;;
     esac
@@ -1230,9 +1234,9 @@ start_team() {
   local team="$1"
   shift
   case "$team" in
-    best|go|openai|daily) ;;
+    best|free|go|openai|daily) ;;
     *)
-      printf 'Unknown team: %s (expected best, go, openai, or daily)\n' "$team" >&2
+      printf 'Unknown team: %s (expected best, free, go, openai, or daily)\n' "$team" >&2
       return 1
       ;;
   esac
@@ -1351,7 +1355,7 @@ case "${1:-}" in
     shift
     start_team best "$@"
     ;;
-  go|openai|daily)
+  free|go|openai|daily)
     team="$1"
     shift
     start_team "$team" "$@"

@@ -1,7 +1,7 @@
 class OpencodeTeam < Formula
   desc "Portable runtime foundation for OpenCode Team"
   homepage "https://github.com/ThomasDanilo96/homebrew-opencode-team"
-  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.43.tar.gz"
+  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.44.tar.gz"
   sha256 "0b21552d50824a4ec8d7121bf895f5262c719984ffdec2ada0ebecf20798f345"
   license "MIT"
 
@@ -30,9 +30,10 @@ class OpencodeTeam < Formula
   end
 
   test do
-    assert_match "OpenCode Team 0.1.43", shell_output("#{bin}/opencode-team version")
+    assert_match "OpenCode Team 0.1.44", shell_output("#{bin}/opencode-team version")
     help = shell_output("#{bin}/opencode-team --help")
     assert_match "BEST profile", help
+    assert_match "free", help
     assert_match "alias for best", help
     assert_match "best-native", help
     assert_predicate libexec/"core/lib/runtime-lifecycle.mjs", :file?

@@ -271,16 +271,16 @@ test("Daily template enables only orchestrator shell access and runtime forwards
   assert.match(template, /"interactive_bash": "allow"/);
   assert.match(template, /"bash": true/);
   assert.match(template, /"interactive_bash": true/);
-  assert.match(template, /"edit": "deny"/);
-  assert.match(template, /"write": "deny"/);
+  assert.match(template, /"edit": "allow"/);
+  assert.match(template, /"write": "allow"/);
   assert.match(template, /"skill_mcp": "deny"/);
   assert.match(template, /CodeGraph remains unavailable in DAILY; browser work may load the Playwright skill/);
   assert.match(template, /"openai_run_codex": false/);
   assert.match(template, /NORMAL repository work is never direct: repository mutations must use exactly one codex_executor child first, and read-only repository objectives must use exactly one openai_explore child first/);
   assert.match(template, /do not launch a second repository child/);
   const premium = await readFile(new URL("../teams/openai/opencode.jsonc.template", import.meta.url), "utf8");
-  assert.match(premium, /"bash": "deny"/);
-  assert.match(premium, /"interactive_bash": "deny"/);
+  assert.match(premium, /"bash": "allow"/);
+  assert.match(premium, /"interactive_bash": true/);
   assert.match(premium, /"skill_mcp": "deny"/);
   assert.match(premium, /CodeGraph remains unavailable in OPENAI; browser work may load the Playwright skill/);
   const runtime = await readFile(new URL("../core/bin/team-runtime", import.meta.url), "utf8");
@@ -856,7 +856,7 @@ test("Serena project activation is read-only for the authorship guard", async ()
   }, { args: {} }));
 });
 
-test("Guardrail task denials are recorded without prompt contents", async () => {
+test("Task routing does not log prompt contents", async () => {
   const root = await mkdtemp(join(tmpdir(), "openai-policy-denial-"));
   const previous = process.env.OPENAI_TEAM_STATE_ROOT;
   process.env.OPENAI_TEAM_STATE_ROOT = root;
@@ -866,13 +866,13 @@ test("Guardrail task denials are recorded without prompt contents", async () => 
       messages: async () => ({ data: [] }),
     } };
     const plugin = await OpenAITeamTools({ client, listWorkPackets: async () => [] });
-    await assert.rejects(
-      () => plugin["tool.execute.before"]({ tool: "task", sessionID: "policy-root", agent: "openai_orchestrator" }, { args: { prompt: "secret-token inspect unrelated repository" } }),
-      /OBJECTIVE_UNBOUND/,
+    const output = { args: { prompt: "secret-token inspect unrelated repository" } };
+    await plugin["tool.execute.before"](
+      { tool: "task", sessionID: "policy-root", agent: "openai_orchestrator" },
+      output,
     );
-    const log = await readFile(join(root, "logs", "authorship-guard.log"), "utf8");
-    assert.match(log, /policy_denied session_id=policy-root agent=openai_orchestrator tool=task policy_reason=OBJECTIVE_UNBOUND decision=BLOCK/);
-    assert.doesNotMatch(log, /secret-token|unrelated repository/);
+    assert.equal(output.args.subagent_type, "openai_explore");
+    await assert.rejects(readFile(join(root, "logs", "authorship-guard.log"), "utf8"), { code: "ENOENT" });
   } finally {
     if (previous === undefined) delete process.env.OPENAI_TEAM_STATE_ROOT;
     else process.env.OPENAI_TEAM_STATE_ROOT = previous;

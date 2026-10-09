@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 
 const dataRoot = process.env.DATA_ROOT;
 if (!dataRoot) throw new Error("DATA_ROOT is required");
-const teams = ["best", "go", "openai", "daily"];
+const teams = ["best", "free", "go", "openai", "daily"];
 const maxAgeMs = Math.min(Math.max(Number(process.env.OPENCODE_PLAYWRIGHT_GC_RETENTION_HOURS || 6), 1), 24 * 30) * 60 * 60 * 1000;
 const maxEntries = Math.min(Math.max(Number(process.env.OPENCODE_PLAYWRIGHT_GC_MAX_ENTRIES || 1000), 1), 10000);
 const now = Date.now();
