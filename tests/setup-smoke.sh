@@ -21,6 +21,23 @@ shared_before_bytes="$(shared_bytes)"
 
 ROOT_ISOLATION_HOME="$TEST_ROOT/root-isolation-home"
 mkdir -p "$ROOT_ISOLATION_HOME"
+ROOT_ISOLATION_BIN="$TEST_ROOT/root-isolation-bin"
+ROOT_ISOLATION_LAUNCHCTL_STATE="$TEST_ROOT/root-isolation-launchctl-state"
+mkdir -p "$ROOT_ISOLATION_BIN" "$ROOT_ISOLATION_LAUNCHCTL_STATE"
+printf '%s\n' \
+  '#!/usr/bin/env bash' \
+  'set -eu' \
+  'state="${LAUNCHCTL_STUB_STATE:?}"' \
+  'case "${1:-}" in' \
+  '  print) label="${2##*/}"; test -e "$state/$label" ;;' \
+  '  bootstrap) label="$(basename "${3%.plist}")"; : >"$state/$label" ;;' \
+  '  enable) label="${2##*/}"; : >"$state/$label" ;;' \
+  '  bootout) label="${2##*/}"; rm -f "$state/$label" ;;' \
+  '  *) exit 0 ;;' \
+  'esac' >"$ROOT_ISOLATION_BIN/launchctl"
+chmod 755 "$ROOT_ISOLATION_BIN/launchctl"
+LAUNCHCTL_STUB_STATE="$ROOT_ISOLATION_LAUNCHCTL_STATE" \
+PATH="$ROOT_ISOLATION_BIN:$PATH" \
 HOME="$ROOT_ISOLATION_HOME" \
 XDG_CONFIG_HOME="$ROOT_ISOLATION_HOME/best/xdg-config" \
 XDG_DATA_HOME="$ROOT_ISOLATION_HOME/best/data" \

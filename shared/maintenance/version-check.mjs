@@ -1,7 +1,9 @@
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
+import { pathToFileURL } from "node:url";
 
 const TAGS_API = "https://api.github.com/repos/ThomasDanilo96/homebrew-opencode-team/tags?per_page=100";
 const RELEASES_URL = "https://github.com/ThomasDanilo96/homebrew-opencode-team/releases/tag";
@@ -38,6 +40,15 @@ export function newestReleaseTag(tags) {
     .filter((tag) => parseVersion(tag))
     .sort((left, right) => compareVersions(right, left))
     .at(0) || "";
+}
+
+export function isDirectInvocation(moduleURL, scriptPath) {
+  if (!scriptPath) return false;
+  try {
+    return moduleURL === pathToFileURL(realpathSync(resolve(scriptPath))).href;
+  } catch {
+    return false;
+  }
 }
 
 function launchNotifier(args, spawnProcess, env) {
@@ -122,7 +133,7 @@ export async function checkForNewRelease({
   }
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (isDirectInvocation(import.meta.url, process.argv[1])) {
   const { PACKAGE_ROOT, STATE_ROOT } = process.env;
   checkForNewRelease({ packageRoot: PACKAGE_ROOT, stateRoot: STATE_ROOT }).then((result) => {
     process.stdout.write(`${result.status}\n`);

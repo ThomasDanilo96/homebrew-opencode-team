@@ -5,7 +5,7 @@ import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { checkForNewRelease, compareVersions, newestReleaseTag, parseVersion, versionNotificationArgs } from "../shared/maintenance/version-check.mjs";
+import { checkForNewRelease, compareVersions, isDirectInvocation, newestReleaseTag, parseVersion, versionNotificationArgs } from "../shared/maintenance/version-check.mjs";
 
 test("release tags are sorted semantically rather than lexically", () => {
   assert.deepEqual(parseVersion("v0.1.44"), [0, 1, 44]);
@@ -14,6 +14,14 @@ test("release tags are sorted semantically rather than lexically", () => {
   assert.equal(compareVersions("invalid", "v0.1.0"), null);
   assert.equal(parseVersion("v0.1.45-rc.1"), null);
   assert.equal(newestReleaseTag([{ name: "v0.1.9" }, { name: "v0.1.44" }, { name: "not-a-release" }]), "v0.1.44");
+});
+
+test("the version checker detects direct execution through Homebrew symlink paths", () => {
+  const modulePath = new URL("../shared/maintenance/version-check.mjs", import.meta.url).pathname;
+  const moduleURL = new URL(`file://${modulePath}`).href;
+  assert.equal(isDirectInvocation(moduleURL, modulePath), true);
+  assert.equal(isDirectInvocation(moduleURL, "/missing/opencode-team/version-check.mjs"), false);
+  assert.equal(isDirectInvocation(moduleURL, ""), false);
 });
 
 test("a new Homebrew tag sends one notification and records it for deduplication", async () => {
