@@ -14,7 +14,7 @@ class OpencodeTeam < Formula
   depends_on "uv"
 
   def install
-    libexec.install "benchmarks", "bin", "core", "shared", "teams", "tests", "VERSION"
+    libexec.install "benchmarks", "bin", "completions", "core", "shared", "teams", "tests", "VERSION"
     zsh_completion.install "completions/_opencode-team"
     (bin/"opencode-team").write <<~EOS
       #!/bin/bash
@@ -40,6 +40,7 @@ class OpencodeTeam < Formula
     assert_predicate libexec/"core/lib/runtime-lifecycle.mjs", :file?
     assert_predicate libexec/"core/lib/runtime-reaper.sh", :file?
     assert_predicate libexec/"shared/maintenance/version-check.mjs", :file?
+    assert_predicate libexec/"completions/_opencode-team", :file?
     assert_predicate zsh_completion/"_opencode-team", :file?
     system "zsh", "-n", zsh_completion/"_opencode-team"
     ENV["HOME"] = (testpath/"user-home").to_s
