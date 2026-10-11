@@ -10,12 +10,13 @@ const PROFILE_ROOT = dirname(fileURLToPath(import.meta.url));
 const ROUTER = process.env.BEST_ROUTER_PATH ?? join(PROFILE_ROOT, "router-classify.sh");
 const STATE_ROOT = process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state");
 const DEFAULT_LOG = join(STATE_ROOT, "opencode-team", "best", "native-router.log");
-const ROUTE_MARKER = /<BEST_ROUTER_ROUTE>(EXPLORE|LIBRARIAN|BOTH|FOUR)<\/BEST_ROUTER_ROUTE>/;
+const ROUTE_MARKER = /<BEST_ROUTER_ROUTE>(EXPLORE|LIBRARIAN|BOTH|FOUR|FANOUT)<\/BEST_ROUTER_ROUTE>/;
 const ROUTE_AGENTS = {
   EXPLORE: ["explore"],
   LIBRARIAN: ["librarian"],
   BOTH: ["explore", "librarian"],
   FOUR: ["explore", "librarian", "openai-architect", "openai-reviewer"],
+  FANOUT: ["openai-coder-1", "openai-coder-2", "openai-reviewer"],
 };
 
 function log(entry) {

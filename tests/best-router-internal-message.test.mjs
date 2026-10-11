@@ -7,13 +7,17 @@ import {
 } from "../teams/best/best-router-plugin.js";
 
 test("BEST route guidance defines the exact first native task contract", () => {
-  const guidance = ["EXPLORE", "LIBRARIAN", "BOTH", "FOUR"].map(routeGuidanceFor);
+  const guidance = ["EXPLORE", "LIBRARIAN", "BOTH", "FOUR", "FANOUT"].map(routeGuidanceFor);
   assert.match(guidance[0], /exactly one native task\(subagent_type="explore", run_in_background=true\)/);
   assert.match(guidance[1], /exactly one native task\(subagent_type="librarian", run_in_background=true\)/);
   assert.match(guidance[2], /exactly two native task calls/);
   assert.match(guidance[2], /one task\(subagent_type="explore", run_in_background=true\)/);
   assert.match(guidance[2], /one task\(subagent_type="librarian", run_in_background=true\)/);
   assert.match(guidance[3], /exactly four native tasks in parallel/);
+  assert.match(guidance[4], /exactly two native tasks in parallel/);
+  assert.match(guidance[4], /openai-coder-1 and openai-coder-2/);
+  assert.match(guidance[4], /launch exactly one openai-reviewer task against the resulting diff/);
+  assert.match(guidance[4], /non-overlapping file\/path ownership/);
   for (const agent of ["explore", "librarian", "openai-architect", "openai-reviewer"]) {
     assert.ok(guidance[3].includes(`"${agent}"`));
   }

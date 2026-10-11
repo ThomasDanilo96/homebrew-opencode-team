@@ -16,11 +16,39 @@ const ROUTES = new Set([
   "<BEST_ROUTER_ROUTE>EXPLORE</BEST_ROUTER_ROUTE>",
   "<BEST_ROUTER_ROUTE>LIBRARIAN</BEST_ROUTER_ROUTE>",
   "<BEST_ROUTER_ROUTE>BOTH</BEST_ROUTER_ROUTE>",
-  "<BEST_ROUTER_ROUTE>FOUR</BEST_ROUTER_ROUTE>"
+  "<BEST_ROUTER_ROUTE>FOUR</BEST_ROUTER_ROUTE>",
+  "<BEST_ROUTER_ROUTE>FANOUT</BEST_ROUTER_ROUTE>"
 ]);
-const ROUTE_STATE = new Map();
+const ROUTE_STATE_KEY = Symbol.for("brew-opencode-team.best-router.route-state.v1");
+const ROUTE_STATE = globalThis[ROUTE_STATE_KEY] ??= new Map();
+const COMPLETED_ROUTE_STATE = new Map();
+const LEGACY_COMPLETED_ROUTE_STATE = new Map();
+const routeRequestKey = (sessionID, requestID) => `${sessionID}\u0000${requestID}`;
+const FOLLOW_UP_REQUEST = /\b(?:continue|continue with|keep going|carry on|next step|finish(?: the)?|complete(?: the)?|proceed with|now implement|implement it|apply the changes|remaining work|continua|continua con|prosegui|vai avanti|prossimo passo|completa|finisci|procedi con|ora implementa|applica le modifiche|lavoro restante|fai anche|aggiungi anche)\b/i;
+try {
+  for (const line of readFileSync(LOG, "utf8").split(/\r?\n/)) {
+    let event;
+    try { event = JSON.parse(line); } catch { continue; }
+    if (event.event !== "route_gate_open" || typeof event.session_id !== "string" || !Array.isArray(event.required_agents)) continue;
+    if (!event.required_agents.every((agent) => Array.isArray(event.launched_agents) && event.launched_agents.includes(agent))) continue;
+    const completed = {
+      route: event.route,
+      required_agents: [...event.required_agents],
+      pending_agents: [],
+      launched_agents: [...event.launched_agents],
+      request_id: event.request_id ?? null,
+    };
+    const previous = event.request_id
+      ? COMPLETED_ROUTE_STATE.get(routeRequestKey(event.session_id, event.request_id))
+      : LEGACY_COMPLETED_ROUTE_STATE.get(event.session_id);
+    completed.required_agents = [...new Set([...(previous?.required_agents ?? []), ...event.required_agents])];
+    completed.launched_agents = [...new Set([...(previous?.launched_agents ?? []), ...event.launched_agents])];
+    if (event.request_id) COMPLETED_ROUTE_STATE.set(routeRequestKey(event.session_id, event.request_id), completed);
+    else LEGACY_COMPLETED_ROUTE_STATE.set(event.session_id, completed);
+  }
+} catch {}
 const PENDING_TASKS = new Map();
-const BLOCKED_TOOLS = new Set(["bash", "glob", "grep", "read", "webfetch"]);
+const BLOCKED_TOOLS = new Set(["bash", "glob", "grep", "read", "webfetch", "edit", "write", "apply_patch", "delete", "rename", "multi_edit", "file_create", "file_delete", "file_rename", "create_file", "remove_file", "move_file", "write_file", "patch"]);
 const SERENA_BOOTSTRAP_TOOLS = new Set(["serena_initial_instructions", "serena_get_current_config"]);
 const GATE_MESSAGE = "BEST ROUTING GATE: complete the required native task delegation before direct repository or research tools may be used. The required task must use the exact subagent_type and run_in_background=true.";
 const SEMANTIC_GUIDANCE_MARKER = "<BEST_SEMANTIC_TOOL_GUIDANCE>";
@@ -192,7 +220,7 @@ export default async function bestRouterPlugin(input) {
         return;
       }
 
-      if (textParts.some((part) => /<BEST_ROUTER_ROUTE>(EXPLORE|LIBRARIAN|BOTH|FOUR)<\/BEST_ROUTER_ROUTE>/.test(part.text))) {
+      if (textParts.some((part) => /<BEST_ROUTER_ROUTE>(EXPLORE|LIBRARIAN|BOTH|FOUR|FANOUT)<\/BEST_ROUTER_ROUTE>/.test(part.text))) {
         log({ event: "chat.message", session_id: sessionID, agent, classification: "ALREADY_TAGGED", route_appended: false });
         return;
       }
@@ -206,7 +234,14 @@ export default async function bestRouterPlugin(input) {
         log({ event: "chat.message", session_id: sessionID, agent, classification: "ROUTER_ERROR", route_appended: false });
         return;
       }
-      const classification = ROUTES.has(route) ? route.match(/<BEST_ROUTER_ROUTE>(EXPLORE|LIBRARIAN|BOTH|FOUR)<\/BEST_ROUTER_ROUTE>/)[1] : "DIRECT";
+      if (!ROUTES.has(route) && FOLLOW_UP_REQUEST.test(prompt)) {
+        const previous = ROUTE_STATE.get(sessionID);
+        if (previous?.route && ROUTES.has(`<BEST_ROUTER_ROUTE>${previous.route}</BEST_ROUTER_ROUTE>`)) {
+          route = `<BEST_ROUTER_ROUTE>${previous.route}</BEST_ROUTER_ROUTE>`;
+          log({ event: "route_inherited_followup", session_id: sessionID, previous_route: previous.route });
+        }
+      }
+      const classification = ROUTES.has(route) ? route.match(/<BEST_ROUTER_ROUTE>(EXPLORE|LIBRARIAN|BOTH|FOUR|FANOUT)<\/BEST_ROUTER_ROUTE>/)[1] : "DIRECT";
       if (!ROUTES.has(route)) {
         log({ event: "chat.message", session_id: sessionID, agent, classification, route_appended: false });
         return;
@@ -228,9 +263,38 @@ export default async function bestRouterPlugin(input) {
         ? ["explore", "librarian"]
         : classification === "FOUR"
           ? ["explore", "librarian", "openai-architect", "openai-reviewer"]
-          : [classification.toLowerCase()];
-      ROUTE_STATE.set(sessionID, { route: classification, required_agents, pending_agents: [], launched_agents: [] });
-      log({ event: "route_registered", session_id: sessionID, agent, route: classification, required_agents, pending_agents: [], launched_agents: [], gate_action: "armed" });
+          : classification === "FANOUT"
+            ? ["openai-coder-1", "openai-coder-2", "openai-reviewer"]
+            : [classification.toLowerCase()];
+      const requestID = String(source?.id ?? hookInput.messageID ?? "unknown-request");
+      const current = ROUTE_STATE.get(sessionID);
+      const sameRequest = current?.request_id === requestID;
+      const sameRoute = sameRequest && current?.route === classification
+        && current.required_agents.length === required_agents.length
+        && current.required_agents.every((required, index) => required === required_agents[index]);
+      const storedCompletion = COMPLETED_ROUTE_STATE.get(routeRequestKey(sessionID, requestID));
+      const legacyCompletion = !storedCompletion && !sameRequest ? LEGACY_COMPLETED_ROUTE_STATE.get(sessionID) : null;
+      const completedAgents = storedCompletion?.launched_agents ?? legacyCompletion?.launched_agents ?? [];
+      if (sameRoute) {
+        const launched_agents = required_agents.filter((required) => current.launched_agents.includes(required) || completedAgents.includes(required));
+        ROUTE_STATE.set(sessionID, {
+          ...current,
+          request_id: requestID,
+          pending_agents: current.pending_agents.filter((pending) => !launched_agents.includes(pending)),
+          launched_agents,
+        });
+      } else {
+        ROUTE_STATE.set(sessionID, {
+          request_id: requestID,
+          route: classification,
+          required_agents,
+          pending_agents: [],
+          launched_agents: required_agents.filter((required) => completedAgents.includes(required)),
+        });
+      }
+      if (legacyCompletion) LEGACY_COMPLETED_ROUTE_STATE.delete(sessionID);
+      const state = ROUTE_STATE.get(sessionID);
+      log({ event: sameRoute ? "route_resumed" : "route_registered", session_id: sessionID, request_id: requestID, agent, route: classification, required_agents, pending_agents: state.pending_agents, launched_agents: state.launched_agents, gate_action: sameRoute ? "resume" : "armed" });
       log({ event: "chat.message", session_id: sessionID, agent, classification, route_appended: true });
     }
     ,
@@ -282,7 +346,11 @@ export default async function bestRouterPlugin(input) {
         throw new Error(GATE_MESSAGE);
       }
       if (tool.startsWith("serena_")) {
-        throw new Error(buildGateMessage(state));
+        const covered = state.required_agents.every((agent) =>
+          state.pending_agents.includes(agent) || state.launched_agents.includes(agent)
+        );
+        if (!covered) throw new Error(buildGateMessage(state));
+        return;
       }
       if (BLOCKED_TOOLS.has(tool) && !isSafeRootInspection(tool, output.args)) {
         const covered = state.required_agents.every((agent) =>
@@ -308,8 +376,16 @@ export default async function bestRouterPlugin(input) {
       if (!state.launched_agents.includes(pending.agent)) state.launched_agents.push(pending.agent);
       log({ event: "task_launch_succeeded", session_id: toolInput.sessionID, route: state.route, required_agents: state.required_agents, pending_agents: state.pending_agents, launched_agents: state.launched_agents, call_id: toolInput.callID, gate_action: pending.agent });
       if (state.required_agents.every((agent) => state.launched_agents.includes(agent))) {
-        log({ event: "route_gate_open", session_id: toolInput.sessionID, route: state.route, required_agents: state.required_agents, pending_agents: state.pending_agents, launched_agents: state.launched_agents, call_id: toolInput.callID, gate_action: "open" });
-        ROUTE_STATE.delete(toolInput.sessionID);
+        const previous = COMPLETED_ROUTE_STATE.get(routeRequestKey(toolInput.sessionID, state.request_id));
+        const launched_agents = [...new Set([...(previous?.launched_agents ?? []), ...state.launched_agents])];
+        COMPLETED_ROUTE_STATE.set(routeRequestKey(toolInput.sessionID, state.request_id), {
+          route: state.route,
+          required_agents: [...new Set([...(previous?.required_agents ?? []), ...state.required_agents])],
+          pending_agents: [],
+          launched_agents,
+          request_id: state.request_id,
+        });
+        log({ event: "route_gate_open", session_id: toolInput.sessionID, request_id: state.request_id, route: state.route, required_agents: state.required_agents, pending_agents: state.pending_agents, launched_agents: state.launched_agents, call_id: toolInput.callID, gate_action: "open" });
       }
     }
   };

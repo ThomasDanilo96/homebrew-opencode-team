@@ -304,9 +304,9 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   assert.equal(isSafeRootInspection("glob", { pattern: "*.js", path: "teams/best" }), true);
   for (const [tool, args] of [["glob", { pattern: "**/*", path: "." }], ["grep", { pattern: "x", path: "." }], ["serena_find_symbol", {}], ["bash", { command: "git reset --hard HEAD" }], ["bash", { command: "git status; rm -rf x" }]]) assert.equal(isSafeRootInspection(tool, args), false);
 
-  const routeSession = async (sessionID, prompt) => {
+  const routeSession = async (sessionID, prompt, messageID = `${sessionID}-prompt`) => {
     const hooks = await bestRouterPlugin({ directory: root });
-    const output = { message: {}, parts: [{ id: `${sessionID}-prompt`, type: "text", text: prompt }] };
+    const output = { message: {}, parts: [{ id: messageID, type: "text", text: prompt }] };
     await hooks["chat.message"]({ agent: "OpenCode-Builder", sessionID }, output);
     const before = async (tool, args = {}, callID = `${sessionID}-${tool}`) => {
       const output = { args };
@@ -384,6 +384,43 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   await assert.rejects(() => four.before("task", { subagent_type: "explore", run_in_background: true }, "four-duplicate"), /BEST ROUTING GATE/);
   for (const agent of fourAgents) await four.after(`four-${agent}`);
   await four.before("serena_find_symbol", {});
+
+  const resumedFour = await routeSession("ses-four", "four complex implementation tasks across modules");
+  await resumedFour.before("serena_find_symbol", {});
+  globalThis[Symbol.for("brew-opencode-team.best-router.route-state.v1")] = new Map();
+  const { default: reloadedBestRouter } = await import(`../teams/best/best-router-plugin.js?reload=${Date.now()}`);
+  const reloadedHooks = await reloadedBestRouter({ directory: root });
+  const resumedMessage = { message: {}, parts: [{ id: "ses-four-prompt", type: "text", text: "four complex implementation tasks across modules" }] };
+  await reloadedHooks["chat.message"]({ agent: "OpenCode-Builder", sessionID: "ses-four" }, resumedMessage);
+  await reloadedHooks["tool.execute.before"]({ tool: "serena_find_symbol", sessionID: "ses-four", callID: "four-resumed-read" }, { args: {} });
+  const nextObjective = await routeSession("ses-four", "four complex implementation tasks across modules", "ses-four-next-prompt");
+  await assert.rejects(() => nextObjective.before("serena_find_symbol", {}), /BEST ROUTING GATE/);
+  for (const agent of fourAgents) await nextObjective.before("task", { subagent_type: agent, run_in_background: true }, `four-next-${agent}`);
+  for (const agent of fourAgents) await nextObjective.after(`four-next-${agent}`);
+  await nextObjective.before("serena_find_symbol", {});
+
+  writeFileSync(routeScript, 'printf "%s\\n" "<BEST_ROUTER_ROUTE>FANOUT</BEST_ROUTER_ROUTE>"\n');
+  const fanout = await routeSession("ses-fanout", "Implement a complex multi-file feature");
+  for (const agent of ["openai-coder-1", "openai-coder-2"]) {
+    await fanout.before("task", { subagent_type: agent, run_in_background: true }, `fanout-${agent}`);
+  }
+  for (const agent of ["openai-coder-1", "openai-coder-2"]) await fanout.after(`fanout-${agent}`);
+  await assert.rejects(() => fanout.before("edit", { filePath: "src/index.js" }), /BEST ROUTING GATE/);
+  await fanout.before("task", { subagent_type: "openai-reviewer", run_in_background: true }, "fanout-openai-reviewer");
+  await fanout.after("fanout-openai-reviewer");
+  await fanout.before("edit", { filePath: "src/index.js" });
+
+  writeFileSync(routeScript, 'printf "%s\\n" "DIRECT"\n');
+  const continuedFanout = await routeSession("ses-fanout", "continua con la seconda slice", "ses-fanout-next");
+  assert.match(continuedFanout.output.parts.at(-1).text, /BEST ROUTE FANOUT/);
+  await assert.rejects(() => continuedFanout.before("edit", { filePath: "src/second.js" }), /BEST ROUTING GATE/);
+  for (const agent of ["openai-coder-1", "openai-coder-2"]) {
+    await continuedFanout.before("task", { subagent_type: agent, run_in_background: true }, `fanout-next-${agent}`);
+    await continuedFanout.after(`fanout-next-${agent}`);
+  }
+  await continuedFanout.before("task", { subagent_type: "openai-reviewer", run_in_background: true }, "fanout-next-reviewer");
+  await continuedFanout.after("fanout-next-reviewer");
+  await continuedFanout.before("edit", { filePath: "src/second.js" });
 
   rmSync(routeDir, { recursive: true, force: true });
 });

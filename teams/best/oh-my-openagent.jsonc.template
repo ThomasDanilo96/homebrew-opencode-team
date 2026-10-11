@@ -19,6 +19,16 @@
       "tools": {
         "call_omo_agent": false
       }
+    },
+    "openai-coder-1": {
+      "mode": "subagent",
+      "permission": { "task": "deny", "bash": "deny", "edit": "allow", "write": "allow", "apply_patch": "allow", "delete": "deny" },
+      "tools": { "task": false, "bash": false, "edit": true, "write": true, "apply_patch": true, "delete": false }
+    },
+    "openai-coder-2": {
+      "mode": "subagent",
+      "permission": { "task": "deny", "bash": "deny", "edit": "allow", "write": "allow", "apply_patch": "allow", "delete": "deny" },
+      "tools": { "task": false, "bash": false, "edit": true, "write": true, "apply_patch": true, "delete": false }
     }
   }
 }

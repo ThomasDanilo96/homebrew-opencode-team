@@ -15,10 +15,10 @@ function classify(prompt) {
   return result.stdout.trim();
 }
 
-test("BEST selects four agents for an articulated implementation request", () => {
+test("BEST selects parallel coding fanout for an articulated multi-file implementation request", () => {
   assert.equal(
     classify("Implementa una feature end-to-end che integra più moduli e aggiorna il flusso."),
-    "<BEST_ROUTER_ROUTE>FOUR</BEST_ROUTER_ROUTE>",
+    "<BEST_ROUTER_ROUTE>FANOUT</BEST_ROUTER_ROUTE>",
   );
 });
 

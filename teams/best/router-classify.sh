@@ -24,7 +24,7 @@ if echo "$PROMPT" | grep -qiE "$IMPLEMENT_RE" && echo "$PROMPT" | grep -qiE "$CO
 [ "$needs_explore" -eq 0 ] && [ "$needs_research" -eq 0 ] && [ "$needs_fanout" -eq 0 ] && exit 0
 
 if [ "$needs_fanout" -eq 1 ]; then
-  echo "<BEST_ROUTER_ROUTE>FOUR</BEST_ROUTER_ROUTE>"
+  echo "<BEST_ROUTER_ROUTE>FANOUT</BEST_ROUTER_ROUTE>"
 elif [ "$needs_explore" -eq 1 ] && [ "$needs_research" -eq 1 ]; then
   echo "<BEST_ROUTER_ROUTE>BOTH</BEST_ROUTER_ROUTE>"
 elif [ "$needs_explore" -eq 1 ]; then

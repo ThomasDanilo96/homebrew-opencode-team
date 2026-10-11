@@ -20,6 +20,8 @@ const tuiTeams = fs.readdirSync(path.join(root, "teams"), { withFileTypes: true 
 
 const best = read("best");
 const bestOmo = JSON.parse(fs.readFileSync(path.join(home, "config", "best", "xdg-config", "opencode", "oh-my-openagent.jsonc"), "utf8"));
+const bestOmoModels = JSON.parse(fs.readFileSync(path.join(home, "data", "best", ".omo", "omo.jsonc"), "utf8"));
+const bestOmoNativeAgents = bestOmoModels.profiles["best-native"]["[native]"].agents;
 const assertSkillMcp = (team, agent) => {
   const env = {
     ...process.env,
@@ -45,9 +47,22 @@ same(best.model, "openai/gpt-6-luna", "BEST model");
 same(best.small_model, "opencode-go/mimo-v2.5", "BEST small_model");
 same(best.default_agent, "OpenCode-Builder", "BEST default_agent");
 same(best.tools.call_omo_agent, false, "BEST profile legacy delegation tool");
-same(Object.keys(best.agent).sort(), ["OpenCode-Builder", "explore", "librarian", "openai-architect", "openai-reviewer"], "BEST agents");
+same(Object.keys(best.agent).sort(), ["OpenCode-Builder", "explore", "librarian", "openai-architect", "openai-coder-1", "openai-coder-2", "openai-reviewer"], "BEST agents");
 same(best.agent["OpenCode-Builder"].permission.task, "allow", "BEST Builder permission");
 same(best.agent["OpenCode-Builder"].permission.call_omo_agent, "deny", "BEST Builder legacy delegation permission");
+for (const [coder, model, omoModel] of [["openai-coder-1", "openai/gpt-6-sol", "chatgpt-subscription/gpt-6-sol"], ["openai-coder-2", "openai/gpt-6-luna", "chatgpt-subscription/gpt-6-luna"]]) {
+  same(best.agent[coder].model, model, `BEST ${coder} model`);
+  same(bestOmoNativeAgents[coder].models, [omoModel], `BEST OMO ${coder} model`);
+  same(best.agent[coder].permission.edit, "allow", `BEST ${coder} edit permission`);
+  same(best.agent[coder].permission.write, "allow", `BEST ${coder} write permission`);
+  same(best.agent[coder].permission.task, "deny", `BEST ${coder} nested-task permission`);
+  same(best.agent[coder].permission.bash, "deny", `BEST ${coder} shell permission`);
+  same(bestOmo.agents[coder].tools.edit, true, `BEST OMO ${coder} edit tool`);
+  same(bestOmo.agents[coder].tools.write, true, `BEST OMO ${coder} write tool`);
+  same(bestOmo.agents[coder].tools.task, false, `BEST OMO ${coder} nested-task tool`);
+}
+same(best.agent["openai-architect"].permission.edit, "deny", "BEST architect remains read-only");
+same(best.agent["openai-reviewer"].permission.edit, "deny", "BEST reviewer remains read-only");
 same(best.agent["OpenCode-Builder"].tools.call_omo_agent, false, "BEST Builder legacy delegation tool");
 same(bestOmo.sisyphus_agent.default_builder_enabled, true, "BEST OMO default Builder");
 same(bestOmo.agents["OpenCode-Builder"].mode, "primary", "BEST OMO Builder mode");
@@ -122,6 +137,9 @@ assert(daily.mcp?.serena?.enabled === true, "OPENAI DAILY Serena MCP missing");
 assert(path.isAbsolute(daily.mcp.serena.command[0]) && (daily.mcp.serena.command[0].startsWith(path.join(home, "data")) || daily.mcp.serena.command[0].startsWith(dependencyRoot)), "OPENAI DAILY Serena path invalid");
 assert(daily.plugin.length === 4 && daily.plugin.every(path.isAbsolute), "OPENAI DAILY plugin paths invalid");
 assert(daily.plugin[1].endsWith("/teams/openai/config/opencode/openai-team-tools.js"), "OPENAI DAILY shared tools path invalid");
+assert(!daily.plugin.some((plugin) => plugin.endsWith("/teams/best/best-router-plugin.js")), "OPENAI DAILY must not load the BEST route plugin");
+assert(daily.agent.openai_orchestrator.description.includes("regardless of the launch directory"), "OPENAI DAILY orchestrator must accept repositories outside cwd");
+assert(daily.agent.openai_explore.prompt_append.includes("serena_activate_project"), "OPENAI DAILY explorer must activate the requested repository through Serena");
 
 const serenaMutationPatterns = ["serena_replace_*", "serena_insert_*", "serena_rename_*", "serena_delete_*", "serena_write_*", "serena_safe_delete_*", "serena_edit_*"];
 const serenaReadTools = ["serena_get_symbols_overview", "serena_find_symbol", "serena_find_declaration", "serena_find_implementations", "serena_find_referencing_symbols", "serena_get_diagnostics_for_file", "serena_search_for_pattern", "serena_read_memory", "serena_get_current_config", "serena_activate_project"];

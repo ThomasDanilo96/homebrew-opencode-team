@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createBestNativeRouter } from "../teams/best/best-native-router.mjs";
 
 function createHarness(sessionID = "ses-native-test", classify = async (prompt) =>
-  prompt.includes("ROUTE_FOUR") ? "FOUR" : "DIRECT") {
+  prompt.includes("ROUTE_FANOUT") ? "FANOUT" : prompt.includes("ROUTE_FOUR") ? "FOUR" : "DIRECT") {
   const handlers = new Map();
   createBestNativeRouter({ classify, logger: () => {} })({ on: (event, handler) => handlers.set(event, handler) });
   const ctx = {
@@ -55,6 +55,26 @@ test("Native BEST router transforms complex prompts and fails closed until exact
     assert.equal((await toolCall(harness, "read", { path: "README.md" })).block, true);
   }
   await toolResult(harness, "task", {}, callIds.get("openai-reviewer"));
+  assert.equal(await toolCall(harness, "read", { path: "README.md" }), undefined);
+});
+
+test("Native BEST FANOUT route admits two disjoint implementation workers and a reviewer", async () => {
+  const harness = createHarness();
+  const transformed = await routePrompt(harness, "ROUTE_FANOUT: implement a complex multi-file feature");
+  assert.match(transformed.text, /BEST ROUTE FANOUT/);
+  assert.match(transformed.text, /<BEST_ROUTER_ROUTE>FANOUT<\/BEST_ROUTER_ROUTE>/);
+  const agents = ["openai-coder-1", "openai-coder-2"];
+  const callIds = new Map();
+  for (const agent of agents) {
+    const callId = `fanout-${agent}`;
+    await toolCall(harness, "task", { subagent_type: agent, run_in_background: true }, callId);
+    callIds.set(agent, callId);
+  }
+  assert.equal((await toolCall(harness, "read", { path: "README.md" })).block, true);
+  for (const agent of agents) await toolResult(harness, "task", {}, callIds.get(agent));
+  const reviewerCallID = "fanout-openai-reviewer";
+  await toolCall(harness, "task", { subagent_type: "openai-reviewer", run_in_background: true }, reviewerCallID);
+  await toolResult(harness, "task", {}, reviewerCallID);
   assert.equal(await toolCall(harness, "read", { path: "README.md" }), undefined);
 });
 

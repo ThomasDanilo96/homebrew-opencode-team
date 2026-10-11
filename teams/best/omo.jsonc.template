@@ -77,6 +77,16 @@
             "reasoning": "high",
             "tools": {"task": false, "bash": false, "edit": false, "write": false}
           },
+          "openai-coder-1": {
+            "description": "BEST parallel implementation worker 1. Edit only its explicitly assigned disjoint file slice; do not delegate.",
+            "models": ["chatgpt-subscription/gpt-6-sol"],
+            "tools": {"task": false, "bash": false, "edit": true, "write": true}
+          },
+          "openai-coder-2": {
+            "description": "BEST parallel implementation worker 2. Edit only its explicitly assigned disjoint file slice; do not delegate.",
+            "models": ["chatgpt-subscription/gpt-6-luna"],
+            "tools": {"task": false, "bash": false, "edit": true, "write": true}
+          },
           "openai-reviewer": {
             "description": "BEST independent requirements and edge-case reviewer. Read-only.",
             "models": ["chatgpt-subscription/gpt-6-luna"],
