@@ -8,8 +8,8 @@ import { admitDurableFanout, allowsDailyOrchestratorShell, backgroundDelegationA
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
 import { analyzeObjective, objectiveRequestsLocalCommit, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
-import { dailyRootMutationToolPolicy, latestUserObjective, localCommitPostcondition, OpenAITeamTools, resolveInitialObjectiveFromClient } from "../teams/openai/config/opencode/openai-team-tools.js";
-import { resolveCodexModels } from "../teams/openai/config/opencode/codex-models.js";
+import { dailyRootMutationToolPolicy, latestUserObjective, localCommitPostcondition, OpenAITeamTools, requestedDailyFanoutSlice, resolveInitialObjectiveFromClient, routeRootDelegation } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { CODEX_SUBSCRIPTION_MODELS, resolveCodexModels } from "../teams/openai/config/opencode/codex-models.js";
 import { postExecutionPolicy } from "../teams/openai/config/opencode/execution-policy.js";
 
 test("Daily shell policy is bounded by the genuine objective", () => {
@@ -303,6 +303,22 @@ test("Daily mutating root delegates to Codex before repository inspection", asyn
     template,
     /Do not inspect, read, glob, grep, search, use Serena, run shell commands, or write todos before that delegation\./,
   );
+});
+
+test("Mutating roots preserve explicit read-only discovery workers without allowing delegated edits", () => {
+  const parentObjective = "Add multiply(a, b) to calculator.js and add a focused test.";
+  assert.deepEqual(routeRootDelegation({
+    rootMutationRoute: true,
+    parentObjective,
+    childObjective: "Inspect the fixture files and instructions. Do not edit, modify, or change files.",
+    requestedAgent: "openai_explore",
+  }), { classification: "READ_ONLY", agent: "openai_explore" });
+  assert.deepEqual(routeRootDelegation({
+    rootMutationRoute: true,
+    parentObjective,
+    childObjective: "Implement multiply(a, b) in calculator.js and edit the focused test.",
+    requestedAgent: "openai_explore",
+  }), { classification: "MUTATING", agent: "codex_executor" });
 });
 
 test("Daily root mutation tool policy allows only task and denies inspection, mutation, and Serena tools", () => {
@@ -609,7 +625,7 @@ test("Daily and OpenAI templates expose Codex executor as a native subagent", as
 
 test("Daily uses OpenAI-only model tiers", () => {
   assert.equal(DAILY_AGENT_MODELS.openai_orchestrator, "openai/gpt-6-luna");
-  assert.equal(DAILY_AGENT_MODELS.reviewer, "openai/gpt-6-terra");
+  assert.equal(DAILY_AGENT_MODELS.reviewer, "openai/gpt-5.6-terra");
   assert.equal(DAILY_AGENT_MODELS.reviewer_critical, "openai/gpt-6-sol");
   assert.ok(Object.values(DAILY_AGENT_MODELS).every((model) => model.startsWith("openai/")));
 });
@@ -660,7 +676,7 @@ test("Root authority survives sequential Explore completion before Codex admissi
 
 test("Daily provider boundary accepts only the frozen OpenAI model matrix", () => {
   assert.deepEqual(dailyModelIdentity("openai/gpt-6-luna"), { provider: "openai", model: "gpt-6-luna" });
-  for (const model of ["openai/gpt-6-luna", "openai/gpt-6-terra", "openai/gpt-6-sol"]) {
+  for (const model of ["openai/gpt-6-luna", "openai/gpt-5.6-terra", "openai/gpt-6-sol"]) {
     assert.doesNotThrow(() => assertDailyProviderModel({ model }));
   }
   for (const model of ["opencode-go/minimax-m3", "opencode-go/minimax-m2.7", "openai/minimax-m3", "openai/gpt-6-astra"]) {
@@ -669,18 +685,21 @@ test("Daily provider boundary accepts only the frozen OpenAI model matrix", () =
   assert.throws(() => assertDailyProviderModel({ provider: "opencode-go", model: "gpt-6-luna" }), (error) => error.code === "OPENAI_DAILY_PROVIDER_FORBIDDEN");
 });
 
-test("Daily Codex fallback remains OpenAI-only and fails closed on forbidden models", () => {
+test("Codex profiles use ChatGPT-subscription models and reject API-only model names", () => {
+  assert.deepEqual(CODEX_SUBSCRIPTION_MODELS, ["gpt-5.6-luna", "gpt-5.6-terra", "gpt-5.6-sol"]);
   assert.deepEqual(resolveCodexModels("quick", {
     OPENAI_DAILY_PROFILE: "1",
-    OPENAI_CODEX_QUICK_PRIMARY: "gpt-6-luna",
-    OPENAI_CODEX_QUICK_FALLBACK: "gpt-6-terra",
-  }), { profile: "quick", requested_model: "gpt-6-luna", fallback_model: "gpt-6-terra" });
-  for (const forbidden of ["minimax-m3", "minimax-m2.7"]) {
+    OPENAI_CODEX_QUICK_PRIMARY: "gpt-5.6-luna",
+    OPENAI_CODEX_QUICK_FALLBACK: "gpt-5.6-terra",
+  }), { profile: "quick", requested_model: "gpt-5.6-luna", fallback_model: "gpt-5.6-terra" });
+  assert.deepEqual(resolveCodexModels("standard"), { profile: "standard", requested_model: "gpt-5.6-terra", fallback_model: "gpt-5.6-sol" });
+  assert.deepEqual(resolveCodexModels("complex"), { profile: "complex", requested_model: "gpt-5.6-sol", fallback_model: "gpt-5.6-terra" });
+  for (const forbidden of ["minimax-m3", "minimax-m2.7", "gpt-6-terra", "gpt-6-sol"]) {
     assert.throws(() => resolveCodexModels("quick", {
       OPENAI_DAILY_PROFILE: "1",
-      OPENAI_CODEX_QUICK_PRIMARY: "gpt-6-luna",
+      OPENAI_CODEX_QUICK_PRIMARY: "gpt-5.6-luna",
       OPENAI_CODEX_QUICK_FALLBACK: forbidden,
-    }), /OPENAI_DAILY_MODEL_FORBIDDEN/);
+    }), /OPENAI_CODEX_MODEL_UNSUPPORTED/);
   }
 });
 
@@ -718,6 +737,14 @@ test("Daily durable fanout retries only missing scopes and makes replay a no-op"
   packets.push({ parent_session_id: "root", root_objective_sha256: "root-sha", agent: "openai_ops", delegation_scope: "documentation" });
   assert.throws(() => admitDurableFanout(state, "architecture", packets, options), /DUPLICATE_DELEGATION_SCOPE/);
   assert.throws(() => admitDurableFanout(state, "documentation", packets, options), /DUPLICATE_DELEGATION_SCOPE/);
+});
+
+test("Daily fanout duplicate detection ignores ordinary coding and reviewer-gate prompts", () => {
+  assert.equal(requestedDailyFanoutSlice({ daily: true, root: true, agent: "codex_executor", objective: "Add multiply(a, b) and a focused test; require tester and reviewer gates." }), null);
+  assert.equal(requestedDailyFanoutSlice({ daily: true, root: true, agent: "reviewer", objective: "Review review_task_id=abc and verify tests." }), null);
+  assert.equal(requestedDailyFanoutSlice({ daily: true, root: true, agent: "openai_explore", objective: "Create a bounded fanout for the tests slice." }), "tests");
+  assert.equal(requestedDailyFanoutSlice({ daily: true, root: false, agent: "openai_explore", objective: "Create a fanout for architecture." }), null);
+  assert.equal(requestedDailyFanoutSlice({ daily: false, root: true, agent: "openai_explore", objective: "Create a fanout for documentation." }), null);
 });
 
 test("Daily search policy rejects noisy discovery and duplicate evidence", () => {
@@ -1308,7 +1335,7 @@ test("Daily admission stress keeps 1, 2, and 3 siblings bounded", () => {
 test("Daily report accounts for cached and uncached work-packet tokens once", () => {
   const report = summarizeDailyPackets([
     { outcome: "completed", parent_session_id: "parent-1", executed_model: "gpt-6-luna", complexity: "NORMAL", duration_ms: 100, codex_input_tokens: 1000, codex_cached_input_tokens: 200, codex_output_tokens: 300, codex_reasoning_tokens: 40, retry_count: 1, compaction_count: 2 },
-    { outcome: "completed", parent_session_id: "parent-1", executed_model: "gpt-6-terra", complexity: "COMPLEX", duration_ms: 200, codex_input_tokens: 500, codex_cached_input_tokens: 100, codex_output_tokens: 100, codex_reasoning_tokens: 10, retry_count: 0, compaction_count: 0 },
+    { outcome: "completed", parent_session_id: "parent-1", executed_model: "gpt-5.6-terra", complexity: "COMPLEX", duration_ms: 200, codex_input_tokens: 500, codex_cached_input_tokens: 100, codex_output_tokens: 100, codex_reasoning_tokens: 10, retry_count: 0, compaction_count: 0 },
   ]);
   assert.equal(report.completed_tasks, 2);
   assert.equal(report.uncached_input_tokens, 1200);

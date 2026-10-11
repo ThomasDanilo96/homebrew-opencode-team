@@ -11,8 +11,13 @@ import { updateWorkPacketByID } from "./work-packet.js";
 
 const READ_ONLY_TOOLS = new Set([
   "read", "glob", "grep", "webfetch", "todowrite", "skill", "skill_mcp",
+  "question",
   "task", "docs", "documentation",
   "lsp_diagnostics", "lsp_symbols", "lsp_definition", "lsp_references", "lsp_hover", "lsp_workspace_symbols",
+  "lsp_status", "lsp_document_symbols", "lsp_workspace_diagnostics",
+  "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource",
+  "context7_resolve-library-id", "context7_query-docs",
+  "websearch_web_search_exa", "websearch_web_search_tavily", "websearch_web_search_brave",
   "openai_remote_read",
   "session_list", "session_read", "session_search", "session_info",
   "background_output", "background_cancel", "look_at",
@@ -20,7 +25,8 @@ const READ_ONLY_TOOLS = new Set([
   "serena_find_declaration", "serena_find_implementations", "serena_find_referencing_symbols",
   "serena_get_diagnostics_for_file", "serena_search_for_pattern", "serena_list_memories",
   "serena_read_memory", "serena_get_current_config", "serena_list_mcp_resources",
-  "serena_read_mcp_resource", "serena_activate_project",
+  "serena_list_mcp_resource_templates", "serena_read_mcp_resource", "serena_activate_project",
+  "serena_find_file", "serena_get_symbols_overview", "serena_open_dashboard",
 ]);
 
 const UNBOUNDED_EXECUTION = new Set(["bash", "interactive_bash", "shell", "command"]);

@@ -56,7 +56,7 @@
     },
     "tester": {
       "description": "Test, verification, and regression worker.",
-      "model": "openai/gpt-6-terra",
+      "model": "openai/gpt-5.6-terra",
       "permission": { "apply_patch": "deny", "edit": "deny", "write": "deny", "delete": "deny", "rename": "deny", "file_create": "deny", "file_delete": "deny", "file_rename": "deny", "create_file": "deny", "remove_file": "deny", "move_file": "deny", "multi_edit": "deny", "write_file": "deny", "patch": "deny", "serena_*": "deny", "bash": "allow", "interactive_bash": "deny", "shell": "deny", "command": "deny", "task": "deny", "skill": "deny" },
       "tools": { "openai_run_codex": false, "call_omo_agent": false, "apply_patch": false, "edit": false, "write": false, "delete": false, "rename": false, "file_create": false, "file_delete": false, "file_rename": false, "create_file": false, "remove_file": false, "move_file": false, "multi_edit": false, "write_file": false, "patch": false, "bash": true, "interactive_bash": false, "shell": false, "command": false, "task": false, "skill": false }
     },

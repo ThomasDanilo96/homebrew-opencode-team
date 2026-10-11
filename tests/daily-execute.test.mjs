@@ -371,7 +371,7 @@ test("model mix counts observed models, preserves unknowns, and deduplicates cor
   writeFileSync(join(logs, "latency-metrics.jsonl"), [
     { model: "openai/gpt-6-luna", request_id: "luna-1" },
     { model: "gpt-6-luna", request_id: "luna-1" },
-    { model: "gpt-6-terra", request_id: "terra-1" },
+    { model: "gpt-5.6-terra", request_id: "terra-1" },
     { model: "gpt-6-sol", request_id: "sol-1" },
     { model: "vendor/future-model", request_id: "unknown-1" },
   ].map((record) => JSON.stringify(record)).join("\n") + "\n");

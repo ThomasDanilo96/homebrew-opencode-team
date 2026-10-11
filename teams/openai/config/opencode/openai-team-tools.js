@@ -11,7 +11,7 @@ import { readRecovery, reconcileRecovery, removeRecovery, removeRecoveryAndHome,
 import { openCodexCircuit, readCodexCircuitGeneration } from "./codex-circuit.js";
 import { resolveCodexModels } from "./codex-models.js";
 import { createRemoteReadTool } from "./openai-remote-ops.js";
-import { analyzeObjective, objectiveRequestsLocalCommit, routeDelegatedAgent, selectAuthoritativeObjective, REPOSITORY_MUTATING_TOOLS } from "./openai-routing.js";
+import { analyzeObjective, objectiveRequestsLocalCommit, routeDelegatedAgent, selectAuthoritativeObjective, READ_ONLY_AGENTS, REPOSITORY_MUTATING_TOOLS } from "./openai-routing.js";
 import { parseVerificationEvidence, postExecutionPolicy, verificationCommandCategory, isAllowlistedVerificationCommand } from "./execution-policy.js";
 import { DEFAULT_TIMEOUT_SECONDS, MAX_TIMEOUT_SECONDS, runProcessAsync } from "./process-async.js";
 import { createCodexProgressParser, createCodexProgressTracker } from "./codex-progress.js";
@@ -252,8 +252,8 @@ export const terminalCodexFailureForRootObjective = (
     && packet?.retryable === false
   ) || null;
 };
-const PREMIUM_AGENT_MODELS = { openai_orchestrator: "openai/gpt-6-sol", openai_explore: "openai/gpt-6-luna-fast", openai_librarian: "openai/gpt-6-luna", openai_ops: "openai/gpt-6-luna", tester: "openai/gpt-6-terra", reviewer: "openai/gpt-6-sol", reviewer_critical: "openai/gpt-6-astra", specialist: "openai/gpt-6-astra", codex_executor: "openai/gpt-6-luna-fast" };
-const DAILY_AGENT_MODELS = { openai_orchestrator: "openai/gpt-6-luna", openai_explore: "openai/gpt-6-luna", openai_librarian: "openai/gpt-6-luna", openai_ops: "openai/gpt-6-luna", tester: "openai/gpt-6-luna", reviewer: "openai/gpt-6-terra", reviewer_critical: "openai/gpt-6-sol", specialist: "openai/gpt-6-terra", codex_executor: "openai/gpt-6-luna" };
+const PREMIUM_AGENT_MODELS = { openai_orchestrator: "openai/gpt-6-sol", openai_explore: "openai/gpt-6-luna-fast", openai_librarian: "openai/gpt-6-luna", openai_ops: "openai/gpt-6-luna", tester: "openai/gpt-5.6-terra", reviewer: "openai/gpt-6-sol", reviewer_critical: "openai/gpt-6-astra", specialist: "openai/gpt-6-astra", codex_executor: "openai/gpt-6-luna-fast" };
+const DAILY_AGENT_MODELS = { openai_orchestrator: "openai/gpt-6-luna", openai_explore: "openai/gpt-6-luna", openai_librarian: "openai/gpt-6-luna", openai_ops: "openai/gpt-6-luna", tester: "openai/gpt-6-luna", reviewer: "openai/gpt-5.6-terra", reviewer_critical: "openai/gpt-6-sol", specialist: "openai/gpt-5.6-terra", codex_executor: "openai/gpt-6-luna" };
 export const agentModelsForEnv = (env = process.env) =>
   env.OPENAI_DAILY_PROFILE === "1"
     ? DAILY_AGENT_MODELS
@@ -348,6 +348,20 @@ export const dailyRootMutationToolPolicy = ({ daily = false, agent = "", root = 
       return [name, normalized === "task"];
     }),
   );
+};
+
+export const requestedDailyFanoutSlice = ({ daily = false, root = false, agent = "", objective = "" } = {}) => {
+  if (daily !== true || root !== true || ["tester", "reviewer", "reviewer_critical"].includes(agent)) return null;
+  const text = String(objective || "");
+  const explicit = /\b(?:fanout|distinct\s+slices?|child\s+slices?)\b/i.test(text)
+    || /\b(?:slice|lane|scope)\s*[:=]?\s*(?:architecture|tests?|documentation|docs?)\b/i.test(text)
+    || /\b(?:architecture|tests?|documentation|docs?)\s+(?:slice|lane|scope)\b/i.test(text);
+  if (!explicit) return null;
+  const named = text.match(/\b(?:slice|lane|scope)\s*[:=]?\s*(architecture|tests?|documentation|docs?)\b/i)
+    || text.match(/\b(architecture|tests?|documentation|docs?)\s+(?:slice|lane|scope)\b/i)
+    || text.match(/\b(architecture|tests?|documentation|docs?)\b/i);
+  const scope = String(named?.[1] || "").toLowerCase();
+  return scope === "test" ? "tests" : scope === "doc" || scope === "docs" ? "documentation" : scope || null;
 };
 
 // `task` and `objective` are compatibility hints from the wrapper model, not
@@ -961,6 +975,17 @@ export const decideDelegatedTaskAgent = (requestedAgent, routeClassification, ex
   exactMandatoryTesterGate ? "tester" : routeClassification === "MUTATING" && requestedAgent === "tester" ? "codex_executor" : null;
 export const resolveDelegatedTaskRoute = (exactMandatoryTesterGate, router, ...args) =>
   exactMandatoryTesterGate ? null : router(...args);
+export const routeRootDelegation = ({ rootMutationRoute = false, rootReadOnlyRoute = false, exactMandatoryTesterGate = false, parentObjective = "", childObjective = "", requestedAgent = "" } = {}) => {
+  if (rootMutationRoute) {
+    if (READ_ONLY_AGENTS.has(requestedAgent)) {
+      const explicit = routeDelegatedAgent(parentObjective, childObjective, requestedAgent);
+      if (explicit.classification === "READ_ONLY") return explicit;
+    }
+    return { classification: "MUTATING", agent: "codex_executor" };
+  }
+  if (rootReadOnlyRoute) return { classification: "READ_ONLY", agent: "openai_explore" };
+  return resolveDelegatedTaskRoute(exactMandatoryTesterGate, routeDelegatedAgent, parentObjective, childObjective, requestedAgent);
+};
 export const taskRouteAdmissionContext = (route, exactMandatoryTesterGate, remoteReadOnly) => ({
   classification: route?.classification ?? null,
   localReadOnly: !exactMandatoryTesterGate && route?.classification === "READ_ONLY" && !remoteReadOnly,
@@ -3087,7 +3112,12 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
      const args = output.args || {};
       let testTaskID;
         const currentTaskObjective = String(args.prompt || args.description || "").trim();
-        const earlyFanoutSlice = currentTaskObjective.match(/\b(architecture|tests|documentation)\b/i)?.[1]?.toLowerCase();
+        const earlyFanoutSlice = requestedDailyFanoutSlice({
+          daily: process.env.OPENAI_DAILY_PROFILE === "1",
+          root: masterParent(input.sessionID) === input.sessionID,
+          agent: String(output.args?.subagent_type || output.args?.agent || ""),
+          objective: currentTaskObjective,
+        });
         const earlyFanoutKey = earlyFanoutSlice ? `${masterParent(input.sessionID)}:${earlyFanoutSlice}` : null;
         if (earlyFanoutKey && fanoutSliceClaims.has(earlyFanoutKey)) {
           const existingFanoutPacket = (await listWorkPackets()).some((packet) => packet.parent_session_id === masterParent(input.sessionID) && packet.agent === "codex_executor" && packet.delegation_scope === earlyFanoutSlice && packet.outcome !== "failed");
@@ -3131,11 +3161,14 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
        const rootReadOnlyRoute = rootParentForGate === input.sessionID
          && rootObjectiveClassification === "READ_ONLY"
          && !exactMandatoryTesterGate;
-       const route = rootMutationRoute
-         ? { classification: "MUTATING", agent: "codex_executor" }
-         : rootReadOnlyRoute
-           ? { classification: "READ_ONLY", agent: "openai_explore" }
-            : resolveDelegatedTaskRoute(exactMandatoryTesterGate, routeDelegatedAgent, authoritativeParentObjective, currentTaskObjective, requestedAgent);
+        const route = routeRootDelegation({
+          rootMutationRoute,
+          rootReadOnlyRoute,
+          exactMandatoryTesterGate,
+          parentObjective: authoritativeParentObjective,
+          childObjective: currentTaskObjective,
+          requestedAgent,
+        });
        const fanoutSlice = currentTaskObjective.match(/\b(architecture|tests|documentation)\b/i)?.[1]?.toLowerCase();
        if (fanoutSlice && requestedAgent === "codex_executor" && rootParentForGate === masterParent(rootParentForGate)) {
          const duplicateSlice = (await listWorkPackets()).some((packet) => packet.parent_session_id === rootParentForGate && packet.agent === "codex_executor" && packet.delegation_scope === fanoutSlice && ["admitted", "foreground_binding", "foreground_bound", "running", "codex_terminal"].includes(String(packet.phase || "").toLowerCase()) && packet.outcome !== "failed");
@@ -3401,8 +3434,14 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
           const parentObjective = selectAuthoritativeObjective(requestGuard.authoritativeObjective, authoritativeParentObjective);
           requestGuard.objective = parentObjective;
           const reviewDelegation = ["reviewer", "reviewer_critical"].includes(agent);
-          if (process.env.OPENAI_DAILY_PROFILE === "1" && !reviewDelegation && !["tester", "reviewer", "reviewer_critical"].includes(agent)) {
-            await admitDurableFanout(requestGuard, delegatedObjective, await listWorkPackets(), {
+           const explicitFanoutSlice = requestedDailyFanoutSlice({
+             daily: process.env.OPENAI_DAILY_PROFILE === "1",
+             root: rootParent === input.sessionID,
+             agent,
+             objective: currentTaskObjective,
+           });
+           if (explicitFanoutSlice && !reviewDelegation && !["tester", "reviewer", "reviewer_critical"].includes(agent)) {
+             await admitDurableFanout(requestGuard, delegatedObjective, await listWorkPackets(), {
               parentSessionID: rootParent,
               rootObjectiveSHA: objectiveHash(parentObjective),
             });

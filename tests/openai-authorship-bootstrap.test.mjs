@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { bootstrapCodexPolicy, CODEX_BOOTSTRAP_REASONS } from "../teams/openai/config/opencode/openai-authorship-guard.js";
+import { bootstrapCodexPolicy, CODEX_BOOTSTRAP_REASONS, OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
 import { claimTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
 import { appendTaskPacketMarker } from "../teams/openai/config/opencode/correlation-marker.js";
 
@@ -22,6 +22,13 @@ const client = {
   },
 };
 const baseInput = () => ({ client, listWorkPackets: async () => [] });
+
+test("authorship guard permits read-only diagnostics and MCP discovery tools", async () => {
+  const guard = await OpenAIAuthorshipGuard();
+  for (const tool of ["question", "lsp_status", "lsp_document_symbols", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource", "serena_open_dashboard", "context7_resolve-library-id", "context7_query-docs", "websearch_web_search_exa"]) {
+    await assert.doesNotReject(() => guard["tool.execute.before"]({ tool, sessionID: "root" }, {}), tool);
+  }
+});
 
 test("Codex bootstrap reports a valid success without changing policy admission", async () => {
   const root = await mkdtemp(join(tmpdir(), "openai-bootstrap-"));

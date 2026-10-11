@@ -47,16 +47,16 @@ export const DAILY_AGENT_MODELS = Object.freeze({
   openai_librarian: "openai/gpt-6-luna",
   openai_ops: "openai/gpt-6-luna",
   tester: "openai/gpt-6-luna",
-  reviewer: "openai/gpt-6-terra",
+  reviewer: "openai/gpt-5.6-terra",
   reviewer_critical: "openai/gpt-6-sol",
-  specialist: "openai/gpt-6-terra",
+  specialist: "openai/gpt-5.6-terra",
   codex_executor: "openai/gpt-6-luna",
 });
 
 export const DAILY_ALLOWED_PROVIDER = "openai";
 export const DAILY_ALLOWED_MODELS = Object.freeze([
   "gpt-6-luna",
-  "gpt-6-terra",
+  "gpt-5.6-terra",
   "gpt-6-sol",
 ]);
 
@@ -86,7 +86,7 @@ export const DAILY_PRICING = Object.freeze({
   source: "https://platform.openai.com/docs/pricing",
   models: Object.freeze({
     "gpt-6-luna": tier("gpt-6-luna", 0.2, 0.02, 1.2),
-    "gpt-6-terra": tier("gpt-6-terra", 2, 0.2, 12),
+    "gpt-5.6-terra": tier("gpt-5.6-terra", 2, 0.2, 12),
     "gpt-6-sol": tier("gpt-6-sol", 4, 0.4, 20),
   }),
 });

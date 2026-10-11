@@ -525,7 +525,7 @@ if (counts.reviewer !== 1) fail(`expected one reviewer child, found ${counts.rev
 if (counts.reviewer_critical !== 0) fail("normal reviewer scenario admitted critical reviewer");
 if (!children.filter((child) => ["codex_executor", "tester", "reviewer"].includes(child.agent)).every((child) => child.provider === "openai")) fail("gate child provider was not OpenAI");
 if (children.find((child) => child.agent === "tester")?.executed_model !== "gpt-6-luna") fail("tester model mismatch");
-if (reviewer?.executed_model !== "gpt-6-terra") fail("reviewer model mismatch");
+if (reviewer?.executed_model !== "gpt-5.6-terra") fail("reviewer model mismatch");
 if (!reviewer?.terminal) fail("reviewer did not reach terminal completion");
 if (!gate || gate.tester_status !== "passed" || gate.review_status !== "approved" || gate.outcome !== "completed") fail("review gate did not settle to approved");
 NODE

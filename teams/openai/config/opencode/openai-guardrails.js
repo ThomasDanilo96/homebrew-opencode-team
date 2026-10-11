@@ -34,20 +34,7 @@ export const isExplicitResumeText = (text) => !isInternalContinuation(text) && R
 export const backgroundDelegationAllowed = (env = process.env) => env.OPENAI_DAILY_PROFILE === "1";
 export const updateStopLatch = (state = { stopped: false }, text, genuine = true) => !genuine || isInternalContinuation(text) ? { ...state } : isStopText(text) ? { ...state, stopped: true } : state.stopped && isExplicitResumeText(text) ? { ...state, stopped: false } : { ...state };
 export const beginRequestCycle = (state = createGuardrailState(), text, now = Date.now(), env = process.env, { preserveVerificationTerminal = false, preserveCodexFailureTerminal = false, preserveVerificationGate = false } = {}) => {
-  if (isInternalContinuation(text)) return {
-    ...state,
-    startedAt: now,
-    toolCalls: 0,
-    weightedUnits: 0,
-    delegations: 0,
-    activeDelegations: 0,
-    activeDelegation: false,
-    stopped: false,
-    verificationTerminal: false,
-    budgetTerminal: false,
-    pendingVerificationPacketID: state.pendingVerificationPacketID || null,
-    pendingTesterActive: Boolean(state.pendingTesterActive),
-  };
+  if (isInternalContinuation(text)) return state;
   if (state.verificationTerminal && preserveVerificationTerminal) return state;
   const analysis = env.OPENAI_DAILY_PROFILE === "1" ? analyzeObjective(text) : null;
   const classification = analysis ? DAILY_COMPLEXITY_TO_GUARDRAIL[analysis.complexity] : classifyRequest(text), limitsByClass = analysis ? DAILY_CLASS_LIMITS : CLASS_LIMITS, base = analysis ? { ...limitsByClass[classification], delegations: dailyFanout(analysis.complexity) } : limitsByClass[classification], override = requestOverrides(text);

@@ -70,7 +70,7 @@ function answerKey(run, rawResult) {
   if (run.task_id === "lookup-routing-contract") {
     return [
       "openai/gpt-6-luna",
-      "openai/gpt-6-terra",
+      "openai/gpt-5.6-terra",
       "openai/gpt-6-sol",
       "codex_executor",
       "reviewer_critical",
