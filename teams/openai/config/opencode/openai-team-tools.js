@@ -342,11 +342,12 @@ export const dailyRootMutationToolPolicy = ({ daily = false, agent = "", root = 
     "task",
   ]);
   const mutationObjective = analyzeObjective(objective).classification === "MUTATING";
+  const baselinePreflightRequested = /\b(?:baseline|preflight|checkout inventory|git status|git rev-parse|worktree list)\b/i.test(String(objective || ""));
 
   return Object.fromEntries(
     [...names].map((name) => {
       const normalized = String(name).toLowerCase();
-      return [name, normalized === "task" || (normalized === "bash" && mutationObjective)];
+      return [name, normalized === "task" || (normalized === "bash" && (mutationObjective || baselinePreflightRequested))];
     }),
   );
 };

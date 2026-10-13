@@ -30,6 +30,29 @@ test("authorship guard permits read-only diagnostics and MCP discovery tools", a
   }
 });
 
+test("authorship guard admits the allowlisted compound checkout baseline without Daily mode", async () => {
+  const previousDaily = process.env.OPENAI_DAILY_PROFILE;
+  const previousStateRoot = process.env.OPENAI_TEAM_STATE_ROOT;
+  const stateRoot = await mkdtemp(join(tmpdir(), "openai-baseline-guard-"));
+  delete process.env.OPENAI_DAILY_PROFILE;
+  process.env.OPENAI_TEAM_STATE_ROOT = stateRoot;
+  try {
+    const objective = "Run a read-only repository baseline and create evidence outside the checkout.";
+    const command = "date '+%Y-%m-%d %H:%M:%S %Z %z'; date +%s; git rev-parse --show-toplevel; git rev-parse HEAD; git branch --show-current; git status --porcelain=v1 --untracked-files=all; git diff --name-status; git diff --cached --name-status; git ls-files --others --exclude-standard; git worktree list; git log -1 --oneline";
+    const guard = await OpenAIAuthorshipGuard({ authoritativeObjective: objective });
+    await assert.doesNotReject(() => guard["tool.execute.before"](
+      { tool: "bash", agent: "openai_orchestrator", sessionID: "root" },
+      { args: { command } },
+    ));
+  } finally {
+    if (previousDaily === undefined) delete process.env.OPENAI_DAILY_PROFILE;
+    else process.env.OPENAI_DAILY_PROFILE = previousDaily;
+    if (previousStateRoot === undefined) delete process.env.OPENAI_TEAM_STATE_ROOT;
+    else process.env.OPENAI_TEAM_STATE_ROOT = previousStateRoot;
+    await rm(stateRoot, { recursive: true, force: true });
+  }
+});
+
 test("Codex bootstrap reports a valid success without changing policy admission", async () => {
   const root = await mkdtemp(join(tmpdir(), "openai-bootstrap-"));
   const previous = process.env.OPENAI_TEAM_STATE_ROOT;

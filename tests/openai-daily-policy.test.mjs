@@ -51,6 +51,16 @@ test("Mutating Daily roots may run only bounded shell preflight before delegatio
   }
 });
 
+test("A compound read-only repository baseline is allowed in both OpenAI profiles", () => {
+  const baseline = "date '+%Y-%m-%d %H:%M:%S %Z %z'; date +%s; git rev-parse --show-toplevel; git rev-parse HEAD; git branch --show-current; git status --porcelain=v1 --untracked-files=all; git diff --name-status; git diff --cached --name-status; git ls-files --others --exclude-standard; git worktree list; git log -1 --oneline";
+  const objective = "Create evidence and a candidate in separate paths without changing the checkout.";
+  assert.equal(allowsDailyOrchestratorShell("bash", baseline, objective, {}), true);
+  assert.equal(allowsDailyOrchestratorShell("bash", baseline, objective, { OPENAI_DAILY_PROFILE: "1" }), true);
+  assert.equal(allowsDailyOrchestratorShell("bash", `${baseline}; touch evidence.txt`, objective, {}), false);
+  assert.equal(allowsDailyOrchestratorShell("bash", `${baseline} | cat`, objective, {}), false);
+  assert.equal(allowsDailyOrchestratorShell("bash", "git clone source candidate", objective, {}), false);
+});
+
 
 test("Daily commit requests are mutating and route through Codex without granting root Git mutation", () => {
   const objectives = [
@@ -322,8 +332,9 @@ test("Daily mutating root delegates to Codex before repository inspection", asyn
   const orchestrator = config.agent.openai_orchestrator;
   const prompt = orchestrator.prompt_append;
   assert.equal(orchestrator.tools.bash, true);
-  assert.match(prompt, /user explicitly requires a shell-availability preflight before implementation/);
-  assert.match(prompt, /the runtime permits these checks, including &&-joined combinations/);
+  assert.match(prompt, /user explicitly requires a shell-availability or repository-baseline preflight before implementation/);
+  assert.match(prompt, /allowlisted read-only date\/pwd and git status\/rev-parse\/branch\/diff\/ls-files\/worktree\/log queries/);
+  assert.match(prompt, /runtime permits these commands in semicolon- or &&-joined combinations/);
   assert.match(prompt, /After the preflight, call task\(subagent_type="codex_executor"\) exactly once/);
   assert.match(prompt, /For other mutating objectives, call task\(subagent_type="codex_executor"\) as the first operational tool/);
 });
@@ -565,6 +576,17 @@ test("Daily root tool policy routes read-only roots through an OpenAI explorer c
   assert.equal(restricted.read, false);
   assert.equal(restricted.edit, false);
   assert.equal(restricted.serena_find_symbol, false);
+
+  const baseline = dailyRootMutationToolPolicy({
+    daily: true,
+    agent: "openai_orchestrator",
+    root: true,
+    objective: "Run a read-only repository baseline, then report the current checkout state.",
+    tools: { task: true, bash: false, read: true },
+  });
+  assert.equal(baseline.task, true);
+  assert.equal(baseline.bash, true);
+  assert.equal(baseline.read, false);
 
   for (const policy of [
     { daily: true, agent: "openai_orchestrator", root: false, objective: "Add multiply(a, b)" },
