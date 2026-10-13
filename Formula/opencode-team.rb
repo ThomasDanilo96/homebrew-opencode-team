@@ -1,8 +1,8 @@
 class OpencodeTeam < Formula
   desc "Portable runtime foundation for OpenCode Team"
   homepage "https://github.com/ThomasDanilo96/homebrew-opencode-team"
-  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.49.tar.gz"
-  sha256 "9f823556a6e3de8acb7aa6c8fab5fe8d6cd5eec74b5acdd5d6f67598f4ae08b9"
+  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.50.tar.gz"
+  sha256 "21a45c09b8b96795ac6e076f02bccbd7c5c8a563f2288891fc526ff47499fb9d"
   license "MIT"
 
   depends_on "git"
@@ -32,7 +32,7 @@ class OpencodeTeam < Formula
   end
 
   test do
-    assert_match "OpenCode Team 0.1.49", shell_output("#{bin}/opencode-team version")
+    assert_match "OpenCode Team 0.1.50", shell_output("#{bin}/opencode-team version")
     help = shell_output("#{bin}/opencode-team --help")
     assert_match "BEST profile", help
     assert_match "free", help
