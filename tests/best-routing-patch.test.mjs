@@ -298,7 +298,7 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   process.env.BEST_ROUTER_PATH = routeScript;
   process.env.BEST_ROUTER_LOG = join(routeDir, "router.log");
   const { default: bestRouterPlugin, isSafeRootInspection } = await import("../teams/best/best-router-plugin.js");
-  for (const command of ["git status", "git status --short", "git diff", "git diff --check", "git diff --stat", "git rev-parse --show-toplevel", "git branch --show-current", "git log -5"]) assert.equal(isSafeRootInspection("bash", { command }), true, command);
+  for (const command of ["pwd", "$pwd && git rev-parse --show-toplevel && git rev-parse HEAD", "git status", "git status --short", "git diff", "git diff --check", "git diff --stat", "git rev-parse --show-toplevel", "git rev-parse HEAD", "git branch --show-current", "git log -5"]) assert.equal(isSafeRootInspection("bash", { command }), true, command);
   assert.equal(isSafeRootInspection("read", { filePath: "teams/best/patch-omo-core.py" }), true);
   assert.equal(isSafeRootInspection("grep", { pattern: "fallbackChain", path: "teams/best" }), true);
   assert.equal(isSafeRootInspection("glob", { pattern: "*.js", path: "teams/best" }), true);
@@ -332,6 +332,9 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   }
   for (const [tool, args] of [["bash", { command: "git status" }], ["bash", { command: "git diff --check" }], ["read", { filePath: "teams/best/patch-omo-core.py" }], ["grep", { pattern: "fallbackChain", path: "teams/best" }], ["glob", { pattern: "*.js", path: "teams/best" }]]) await explore.before(tool, args);
   for (const [tool, args] of [["glob", { pattern: "**/*", path: "." }], ["grep", { pattern: "x", path: "." }], ["serena_find_symbol", {}], ["serena_search_for_pattern", {}], ["task", { subagent_type: "librarian", run_in_background: true }]]) await assert.rejects(() => explore.before(tool, args), /BEST ROUTING GATE/);
+  await assert.rejects(() => explore.before("bash", { command: "git status && rm -rf x" }), /BEST ROUTING GATE/);
+  await assert.rejects(() => explore.before("bash", { command: "git status; git add ." }), /BEST ROUTING GATE/);
+  await explore.before("bash", { command: "$pwd && git rev-parse --show-toplevel && git rev-parse HEAD" });
   await assert.rejects(() => explore.before("bash", { command: "git add ." }), /BEST ROUTING GATE/);
   await explore.before("task", { subagent_type: "explore", run_in_background: true }, "explore-task");
   await assert.rejects(() => explore.before("task", { subagent_type: "explore", run_in_background: true }, "explore-duplicate"), /BEST ROUTING GATE/);

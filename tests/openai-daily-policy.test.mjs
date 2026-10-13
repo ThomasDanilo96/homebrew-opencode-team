@@ -294,15 +294,12 @@ test("Daily mutating root delegates to Codex before repository inspection", asyn
     "utf8",
   );
 
-  assert.match(
-    template,
-    /For repository-mutating objectives, delegate immediately to codex_executor as your first operational tool call\./,
-  );
-
-  assert.match(
-    template,
-    /Do not inspect, read, glob, grep, search, use Serena, run shell commands, or write todos before that delegation\./,
-  );
+  const config = JSON.parse(template);
+  const prompt = config.agent.openai_orchestrator.prompt_append;
+  assert.match(prompt, /For a mutating objective, the runtime intentionally restricts the root to task until delegation/);
+  assert.match(prompt, /Call task\(subagent_type="codex_executor"\) as your first operational tool call, exactly once\./);
+  assert.match(prompt, /The delegated Codex executor performs shell checks and tests through openai_run_codex/);
+  assert.match(prompt, /if the native task tool itself is genuinely absent, report that exact tool absence/);
 });
 
 test("Mutating roots preserve explicit read-only discovery workers without allowing delegated edits", () => {

@@ -95,11 +95,15 @@ const KNOWN_READ_FILES = new Set([
 ]);
 
 function safeGitCommand(command) {
-  return /^(?:git (?:status(?: --short)?|diff(?: (?:--check|--stat))?|rev-parse [^\s]+|branch --show-current|log(?: [^\n]*)?)|test --?[^;&|]+|command -v [^;&|]+|printf [^;&|]+)$/i.test(command)
-    && !/[;&|<>`$()]/.test(command);
+  if (typeof command !== "string" || command.length > 500) return false;
+  const normalized = command.trim().replace(/^\$/, "").trim();
+  const commands = normalized.split(/\s+&&\s+/);
+  if (!commands.length || commands.some((part) => !part || /[;&|<>`$()]/.test(part))) return false;
+  return commands.every((part) => /^(?:pwd|git (?:status(?: --short)?|diff(?: (?:--check|--stat))?|rev-parse (?:--show-toplevel|HEAD)|branch --show-current|log(?: -[0-9]+)?)|test --?[^\s]+|command -v [^\s]+|printf [^\n]+)$/i.test(part));
 }
 
 function mutatesRepository(command) {
+  if (safeGitCommand(command)) return false;
   return /\b(?:git\s+(?:add|commit|checkout|reset|restore|clean|push)|rm|mv|cp|sed\s+-i|perl\s+-pi|patch)\b/i.test(command)
     || /[;&|<>`$()]/.test(command);
 }

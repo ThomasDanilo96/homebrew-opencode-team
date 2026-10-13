@@ -139,10 +139,16 @@ assert(daily.plugin.length === 4 && daily.plugin.every(path.isAbsolute), "OPENAI
 assert(daily.plugin[1].endsWith("/teams/openai/config/opencode/openai-team-tools.js"), "OPENAI DAILY shared tools path invalid");
 assert(!daily.plugin.some((plugin) => plugin.endsWith("/teams/best/best-router-plugin.js")), "OPENAI DAILY must not load the BEST route plugin");
 assert(daily.agent.openai_orchestrator.description.includes("regardless of the launch directory"), "OPENAI DAILY orchestrator must accept repositories outside cwd");
+const serenaMutationPatterns = ["serena_replace_*", "serena_insert_*", "serena_rename_*", "serena_delete_*", "serena_write_*", "serena_safe_delete_*", "serena_edit_*"];
+const dailyOrchestrator = daily.agent.openai_orchestrator;
+assert(["task", "bash", "read", "glob", "grep"].every((tool) => dailyOrchestrator.tools?.[tool] === true), "OPENAI DAILY orchestrator must expose delegation, shell and repository inspection tools");
+assert(dailyOrchestrator.tools?.["serena_*"] === true && dailyOrchestrator.permission?.["serena_*"] === "allow", "OPENAI DAILY orchestrator must expose Serena tools");
+assert(serenaMutationPatterns.every((pattern) => dailyOrchestrator.permission?.[pattern] === "deny"), "OPENAI DAILY orchestrator Serena mutation tools must remain denied");
+assert(dailyOrchestrator.permission?.bash === "allow", "OPENAI DAILY orchestrator shell permission missing");
+assert(dailyOrchestrator.prompt_append.includes("runtime intentionally restricts the root to task until delegation") && dailyOrchestrator.prompt_append.includes("do not probe lsp_status") && dailyOrchestrator.prompt_append.includes('Call task(subagent_type="codex_executor") as your first operational tool call'), "OPENAI DAILY orchestrator must delegate mutation before interpreting the shell/Serena tool lock as a blocker");
 assert(!daily.agent.openai_orchestrator.prompt_append.includes("should be redirected to BEST") && daily.agent.openai_orchestrator.prompt_append.includes("Never redirect or hand off a Daily task to BEST"), "OPENAI DAILY orchestrator must not redirect tasks to BEST");
 assert(daily.agent.openai_explore.prompt_append.includes("serena_activate_project"), "OPENAI DAILY explorer must activate the requested repository through Serena");
 
-const serenaMutationPatterns = ["serena_replace_*", "serena_insert_*", "serena_rename_*", "serena_delete_*", "serena_write_*", "serena_safe_delete_*", "serena_edit_*"];
 const serenaReadTools = ["serena_get_symbols_overview", "serena_find_symbol", "serena_find_declaration", "serena_find_implementations", "serena_find_referencing_symbols", "serena_get_diagnostics_for_file", "serena_search_for_pattern", "serena_read_memory", "serena_get_current_config", "serena_activate_project"];
 for (const team of ["openai", "daily"]) {
   const config = read(team);
