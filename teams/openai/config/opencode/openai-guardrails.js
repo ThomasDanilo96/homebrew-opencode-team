@@ -70,6 +70,7 @@ const negatedCategoryAction = (request, category) => category === "destructive" 
 export const explicitlyConfirms = (request, category) => Boolean(category && CATEGORIES[category] && !/\b(?:continue|go ahead|proceed)\b/i.test(String(request || "")) && !negatedCategoryAction(request, category) && /(?:\b(?:authorize|authorise|confirm|explicitly|approved?|consent|yes|conferma|confermato|approva|autorizza)\b|确认|同意|批准)/iu.test(String(request || "")) && CATEGORIES[category].test(String(request || "")));
 const DAILY_SHELL_TOOLS = new Set(["bash", "interactive_bash", "shell", "command"]);
 const SAFE_SSH_PROBE = /^\s*(?:command\s+-v\s+ssh|ssh\s+-V|ssh\s+-G\s+[A-Za-z0-9._-]+)\s*$/i;
+const DAILY_ROOT_PREFLIGHT_COMMAND = /^(?:pwd|git status(?: --short)?|git rev-parse (?:--show-toplevel|HEAD)|command -v (?:bash|git|python3?))$/i;
 const shellStages = (operation) => {
   const stages = [];
   let stage = "";
@@ -92,6 +93,14 @@ const shellStages = (operation) => {
   stages.push(stage);
   return stages;
 };
+
+const isDailyRootPreflight = (operation) => {
+  if (typeof operation !== "string" || operation.length > 500) return false;
+  const normalized = operation.trim().replace(/^\$/, "").trim();
+  if (!normalized || /[;|<>`$()\n]/.test(normalized)) return false;
+  const stages = normalized.split(/\s+&&\s+/);
+  return stages.length > 0 && stages.every((stage) => DAILY_ROOT_PREFLIGHT_COMMAND.test(stage.trim()));
+};
 const DAILY_SHELL_MUTATION = /^(?:(["'])(patch|apply_patch)\1|(patch|apply_patch))(?=\s|$|<)/i;
 const DAILY_GIT_REPOSITORY_MUTATION = /^git\s+(?:add|commit|checkout|switch|reset|restore|clean|merge|rebase|cherry-pick|revert|rm|mv|apply|am)\b/i;
 const hasDailyShellMutation = (operation) => shellStages(operation).some((stage) => DAILY_SHELL_MUTATION.test(stage.trim()));
@@ -101,6 +110,7 @@ export const allowsDailyOrchestratorShell = (tool, command, authoritativeObjecti
   const objective = String(authoritativeObjective || "");
   const operation = String(command || "");
   if (hasDailyShellMutation(operation) || hasDailyGitRepositoryMutation(operation)) return false;
+  if (analyzeObjective(objective).classification === "MUTATING") return isDailyRootPreflight(operation);
   const category = confirmationCategory(operation);
   if (category === "vps_ssh" && SAFE_SSH_PROBE.test(operation)) return true;
   if (category === "vps_ssh" && !CATEGORIES.vps_ssh.test(objective)) return false;

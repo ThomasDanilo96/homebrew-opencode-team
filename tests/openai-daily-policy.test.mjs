@@ -27,6 +27,30 @@ test("Daily shell policy is bounded by the genuine objective", () => {
   assert.equal(allowsDailyOrchestratorShell("bash", "printf ok", "Inspect", {}), false);
 });
 
+test("Mutating Daily roots may run only bounded shell preflight before delegation", () => {
+  const env = { OPENAI_DAILY_PROFILE: "1" };
+  const objective = "Fix crm-module-demo and add a focused test.";
+  for (const command of [
+    "pwd",
+    "command -v bash",
+    "git rev-parse --show-toplevel",
+    "git rev-parse HEAD",
+    "pwd && git rev-parse --show-toplevel && git rev-parse HEAD",
+    "$pwd && git rev-parse --show-toplevel && git rev-parse HEAD",
+  ]) {
+    assert.equal(allowsDailyOrchestratorShell("bash", command, objective, env), true, command);
+  }
+  for (const command of [
+    "git clone source clone",
+    "git add .",
+    "pwd; git add .",
+    "pwd && git rev-parse HEAD && touch file",
+    "git status | cat",
+  ]) {
+    assert.equal(allowsDailyOrchestratorShell("bash", command, objective, env), false, command);
+  }
+});
+
 
 test("Daily commit requests are mutating and route through Codex without granting root Git mutation", () => {
   const objectives = [
@@ -61,8 +85,8 @@ test("Daily commit requests are mutating and route through Codex without grantin
     });
 
     assert.equal(tools.task, true, objective);
+    assert.equal(tools.bash, true, objective);
     assert.equal(tools.read, false, objective);
-    assert.equal(tools.bash, false, objective);
     assert.equal(tools.interactive_bash, false, objective);
     assert.equal(tools.edit, false, objective);
     assert.equal(tools.write, false, objective);
@@ -295,11 +319,13 @@ test("Daily mutating root delegates to Codex before repository inspection", asyn
   );
 
   const config = JSON.parse(template);
-  const prompt = config.agent.openai_orchestrator.prompt_append;
-  assert.match(prompt, /For a mutating objective, the runtime intentionally restricts the root to task until delegation/);
-  assert.match(prompt, /Call task\(subagent_type="codex_executor"\) as your first operational tool call, exactly once\./);
-  assert.match(prompt, /The delegated Codex executor performs shell checks and tests through openai_run_codex/);
-  assert.match(prompt, /if the native task tool itself is genuinely absent, report that exact tool absence/);
+  const orchestrator = config.agent.openai_orchestrator;
+  const prompt = orchestrator.prompt_append;
+  assert.equal(orchestrator.tools.bash, true);
+  assert.match(prompt, /user explicitly requires a shell-availability preflight before implementation/);
+  assert.match(prompt, /the runtime permits these checks, including &&-joined combinations/);
+  assert.match(prompt, /After the preflight, call task\(subagent_type="codex_executor"\) exactly once/);
+  assert.match(prompt, /For other mutating objectives, call task\(subagent_type="codex_executor"\) as the first operational tool/);
 });
 
 test("Mutating roots preserve explicit read-only discovery workers without allowing delegated edits", () => {
@@ -318,7 +344,7 @@ test("Mutating roots preserve explicit read-only discovery workers without allow
   }), { classification: "MUTATING", agent: "codex_executor" });
 });
 
-test("Daily root mutation tool policy allows only task and denies inspection, mutation, and Serena tools", () => {
+test("Daily mutating root exposes task and guarded bash preflight while denying other tools", () => {
   const tools = {
     task: false,
     openai_run_codex: true,
@@ -344,7 +370,7 @@ test("Daily root mutation tool policy allows only task and denies inspection, mu
   for (const name of Object.keys(tools)) {
     assert.equal(
       restricted[name],
-      name === "task",
+      name === "task" || name === "bash",
       `${name} must match the DAILY mutating-root policy`,
     );
   }
@@ -374,12 +400,12 @@ test("Daily root mutation tool policy allows only task and denies inspection, mu
   });
 
   assert.equal(emptyCatalog.task, true);
+  assert.equal(emptyCatalog.bash, true);
 
   for (const name of [
     "read",
     "glob",
     "grep",
-    "bash",
     "interactive_bash",
     "apply_patch",
     "todowrite",
@@ -415,7 +441,7 @@ test("Daily root mutation tool policy allows only task and denies inspection, mu
   assert.equal(sparseCatalog.task, true);
   assert.equal(sparseCatalog.strange_new_tool, false);
   assert.equal(sparseCatalog.read, false);
-  assert.equal(sparseCatalog.bash, false);
+  assert.equal(sparseCatalog.bash, true);
   assert.equal(sparseCatalog.serena_initial_instructions, false);
 
   const withoutTask = { read: true, edit: true, webfetch: true };
@@ -428,10 +454,10 @@ test("Daily root mutation tool policy allows only task and denies inspection, mu
   });
 
   assert.equal(withoutTaskRestricted.task, true);
+  assert.equal(withoutTaskRestricted.bash, true);
   assert.equal(withoutTaskRestricted.read, false);
   assert.equal(withoutTaskRestricted.edit, false);
   assert.equal(withoutTaskRestricted.webfetch, false);
-  assert.equal(withoutTaskRestricted.bash, false);
   assert.equal(withoutTaskRestricted.serena_initial_instructions, false);
 });
 
@@ -495,12 +521,12 @@ test("Daily chat.message hook applies fail-closed tools to a mutating root with 
     );
 
     assert.equal(output.message.tools.task, true);
+    assert.equal(output.message.tools.bash, true);
 
     for (const name of [
       "read",
       "glob",
       "grep",
-      "bash",
       "interactive_bash",
       "apply_patch",
       "todowrite",
@@ -532,9 +558,10 @@ test("Daily chat.message hook applies fail-closed tools to a mutating root with 
 });
 
 test("Daily root tool policy routes read-only roots through an OpenAI explorer child", () => {
-  const tools = { task: false, read: true, edit: true, serena_find_symbol: true };
+  const tools = { task: false, read: true, bash: true, edit: true, serena_find_symbol: true };
   const restricted = dailyRootMutationToolPolicy({ daily: true, agent: "openai_orchestrator", root: true, objective: "Inspect calculator.js", tools });
   assert.equal(restricted.task, true);
+  assert.equal(restricted.bash, false);
   assert.equal(restricted.read, false);
   assert.equal(restricted.edit, false);
   assert.equal(restricted.serena_find_symbol, false);
@@ -563,7 +590,8 @@ test("Real Italian implementation objectives close the root surface before Codex
       tools: { task: true, read: true, glob: true, grep: true, bash: true, edit: true },
     });
     assert.equal(tools.task, true, objective);
-    for (const name of ["read", "glob", "grep", "bash", "edit"]) assert.equal(tools[name], false, `${name}: ${objective}`);
+    assert.equal(tools.bash, true, objective);
+    for (const name of ["read", "glob", "grep", "edit"]) assert.equal(tools[name], false, `${name}: ${objective}`);
   }
 
   const readOnly = "Analizza come vengono collegati oggi clienti, campagne e Google Ads e spiegami il flusso senza modificare nulla.";
@@ -797,7 +825,7 @@ test("Routing ignores explicitly negated mutations without hiding genuine mutati
 });
 
 
-test("Natural Italian editing requests are classified as mutating and close the Daily root tool surface", () => {
+test("Natural Italian editing requests expose only delegation and guarded shell preflight", () => {
   const objectives = [
     "Applica tutte le correzioni linguistiche individuate nei template.",
     "Apporta tutte le correzioni linguistiche individuate.",
@@ -832,7 +860,7 @@ test("Natural Italian editing requests are classified as mutating and close the 
 
     assert.equal(restricted.task, true, objective);
     assert.equal(restricted.read, false, objective);
-    assert.equal(restricted.bash, false, objective);
+    assert.equal(restricted.bash, true, objective);
     assert.equal(restricted.apply_patch, false, objective);
     assert.equal(restricted.edit, false, objective);
     assert.equal(restricted.write, false, objective);

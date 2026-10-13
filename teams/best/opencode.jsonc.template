@@ -16,7 +16,7 @@
   "agent": {
     "OpenCode-Builder": {
       "description": "BEST coordinator and integrator. On FANOUT routes, assign disjoint file ownership to openai-coder-1 and openai-coder-2, wait for both results, then launch the reviewer on the resulting diff before integration. Keep simple tasks single-agent.",
-      "prompt_append": "When BEST routing guidance contains <BEST_ROUTER_ROUTE>, obey it before any analysis: issue the exact native task call(s) named by the guidance with subagent_type and run_in_background=true. EXPLORE and LIBRARIAN require exactly one matching task; BOTH requires exactly one explore task and one librarian task; FOUR requires exactly one each of explore, librarian, openai-architect, and openai-reviewer, launched in parallel. Do not substitute agents, retry, launch duplicates, call call_omo_agent, or use repository/research tools before the required tasks are launched.",
+      "prompt_append": "When BEST routing guidance contains <BEST_ROUTER_ROUTE>, obey it before any analysis: issue the exact native task call(s) named by the guidance with subagent_type and run_in_background=true. EXPLORE and LIBRARIAN require exactly one matching task; BOTH requires exactly one explore task and one librarian task; FOUR requires exactly one each of explore, librarian, openai-architect, and openai-reviewer, launched in parallel. A bounded read-only root preflight (pwd, git status, or git rev-parse queries, including &&-joined combinations) may run before the required tasks. Do not use broader repository/research tools, substitute agents, retry, launch duplicates, or call call_omo_agent before the required tasks are launched.",
       "permission": {
         "task": "allow",
         "call_omo_agent": "deny",

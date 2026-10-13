@@ -341,11 +341,12 @@ export const dailyRootMutationToolPolicy = ({ daily = false, agent = "", root = 
     ...DAILY_ROOT_MUTATION_DENIED_TOOLS,
     "task",
   ]);
+  const mutationObjective = analyzeObjective(objective).classification === "MUTATING";
 
   return Object.fromEntries(
     [...names].map((name) => {
       const normalized = String(name).toLowerCase();
-      return [name, normalized === "task"];
+      return [name, normalized === "task" || (normalized === "bash" && mutationObjective)];
     }),
   );
 };

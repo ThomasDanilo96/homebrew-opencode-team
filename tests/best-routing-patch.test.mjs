@@ -442,6 +442,8 @@ test("BEST source config enables the primary Builder through OMO and denies lega
   const opencodeTemplate = readFileSync(join(root, "teams/best/opencode.jsonc.template"), "utf8");
   assert.match(opencodeTemplate, /"tools": \{\s*"call_omo_agent": false\s*\}/);
   assert.match(opencodeTemplate, /"OpenCode-Builder": \{[\s\S]*"tools": \{[\s\S]*"call_omo_agent": false/);
+  assert.match(opencodeTemplate, /bounded read-only root preflight/);
+  assert.match(opencodeTemplate, /&&-joined combinations\) may run before the required tasks/);
 });
 
 test("BEST OMO 5 profile enables persistent memory and retains BEST-specific OpenCode settings", () => {
