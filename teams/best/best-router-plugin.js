@@ -282,6 +282,7 @@ export default async function bestRouterPlugin(input) {
           request_id: requestID,
           pending_agents: current.pending_agents.filter((pending) => !launched_agents.includes(pending)),
           launched_agents,
+          gate_open: required_agents.every((required) => launched_agents.includes(required)),
         });
       } else {
         ROUTE_STATE.set(sessionID, {
@@ -290,6 +291,7 @@ export default async function bestRouterPlugin(input) {
           required_agents,
           pending_agents: [],
           launched_agents: required_agents.filter((required) => completedAgents.includes(required)),
+          gate_open: required_agents.every((required) => completedAgents.includes(required)),
         });
       }
       if (legacyCompletion) LEGACY_COMPLETED_ROUTE_STATE.delete(sessionID);
@@ -308,6 +310,12 @@ export default async function bestRouterPlugin(input) {
       if (SERENA_BOOTSTRAP_TOOLS.has(tool)) return;
       const state = ROUTE_STATE.get(toolInput.sessionID);
       if (!state) return;
+      if (state.gate_open) {
+        if (tool === "task") {
+          throw new Error(`BEST ROUTING GATE: all required agents for route ${state.route} were launched successfully; continue the root task without duplicate delegation.`);
+        }
+        return;
+      }
       if (tool === "task") {
         const subagent = typeof output.args?.subagent_type === "string" ? output.args.subagent_type : "";
         let background = output.args?.run_in_background;
@@ -385,6 +393,7 @@ export default async function bestRouterPlugin(input) {
           launched_agents,
           request_id: state.request_id,
         });
+        state.gate_open = true;
         log({ event: "route_gate_open", session_id: toolInput.sessionID, request_id: state.request_id, route: state.route, required_agents: state.required_agents, pending_agents: state.pending_agents, launched_agents: state.launched_agents, call_id: toolInput.callID, gate_action: "open" });
       }
     }

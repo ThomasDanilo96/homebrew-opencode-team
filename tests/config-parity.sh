@@ -139,6 +139,7 @@ assert(daily.plugin.length === 4 && daily.plugin.every(path.isAbsolute), "OPENAI
 assert(daily.plugin[1].endsWith("/teams/openai/config/opencode/openai-team-tools.js"), "OPENAI DAILY shared tools path invalid");
 assert(!daily.plugin.some((plugin) => plugin.endsWith("/teams/best/best-router-plugin.js")), "OPENAI DAILY must not load the BEST route plugin");
 assert(daily.agent.openai_orchestrator.description.includes("regardless of the launch directory"), "OPENAI DAILY orchestrator must accept repositories outside cwd");
+assert(!daily.agent.openai_orchestrator.prompt_append.includes("should be redirected to BEST") && daily.agent.openai_orchestrator.prompt_append.includes("Never redirect or hand off a Daily task to BEST"), "OPENAI DAILY orchestrator must not redirect tasks to BEST");
 assert(daily.agent.openai_explore.prompt_append.includes("serena_activate_project"), "OPENAI DAILY explorer must activate the requested repository through Serena");
 
 const serenaMutationPatterns = ["serena_replace_*", "serena_insert_*", "serena_rename_*", "serena_delete_*", "serena_write_*", "serena_safe_delete_*", "serena_edit_*"];

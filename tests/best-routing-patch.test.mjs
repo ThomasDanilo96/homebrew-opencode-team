@@ -408,7 +408,12 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   await assert.rejects(() => fanout.before("edit", { filePath: "src/index.js" }), /BEST ROUTING GATE/);
   await fanout.before("task", { subagent_type: "openai-reviewer", run_in_background: true }, "fanout-openai-reviewer");
   await fanout.after("fanout-openai-reviewer");
+  await assert.rejects(
+    () => fanout.before("task", { subagent_type: "openai-reviewer", run_in_background: true }, "fanout-reviewer-duplicate"),
+    /all required agents for route FANOUT were launched successfully/,
+  );
   await fanout.before("edit", { filePath: "src/index.js" });
+  await fanout.before("bash", { command: "git add -- src/index.js" });
 
   writeFileSync(routeScript, 'printf "%s\\n" "DIRECT"\n');
   const continuedFanout = await routeSession("ses-fanout", "continua con la seconda slice", "ses-fanout-next");
