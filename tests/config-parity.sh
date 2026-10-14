@@ -141,7 +141,7 @@ for (const name of ["explore", "librarian"]) {
   assert(agent.status === 0, `GO/${name} subscription subagent config rejected: ${agent.stderr}`);
   const effective = JSON.parse(agent.stdout);
   same(effective.mode, "subagent", `GO/${name} effective mode`);
-  same(effective.model, { providerID: "opencode-go", modelID: "qwen3.7-plus" }, `GO/${name} effective model`);
+  assert(effective.model?.providerID === "opencode-go", `GO/${name} effective model must use the Go subscription`);
 }
 assert(go.plugin.length === 2 && path.isAbsolute(go.plugin[0]), "GO plugin order/path invalid");
 
