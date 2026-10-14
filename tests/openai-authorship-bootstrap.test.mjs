@@ -5,6 +5,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { bootstrapCodexPolicy, CODEX_BOOTSTRAP_REASONS, OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
+import { isReadOnlyShellSandboxedCommand } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { claimTask, transitionTask } from "../teams/openai/config/opencode/task-state.js";
 import { appendTaskPacketMarker } from "../teams/openai/config/opencode/correlation-marker.js";
 
@@ -30,29 +31,25 @@ test("authorship guard permits read-only diagnostics and MCP discovery tools", a
   }
 });
 
-test("authorship guard admits the allowlisted compound checkout baseline without Daily mode", async () => {
+test("authorship guard wraps orchestrator and explorer shell in a read-only sandbox without a command list", async (t) => {
+  if (process.platform !== "darwin") return t.skip("macOS sandbox-exec is required");
   const previousDaily = process.env.OPENAI_DAILY_PROFILE;
   const previousStateRoot = process.env.OPENAI_TEAM_STATE_ROOT;
   const stateRoot = await mkdtemp(join(tmpdir(), "openai-baseline-guard-"));
   delete process.env.OPENAI_DAILY_PROFILE;
   process.env.OPENAI_TEAM_STATE_ROOT = stateRoot;
   try {
-    const objective = "Run a read-only repository baseline and create evidence outside the checkout.";
-    const command = "date '+%Y-%m-%d %H:%M:%S %Z %z'; date +%s; git rev-parse --show-toplevel; git rev-parse HEAD; git branch --show-current; git status --porcelain=v1 --untracked-files=all; git diff --name-status; git diff --cached --name-status; git ls-files --others --exclude-standard; git worktree list; git log -1 --oneline";
-    const guard = await OpenAIAuthorshipGuard({ authoritativeObjective: objective });
-    await assert.doesNotReject(() => guard["tool.execute.before"](
-      { tool: "bash", agent: "openai_orchestrator", sessionID: "root" },
-      { args: { command } },
-    ));
-    const listingGuard = await OpenAIAuthorshipGuard({ authoritativeObjective: "Map all files and deploy paths in read-only mode." });
-    await assert.doesNotReject(() => listingGuard["tool.execute.before"](
-      { tool: "bash", agent: "openai_orchestrator", sessionID: "root" },
-      { args: { command: "ls -la" } },
-    ));
-    await assert.rejects(() => listingGuard["tool.execute.before"](
-      { tool: "bash", agent: "openai_orchestrator", sessionID: "root" },
-      { args: { command: "find . -exec touch file \\;" } },
-    ), /Repository mutations must be delegated/);
+    for (const [agent, sessionID, commands] of [
+      ["openai_orchestrator", "root", ["ls -la", "git log --oneline --all", "git show --stat HEAD", "git blame -- README.md"]],
+      ["openai_explore", "explorer", ["git log --oneline --all", "git show --stat HEAD", "git blame -- README.md"]],
+    ]) {
+      const guard = await OpenAIAuthorshipGuard({ authoritativeObjective: "Inspect repository history and files." });
+      for (const command of commands) {
+        const output = { args: { command } };
+        await guard["tool.execute.before"]({ tool: "bash", agent, sessionID }, output);
+        assert.equal(isReadOnlyShellSandboxedCommand(output.args.command), true, `${agent}: ${command}`);
+      }
+    }
   } finally {
     if (previousDaily === undefined) delete process.env.OPENAI_DAILY_PROFILE;
     else process.env.OPENAI_DAILY_PROFILE = previousDaily;

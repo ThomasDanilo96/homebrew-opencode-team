@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { DAILY_COMPLEXITY_TO_GUARDRAIL, dailyFanout, dailyInvestigationLimits } from "../../../daily/daily-policy.mjs";
@@ -68,9 +69,17 @@ export const recoverRootRequestState = (state = createGuardrailState(), objectiv
 export const confirmationCategory = (operation) => Object.entries(CATEGORIES).find(([, pattern]) => pattern.test(String(operation || "")))?.[0] || null;
 const negatedCategoryAction = (request, category) => category === "destructive" && /(?:(?:\b(?:do\s+not|don['’]t|must\s+not|never|no)\b|不(?:要|得)?|禁止|别|\bnon\b|\bno\b)[^\n]{0,40}(?:\b(?:destruct(?:ive|ion)|delet(?:e|ing|ed|ion)|remov(?:e|ing|ed)|drop(?:ping|ped)?|reset(?:ting|ted)?|rm)\b|删除|移除|丢弃|重置|消除|\b(?:elimina|eliminare|rimuovi|rimuovere|cancella|cancellare|reimposta|eliminar|elimine|rimuovere|borrar|borra)\b))/iu.test(String(request || ""));
 export const explicitlyConfirms = (request, category) => Boolean(category && CATEGORIES[category] && !/\b(?:continue|go ahead|proceed)\b/i.test(String(request || "")) && !negatedCategoryAction(request, category) && /(?:\b(?:authorize|authorise|confirm|explicitly|approved?|consent|yes|conferma|confermato|approva|autorizza)\b|确认|同意|批准)/iu.test(String(request || "")) && CATEGORIES[category].test(String(request || "")));
-const DAILY_SHELL_TOOLS = new Set(["bash", "interactive_bash", "shell", "command"]);
-const ROOT_PREFLIGHT_COMMAND = /^(?:pwd|date (?:\+%s|['"]\+%Y-%m-%d %H:%M:%S %Z %z['"])|git status(?: --short| --porcelain=v1 --untracked-files=all)?|git rev-parse (?:--show-toplevel|HEAD)|git branch --show-current|git diff(?: --name-status| --cached --name-status)?|git ls-files --others --exclude-standard|git worktree list|git log -1 --oneline|command -v (?:bash|git|python3?))$/i;
-const ROOT_READ_ONLY_SHELL_COMMAND = /^(?:pwd|date(?:\s+[^;&|<>`$()]*)?|ls(?:\s+[^;&|<>`$()]*)?|find(?:\s+[^;&|<>`$()]*)?|(?:rg|grep|cat|head|tail|wc|file|stat|du|tree|which|test)\s+[^;&|<>`$()]+|git\s+(?:(?:status|diff|show|log|rev-parse|ls-files|ls-tree|grep)\b[^;&|<>`$()]*|branch(?:\s+(?:--show-current|--list\b|-l\b)[^;&|<>`$()]*)?|worktree\s+list\b[^;&|<>`$()]*|remote\s+-v\b[^;&|<>`$()]*|tag(?:\s+(?:--list|-l))?|config\s+--get(?:-all)?\b[^;&|<>`$()]*))$/i;
+const READ_ONLY_SHELL_TOOLS = new Set(["bash"]);
+const READ_ONLY_SHELL_SANDBOX_PROFILE = '(version 1) (allow default) (deny file-write*) (allow file-write* (literal "/dev/null")) (deny network-outbound)';
+const shellQuote = (value) => `'${String(value).replace(/'/g, `'\\''`)}'`;
+const shellSandboxPrefix = () => `/usr/bin/sandbox-exec -p ${shellQuote(READ_ONLY_SHELL_SANDBOX_PROFILE)} /usr/bin/env GIT_OPTIONAL_LOCKS=0 /bin/bash -c `;
+export const isReadOnlyShellSandboxedCommand = (command) => typeof command === "string" && command.startsWith(shellSandboxPrefix());
+export const wrapReadOnlyShellCommand = (tool, command, platform = process.platform) => {
+  if (!READ_ONLY_SHELL_TOOLS.has(String(tool || "").toLowerCase()) || typeof command !== "string" || !command.trim()) return null;
+  if (isReadOnlyShellSandboxedCommand(command)) return command;
+  if (platform !== "darwin" || !existsSync("/usr/bin/sandbox-exec")) return null;
+  return `${shellSandboxPrefix()}${shellQuote(command)}`;
+};
 const ROOT_READ_ONLY_TOOLS = new Set([
   "read", "glob", "grep", "rg", "list", "webfetch", "websearch", "question", "skill_mcp", "docs", "documentation",
   "todowrite", "openai_remote_read", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource",
@@ -90,59 +99,6 @@ export const isGuardrailReadOnlyTool = (tool) => {
     || name.startsWith("context7_")
     || name.startsWith("websearch_")
     || (name.startsWith("serena_") && !SERENA_MUTATION_TOOL.test(name));
-};
-const shellStages = (operation) => {
-  const stages = [];
-  let stage = "";
-  let quote = null;
-  let escaped = false;
-  for (const character of operation) {
-    if (escaped) { stage += character; escaped = false; continue; }
-    if (character === "\\" && quote !== "'") { stage += character; escaped = true; continue; }
-    if (quote) {
-      stage += character;
-      if (character === quote) quote = null;
-      continue;
-    }
-    if (character === "'" || character === '"') { stage += character; quote = character; continue; }
-    if (character === ";" || character === "|" || character === "&" || character === "\n") {
-      stages.push(stage);
-      stage = "";
-    } else stage += character;
-  }
-  stages.push(stage);
-  return stages;
-};
-
-const isDailyRootPreflight = (operation) => {
-  if (typeof operation !== "string" || operation.length > 1500) return false;
-  const normalized = operation.trim().replace(/^\$/, "").trim();
-  if (!normalized || /[|<>`$()\n]/.test(normalized)) return false;
-  const stages = normalized.split(/\s*(?:;|&&)\s*/);
-  return stages.length > 0 && stages.length <= 16 && stages.every((stage) => ROOT_PREFLIGHT_COMMAND.test(stage.trim()));
-};
-const isRootReadOnlyShellOperation = (operation) => {
-  if (typeof operation !== "string" || operation.length > 20000) return false;
-  const normalized = operation.trim().replace(/^\$/, "").trim();
-  if (!normalized || /[|<>`$()\n\r]/.test(normalized)) return false;
-  const stages = normalized.split(/\s*(?:;|&&)\s*/);
-  return stages.length > 0 && stages.every((stage) => {
-    const command = stage.trim();
-    return !/[;&|]/.test(command)
-      && !/(?:^|\s)(?:-exec(?:dir)?|-delete|--output|--pre|--upload-pack|--receive-pack)(?:\s|$)/i.test(command)
-      && !/\bsed\s+-i\b/i.test(command)
-      && ROOT_READ_ONLY_SHELL_COMMAND.test(command);
-  });
-};
-const DAILY_SHELL_MUTATION = /^(?:(["'])(patch|apply_patch)\1|(patch|apply_patch))(?=\s|$|<)/i;
-const DAILY_GIT_REPOSITORY_MUTATION = /^git\s+(?:add|commit|checkout|switch|reset|restore|clean|merge|rebase|cherry-pick|revert|rm|mv|apply|am)\b/i;
-const hasDailyShellMutation = (operation) => shellStages(operation).some((stage) => DAILY_SHELL_MUTATION.test(stage.trim()));
-const hasDailyGitRepositoryMutation = (operation) => shellStages(operation).some((stage) => DAILY_GIT_REPOSITORY_MUTATION.test(stage.trim()));
-export const allowsOrchestratorReadOnlyShell = (tool, command) => {
-  if (!DAILY_SHELL_TOOLS.has(String(tool || "").toLowerCase())) return false;
-  const operation = String(command || "");
-  if (hasDailyShellMutation(operation) || hasDailyGitRepositoryMutation(operation)) return false;
-  return isDailyRootPreflight(operation) || isRootReadOnlyShellOperation(operation);
 };
 export const requiresExplicitConfirmation = (operation) => confirmationCategory(operation) !== null;
 export class GuardrailPolicyError extends Error { constructor(reason, details = {}) { super(`OPENAI_GUARDRAIL_${reason}: stop and report state; do not create todos or retry.`); this.name = "GuardrailPolicyError"; this.code = `OPENAI_GUARDRAIL_${reason}`; this.policy = { type: "policy_error", reason, stop: true, retry: false, ...details }; } }

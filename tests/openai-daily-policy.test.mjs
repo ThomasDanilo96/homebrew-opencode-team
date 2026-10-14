@@ -1,10 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { assertDailyProviderModel, dailyCost, dailyFanout, dailyModelIdentity, dailyInvestigationLimits, DAILY_AGENT_MODELS, DAILY_PRICING, shouldStopDaily } from "../teams/daily/daily-policy.mjs";
-import { admitDurableFanout, allowsOrchestratorReadOnlyShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, isStopText, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
+import { admitDurableFanout, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, isReadOnlyShellSandboxedCommand, isStopText, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision, wrapReadOnlyShellCommand } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
 import { analyzeObjective, objectiveRequestsLocalCommit, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
@@ -12,71 +14,36 @@ import { dailyRootToolPolicy, latestUserObjective, localCommitPostcondition, Ope
 import { CODEX_SUBSCRIPTION_MODELS, resolveCodexModels } from "../teams/openai/config/opencode/codex-models.js";
 import { postExecutionPolicy } from "../teams/openai/config/opencode/execution-policy.js";
 
-test("Both profiles permit broad read-only shell work and refuse write-capable shell commands", () => {
-  for (const env of [{}, { OPENAI_DAILY_PROFILE: "1" }]) {
-    for (const command of [
-      "pwd",
-      "ls -la",
-      "ls -la 'path with spaces'",
-      "find . -maxdepth 3 -type f",
-      "rg --files",
-      "grep -R TODO src",
-      "cat README.md",
-      "git status --short",
-      "git diff --stat",
-      "git rev-parse HEAD",
-      "git worktree list",
-      "pwd && git rev-parse --show-toplevel && git rev-parse HEAD",
-      "ls -la; git status --short; git log -1 --oneline",
-    ]) assert.equal(allowsOrchestratorReadOnlyShell("bash", command), true, command);
-    for (const command of [
-      "git add .",
-      "git commit -m fix",
-      "git push",
-      "git clone source candidate",
-      "rm -rf tmp",
-      "touch file",
-      "python3 -c 'open(\"file\", \"w\").write(\"x\")'",
-      "ls -la > listing.txt",
-      "find . -exec touch {} \\;",
-      "rg --pre cat pattern",
-      "git status | cat",
-    ]) assert.equal(allowsOrchestratorReadOnlyShell("bash", command), false, command);
-  }
-});
-
-test("Mutating Daily roots may run only bounded shell preflight before delegation", () => {
-  const env = { OPENAI_DAILY_PROFILE: "1" };
-  const objective = "Fix crm-module-demo and add a focused test.";
-  for (const command of [
-    "pwd",
-    "command -v bash",
-    "git rev-parse --show-toplevel",
-    "git rev-parse HEAD",
-    "pwd && git rev-parse --show-toplevel && git rev-parse HEAD",
-    "$pwd && git rev-parse --show-toplevel && git rev-parse HEAD",
-  ]) {
-    assert.equal(allowsOrchestratorReadOnlyShell("bash", command, objective, env), true, command);
-  }
-  for (const command of [
-    "git clone source clone",
+test("OpenAI root and Explore Bash is sandboxed instead of command-allowlisted", (t) => {
+  if (process.platform !== "darwin") return t.skip("macOS sandbox-exec is required");
+  const commands = [
+    "git log --oneline --all",
+    "git show --stat HEAD",
+    "git blame -- teams/openai/opencode.jsonc.template",
+    "find / -maxdepth 1 -type d",
+    "python3 -c 'open(\"blocked\", \"w\").write(\"x\")'",
     "git add .",
-    "pwd; git add .",
-    "pwd && git rev-parse HEAD && touch file",
-    "git status | cat",
-  ]) {
-    assert.equal(allowsOrchestratorReadOnlyShell("bash", command, objective, env), false, command);
+  ];
+  for (const command of commands) {
+    const sandboxed = wrapReadOnlyShellCommand("bash", command);
+    assert.ok(sandboxed?.startsWith("/usr/bin/sandbox-exec "), command);
+    assert.equal(isReadOnlyShellSandboxedCommand(sandboxed), true, command);
+    assert.equal(wrapReadOnlyShellCommand("bash", sandboxed), sandboxed, "sandbox wrapper must be idempotent");
   }
-});
 
-test("A compound read-only repository baseline is allowed in both OpenAI profiles", () => {
-  const baseline = "date '+%Y-%m-%d %H:%M:%S %Z %z'; date +%s; git rev-parse --show-toplevel; git rev-parse HEAD; git branch --show-current; git status --porcelain=v1 --untracked-files=all; git diff --name-status; git diff --cached --name-status; git ls-files --others --exclude-standard; git worktree list; git log -1 --oneline";
-  const objective = "Create evidence and a candidate in separate paths without changing the checkout.";
-  assert.equal(allowsOrchestratorReadOnlyShell("bash", baseline, objective, {}), true);
-  assert.equal(allowsOrchestratorReadOnlyShell("bash", baseline, objective, { OPENAI_DAILY_PROFILE: "1" }), true);
-  assert.equal(allowsOrchestratorReadOnlyShell("bash", `${baseline}; touch evidence.txt`, objective, {}), false);
-  assert.equal(allowsOrchestratorReadOnlyShell("bash", `${baseline} | cat`, objective, {}), false);
-  assert.equal(allowsOrchestratorReadOnlyShell("bash", "git clone source candidate", objective, {}), false);
+  const temp = mkdtempSync(join(tmpdir(), "openai-readonly-shell-"));
+  try {
+    const target = join(temp, "must-not-exist.txt");
+    const writeAttempt = wrapReadOnlyShellCommand("bash", `printf forbidden > '${target}'`);
+    const denied = spawnSync("/bin/bash", ["-c", writeAttempt], { cwd: process.cwd(), encoding: "utf8" });
+    assert.notEqual(denied.status, 0, denied.stdout);
+    assert.equal(existsSync(target), false, "read-only shell must not create files");
+    const historyRead = wrapReadOnlyShellCommand("bash", "git log --oneline -1 && git blame -L 1,1 -- README.md");
+    const allowed = spawnSync("/bin/bash", ["-c", historyRead], { cwd: process.cwd(), encoding: "utf8" });
+    assert.equal(allowed.status, 0, allowed.stderr);
+  } finally {
+    rmSync(temp, { recursive: true, force: true });
+  }
 });
 
 test("Daily root retains unrestricted read tools for both read-only and mutating objectives", () => {
@@ -99,8 +66,33 @@ test("Daily root retains unrestricted read tools for both read-only and mutating
     assert.equal(tools.grep, true, objective);
     assert.equal(tools.serena_find_symbol, true, objective);
     assert.equal(tools.edit, false, objective);
-    assert.equal(allowsOrchestratorReadOnlyShell("bash", "ls -la", objective), true, objective);
-    assert.equal(allowsOrchestratorReadOnlyShell("bash", "find . -type f", objective), true, objective);
+    assert.ok(wrapReadOnlyShellCommand("bash", "ls -la"), objective);
+    assert.ok(wrapReadOnlyShellCommand("bash", "find . -type f"), objective);
+  }
+});
+
+test("OpenAI team plugin wraps explorer Git history commands before generic shell scanning", async () => {
+  if (process.platform !== "darwin") return;
+  const previousRoot = process.env.OPENAI_TEAM_STATE_ROOT;
+  process.env.OPENAI_TEAM_STATE_ROOT = await mkdtemp(join(tmpdir(), "openai-read-shell-plugin-"));
+  try {
+    const plugin = await OpenAITeamTools({
+      client: {
+        session: {
+          get: async () => ({ data: { id: "explorer-session", parentID: null } }),
+          messages: async () => ({ data: [] }),
+        },
+      },
+    });
+    for (const command of ["git log --oneline --all", "git show --stat HEAD", "git blame -- README.md", "find / -maxdepth 1 -type d"]) {
+      const output = { args: { command } };
+      await plugin["tool.execute.before"]({ tool: "bash", agent: "openai_explore", sessionID: "explorer-session" }, output);
+      assert.equal(isReadOnlyShellSandboxedCommand(output.args.command), true, command);
+    }
+  } finally {
+    await rm(process.env.OPENAI_TEAM_STATE_ROOT, { recursive: true, force: true });
+    if (previousRoot === undefined) delete process.env.OPENAI_TEAM_STATE_ROOT;
+    else process.env.OPENAI_TEAM_STATE_ROOT = previousRoot;
   }
 });
 
@@ -150,59 +142,6 @@ test("Daily commit requests are mutating and route through Codex without grantin
     "READ_ONLY",
   );
 });
-
-test("Daily orchestrator shell never performs local Git repository mutations directly", () => {
-  const env = { OPENAI_DAILY_PROFILE: "1" };
-  const objective = "Fai un commit delle modifiche attuali senza fare push.";
-
-  for (const command of [
-    "git add .",
-    "git add templates/customer.html",
-    "git commit -m 'Fix copy'",
-    "git commit --amend --no-edit",
-    "git checkout other-branch",
-    "git switch other-branch",
-    "git reset HEAD file",
-    "git restore file",
-    "git clean -fd",
-    "git merge feature",
-    "git rebase main",
-    "git cherry-pick abc123",
-    "git revert abc123",
-    "git rm file",
-    "git mv old new",
-    "git apply fix.patch",
-    "git am patch.mbox",
-    "git status && git commit -m 'Fix copy'",
-  ]) {
-    assert.equal(
-      allowsOrchestratorReadOnlyShell("bash", command, objective, env),
-      false,
-      command,
-    );
-  }
-
-  for (const command of [
-    "git status",
-    "git status --short",
-    "git diff",
-    "git diff --check",
-    "git log -5",
-    "git branch --show-current",
-  ]) {
-    assert.equal(
-      allowsOrchestratorReadOnlyShell(
-        "bash",
-        command,
-        "Inspect the repository",
-        env,
-      ),
-      true,
-      command,
-    );
-  }
-});
-
 
 test("Daily local commit intent respects explicit negation", () => {
   for (const objective of [

@@ -21,7 +21,7 @@ import { TaskStateError, claimTask, completeTask, readTask, transitionTask } fro
 import { workspaceFingerprint } from "./read-cache.js";
 import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
 import { gateTerminalPacketPatch, lifecycleCleanupOptions } from "./gate-state.js";
-import { GuardrailPolicyError, admitDelegation, admitDurableFanout, admitToolCall, allowsOrchestratorReadOnlyShell, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, durableFanoutScope, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, isGuardrailReadOnlyTool, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision, writeStopLatch } from "./openai-guardrails.js";
+import { GuardrailPolicyError, admitDelegation, admitDurableFanout, admitToolCall, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, durableFanoutScope, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, isGuardrailReadOnlyTool, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision, wrapReadOnlyShellCommand, writeStopLatch } from "./openai-guardrails.js";
 import { guardToolExecution } from "../../../../shared/tool-output-guard.js";
 import { assertDailyProviderModel } from "../../../daily/daily-policy.mjs";
 import { appendTaskPacketMarker, extractTaskPacketMarker, objectiveBeforeMarker } from "./correlation-marker.js";
@@ -2878,8 +2878,20 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
   },
   "tool.execute.before": async (input, output) => {
     try {
-      guardToolExecution({ team: "openai", input, output });
       const toolName = String(input.tool || "").toLowerCase();
+      let sessionAgent = input.agent || "";
+      if (toolName === "bash" && !sessionAgent && input.sessionID) sessionAgent = await resolveSessionAgent(input.sessionID);
+      const directReadShellAgent = ["openai_orchestrator", "openai_explore"].includes(sessionAgent);
+      const rawShellCommand = output.args?.command ?? output.args?.cmd ?? input.args?.command ?? input.args?.cmd;
+      let shellWasSandboxed = false;
+      if (toolName === "bash" && directReadShellAgent) {
+        const command = wrapReadOnlyShellCommand(toolName, rawShellCommand);
+        if (!command) throw new Error("Read-only shell sandbox is unavailable in this runtime; use the direct read tools or delegate to openai_explore.");
+        output.args = output.args || {};
+        output.args.command = command;
+        shellWasSandboxed = true;
+      }
+      if (!shellWasSandboxed) guardToolExecution({ team: "openai", input, output });
      let guard = await guardrailFor(input.sessionID);
       if (toolName === "task" && guard && (!guard.authoritativeObjective || /OMO_INTERNAL_INITIATOR/.test(String(guard.authoritativeObjective)))) {
        const initialObjective = await resolveInitialObjective(input.sessionID);
@@ -2896,7 +2908,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
      guard = beginRequestCycle(guard, String(output.args?.prompt || output.args?.description || ""), Date.now(), process.env, { preserveVerificationTerminal: true, preserveCodexFailureTerminal: true, preserveVerificationGate: true });
         guardrails.set(input.sessionID, guard);
      }
-          let sessionAgent = input.agent || await resolveSessionAgent(input.sessionID);
+           sessionAgent = sessionAgent || await resolveSessionAgent(input.sessionID);
           let rootParentForGate = masterParent(input.sessionID);
          if (sessionAgent === "tester" && rootParentForGate === input.sessionID) {
            const initialObjective = await resolveInitialObjective(input.sessionID);
@@ -3008,7 +3020,13 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     }
     if (isMutationCapableTool(toolName)) {
        const shellCommand = output.args?.command ?? output.args?.cmd ?? input.args?.command ?? input.args?.cmd;
-       if (sessionAgent === "openai_orchestrator" && allowsOrchestratorReadOnlyShell(toolName, shellCommand)) return;
+       if (["openai_orchestrator", "openai_explore"].includes(sessionAgent)) {
+         const sandboxedCommand = wrapReadOnlyShellCommand(toolName, shellCommand);
+         if (!sandboxedCommand) throw new Error("Read-only shell sandbox is unavailable in this runtime; use the direct read tools or delegate to openai_explore.");
+         output.args = output.args || {};
+         output.args.command = sandboxedCommand;
+         return;
+       }
        if (sessionAgent === "openai_orchestrator" && REPOSITORY_MUTATING_TOOLS.has(toolName)) {
         throw new Error("openai_orchestrator repository mutation is denied; delegate implementation to codex_executor");
       }

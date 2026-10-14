@@ -1,7 +1,7 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { CODEX_REQUIRED, CODEX_SUCCESS, TERRA_FALLBACK, ensurePolicy, readPolicy } from "./codex-authority.js";
-import { allowsOrchestratorReadOnlyShell, isGuardrailReadOnlyTool } from "./openai-guardrails.js";
+import { isGuardrailReadOnlyTool, wrapReadOnlyShellCommand } from "./openai-guardrails.js";
 import { isAllowlistedVerificationCommand, verificationCommandCategory } from "./execution-policy.js";
 import { createHash } from "node:crypto";
 import { extractTaskPacketMarker, objectiveBeforeMarker } from "./correlation-marker.js";
@@ -383,9 +383,14 @@ export const OpenAIAuthorshipGuard = async (pluginInput = {}) => ({
     }
 
     const command = output.args?.command ?? output.args?.cmd ?? input.args?.command ?? input.args?.cmd;
-    if (agent === "openai_orchestrator" && allowsOrchestratorReadOnlyShell(toolName, command)) {
-      await record("daily_orchestrator_shell_allowed", input, agent, "NONE", "ALLOW");
-      return;
+    if (["openai_orchestrator", "openai_explore"].includes(agent)) {
+      const sandboxedCommand = wrapReadOnlyShellCommand(toolName, command);
+      if (sandboxedCommand) {
+        output.args = output.args || {};
+        output.args.command = sandboxedCommand;
+        await record("readonly_sandbox_shell_allowed", input, agent, "NONE", "ALLOW");
+        return;
+      }
     }
 
     if (unknownTool || (agent === "codex_executor" && authorityState === TERRA_FALLBACK && !FALLBACK_MUTATION_TOOLS.has(toolName))) {
