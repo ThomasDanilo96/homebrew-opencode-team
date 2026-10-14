@@ -71,6 +71,8 @@ export const explicitlyConfirms = (request, category) => Boolean(category && CAT
 const DAILY_SHELL_TOOLS = new Set(["bash", "interactive_bash", "shell", "command"]);
 const SAFE_SSH_PROBE = /^\s*(?:command\s+-v\s+ssh|ssh\s+-V|ssh\s+-G\s+[A-Za-z0-9._-]+)\s*$/i;
 const DAILY_ROOT_PREFLIGHT_REQUEST = /\b(?:baseline|preflight|checkout inventory|git status|git rev-parse|worktree list)\b/i;
+const DAILY_ROOT_LISTING_REQUEST = /(?:\b(?:map\w*|inventory|list\w*|ricognizion\w*|mapp\w*|elenc\w*)\b[\s\S]{0,180}\b(?:files?|paths?|directories|repository|deploy|percorsi|file|directory)\b|\b(?:files?|percorsi?)\b[\s\S]{0,120}\b(?:map\w*|list\w*|mapp\w*|elenc\w*)\b)/iu;
+const DAILY_ROOT_LISTING_COMMAND = /^ls -la(?:\s+(?:\.{1,2}|\/[A-Za-z0-9._/-]+|[A-Za-z0-9._/-]+))?$/i;
 const DAILY_ROOT_PREFLIGHT_COMMAND = /^(?:pwd|date (?:\+%s|['"]\+%Y-%m-%d %H:%M:%S %Z %z['"])|git status(?: --short| --porcelain=v1 --untracked-files=all)?|git rev-parse (?:--show-toplevel|HEAD)|git branch --show-current|git diff(?: --name-status| --cached --name-status)?|git ls-files --others --exclude-standard|git worktree list|git log -1 --oneline|command -v (?:bash|git|python3?))$/i;
 const shellStages = (operation) => {
   const stages = [];
@@ -113,6 +115,7 @@ export const allowsDailyOrchestratorShell = (tool, command, authoritativeObjecti
   if (hasDailyShellMutation(operation) || hasDailyGitRepositoryMutation(operation)) return false;
   if (isDailyRootPreflight(operation)) return true;
   if (DAILY_ROOT_PREFLIGHT_REQUEST.test(objective)) return false;
+  if (DAILY_ROOT_LISTING_REQUEST.test(objective)) return DAILY_ROOT_LISTING_COMMAND.test(operation);
   if (env.OPENAI_DAILY_PROFILE !== "1") return false;
   if (analyzeObjective(objective).classification === "MUTATING") return isDailyRootPreflight(operation);
   const category = confirmationCategory(operation);

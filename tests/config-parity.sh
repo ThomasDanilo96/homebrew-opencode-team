@@ -122,7 +122,7 @@ assert(openaiOmo.browser_automation_engine?.playwright_mcp_args?.some((value) =>
 assert(openai.mcp?.serena?.enabled === true, "OPENAI Serena MCP missing");
 assert(path.isAbsolute(openai.mcp.serena.command[0]) && (openai.mcp.serena.command[0].startsWith(path.join(home, "data")) || openai.mcp.serena.command[0].startsWith(dependencyRoot)), "OPENAI Serena path invalid");
 assert(openai.plugin.length === 4 && openai.plugin.every(path.isAbsolute), "OPENAI plugin paths invalid");
-assert(openai.agent.openai_orchestrator.prompt_append.includes("For a user-requested repository baseline") && openai.agent.openai_orchestrator.prompt_append.includes("the authorship guard rejects every other direct shell command"), "OPENAI orchestrator must describe its strictly bounded checkout preflight");
+assert(openai.agent.openai_orchestrator.prompt_append.includes("For a user-requested repository baseline") && openai.agent.openai_orchestrator.prompt_append.includes("for an explicitly requested read-only file listing") && openai.agent.openai_orchestrator.prompt_append.includes("The authorship guard rejects every other direct shell command"), "OPENAI orchestrator must describe its strictly bounded checkout preflight");
 
 const daily = read("daily");
 const dailyOmo = JSON.parse(fs.readFileSync(path.join(home, "config", "daily", "xdg-config", "opencode", "oh-my-openagent.jsonc"), "utf8"));
@@ -146,7 +146,8 @@ assert(["task", "bash", "read", "glob", "grep"].every((tool) => dailyOrchestrato
 assert(dailyOrchestrator.tools?.["serena_*"] === true && dailyOrchestrator.permission?.["serena_*"] === "allow", "OPENAI DAILY orchestrator must expose Serena tools");
 assert(serenaMutationPatterns.every((pattern) => dailyOrchestrator.permission?.[pattern] === "deny"), "OPENAI DAILY orchestrator Serena mutation tools must remain denied");
 assert(dailyOrchestrator.permission?.bash === "allow", "OPENAI DAILY orchestrator shell permission missing");
-assert(dailyOrchestrator.prompt_append.includes("user explicitly requires a shell-availability or repository-baseline preflight before implementation") && dailyOrchestrator.prompt_append.includes("runtime permits these commands in semicolon- or &&-joined combinations") && dailyOrchestrator.prompt_append.includes('After the preflight, call task(subagent_type="codex_executor") exactly once'), "OPENAI DAILY orchestrator must allow only a bounded requested shell preflight before delegation");
+assert(dailyOrchestrator.prompt_append.includes("user explicitly requires a shell-availability or repository-baseline preflight before implementation") && dailyOrchestrator.prompt_append.includes("runtime permits these commands in semicolon- or &&-joined combinations") && dailyOrchestrator.prompt_append.includes('After a mutating-objective preflight, call task(subagent_type="codex_executor") exactly once'), "OPENAI DAILY orchestrator must allow only a bounded requested shell preflight before delegation");
+assert(dailyOrchestrator.prompt_append.includes("For a read-only repository-mapping request that explicitly asks to list files first, run only ls -la") && dailyOrchestrator.prompt_append.includes('call task(subagent_type="openai_explore") exactly once'), "OPENAI DAILY orchestrator must route read-only mapping after only the requested ls listing");
 assert(!daily.agent.openai_orchestrator.prompt_append.includes("should be redirected to BEST") && daily.agent.openai_orchestrator.prompt_append.includes("Never redirect or hand off a Daily task to BEST"), "OPENAI DAILY orchestrator must not redirect tasks to BEST");
 assert(daily.agent.openai_explore.prompt_append.includes("serena_activate_project"), "OPENAI DAILY explorer must activate the requested repository through Serena");
 

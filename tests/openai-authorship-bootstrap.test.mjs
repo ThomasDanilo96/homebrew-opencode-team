@@ -44,6 +44,15 @@ test("authorship guard admits the allowlisted compound checkout baseline without
       { tool: "bash", agent: "openai_orchestrator", sessionID: "root" },
       { args: { command } },
     ));
+    const listingGuard = await OpenAIAuthorshipGuard({ authoritativeObjective: "Map all files and deploy paths in read-only mode." });
+    await assert.doesNotReject(() => listingGuard["tool.execute.before"](
+      { tool: "bash", agent: "openai_orchestrator", sessionID: "root" },
+      { args: { command: "ls -la" } },
+    ));
+    await assert.rejects(() => listingGuard["tool.execute.before"](
+      { tool: "bash", agent: "openai_orchestrator", sessionID: "root" },
+      { args: { command: "find ." } },
+    ), /Repository mutations must be delegated/);
   } finally {
     if (previousDaily === undefined) delete process.env.OPENAI_DAILY_PROFILE;
     else process.env.OPENAI_DAILY_PROFILE = previousDaily;

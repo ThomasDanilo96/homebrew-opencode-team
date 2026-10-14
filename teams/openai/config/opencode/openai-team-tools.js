@@ -343,11 +343,12 @@ export const dailyRootMutationToolPolicy = ({ daily = false, agent = "", root = 
   ]);
   const mutationObjective = analyzeObjective(objective).classification === "MUTATING";
   const baselinePreflightRequested = /\b(?:baseline|preflight|checkout inventory|git status|git rev-parse|worktree list)\b/i.test(String(objective || ""));
+  const readOnlyListingRequested = /(?:\b(?:map\w*|inventory|list\w*|ricognizion\w*|mapp\w*|elenc\w*)\b[\s\S]{0,180}\b(?:files?|paths?|directories|repository|deploy|percorsi|file|directory)\b|\b(?:files?|percorsi?)\b[\s\S]{0,120}\b(?:map\w*|list\w*|mapp\w*|elenc\w*)\b)/iu.test(String(objective || ""));
 
   return Object.fromEntries(
     [...names].map((name) => {
       const normalized = String(name).toLowerCase();
-      return [name, normalized === "task" || (normalized === "bash" && (mutationObjective || baselinePreflightRequested))];
+      return [name, normalized === "task" || (normalized === "bash" && (mutationObjective || baselinePreflightRequested || readOnlyListingRequested))];
     }),
   );
 };

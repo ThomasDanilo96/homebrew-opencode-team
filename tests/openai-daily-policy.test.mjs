@@ -61,6 +61,29 @@ test("A compound read-only repository baseline is allowed in both OpenAI profile
   assert.equal(allowsDailyOrchestratorShell("bash", "git clone source candidate", objective, {}), false);
 });
 
+test("A read-only repository mapping exposes only the requested ls preflight before Explore", () => {
+  const objectives = [
+    "Map all repository files and paths in read-only mode, then explain the layout.",
+    "Avvio una ricognizione in sola lettura: prima mappo tutti i file e i percorsi di deploy, poi ricostruisco le configurazioni; senza modificare nulla.",
+  ];
+  for (const objective of objectives) {
+    const tools = dailyRootMutationToolPolicy({
+      daily: true,
+      agent: "openai_orchestrator",
+      root: true,
+      objective,
+      tools: { task: true, bash: false, read: true },
+    });
+    assert.equal(tools.task, true, objective);
+    assert.equal(tools.bash, true, objective);
+    assert.equal(tools.read, false, objective);
+    assert.equal(allowsDailyOrchestratorShell("bash", "ls -la", objective, { OPENAI_DAILY_PROFILE: "1" }), true, objective);
+    assert.equal(allowsDailyOrchestratorShell("bash", "ls -la deploy", objective, { OPENAI_DAILY_PROFILE: "1" }), true, objective);
+    assert.equal(allowsDailyOrchestratorShell("bash", "ls -la; git status", objective, { OPENAI_DAILY_PROFILE: "1" }), false, objective);
+    assert.equal(allowsDailyOrchestratorShell("bash", "find .", objective, { OPENAI_DAILY_PROFILE: "1" }), false, objective);
+  }
+});
+
 
 test("Daily commit requests are mutating and route through Codex without granting root Git mutation", () => {
   const objectives = [
@@ -335,7 +358,9 @@ test("Daily mutating root delegates to Codex before repository inspection", asyn
   assert.match(prompt, /user explicitly requires a shell-availability or repository-baseline preflight before implementation/);
   assert.match(prompt, /allowlisted read-only date\/pwd and git status\/rev-parse\/branch\/diff\/ls-files\/worktree\/log queries/);
   assert.match(prompt, /runtime permits these commands in semicolon- or &&-joined combinations/);
-  assert.match(prompt, /After the preflight, call task\(subagent_type="codex_executor"\) exactly once/);
+  assert.match(prompt, /For a read-only repository-mapping request that explicitly asks to list files first, run only ls -la/);
+  assert.match(prompt, /After a mutating-objective preflight, call task\(subagent_type="codex_executor"\) exactly once/);
+  assert.match(prompt, /For a read-only repository-mapping request that explicitly asks to list files first, run only ls -la/);
   assert.match(prompt, /For other mutating objectives, call task\(subagent_type="codex_executor"\) as the first operational tool/);
 });
 
