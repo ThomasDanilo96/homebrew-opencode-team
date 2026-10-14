@@ -17,29 +17,10 @@ export const DAILY_INVESTIGATION_LIMITS = Object.freeze({
   EXTREME: Object.freeze({ minutes: 45, toolCalls: 40 }),
 });
 
-const textArg = (args = {}) => [args.pattern, args.query, args.command, args.cmd, args.path, args.directory, args.cwd]
-  .filter((value) => typeof value === "string")
-  .join(" ")
-  .trim();
-
-export const dailySearchDecision = ({ tool = "", args = {}, seen = new Set() } = {}) => {
-  const name = String(tool).toLowerCase();
-  const text = textArg(args);
-  const normalized = text.replace(/\s+/g, " ").trim().toLowerCase();
-  const scope = String(args.path || args.directory || args.cwd || "").trim();
-  const signature = `${name}:${normalized}`;
-  if (seen.has(signature)) return { allowed: false, reason: "DUPLICATE_SEARCH" };
-  if (name === "glob" && /(?:^|[/ ])\*\*\/?(?:\*|$)/.test(normalized) && (!scope || [".", "./", "/"].includes(scope))) return { allowed: false, reason: "ROOT_GLOB_STARSTAR" };
-  if ((name === "grep" || name === "rg") && (!scope || [".", "./", "/"].includes(scope))) return { allowed: false, reason: "UNTARGETED_REPOSITORY_SEARCH" };
-  if (/package-lock\.json/.test(normalized) && !/package-lock\.json$/.test(String(args.path || "").toLowerCase())) return { allowed: false, reason: "PACKAGE_LOCK_NOISE" };
-  if (name === "bash" && /(?:^|[;&|\s])strings\s+[^;&|\n]*\b(?:bin|opencode|\.dylib|\.so)\b/i.test(text)) return { allowed: false, reason: "BINARY_STRINGS_SCAN" };
-  return { allowed: true, signature };
-};
-
 export const dailyInvestigationLimits = (complexity = "NORMAL") => DAILY_INVESTIGATION_LIMITS[String(complexity).toUpperCase()] ?? DAILY_INVESTIGATION_LIMITS.NORMAL;
 
-export const shouldStopDaily = ({ answerSupported = false, materialContradiction = false, remainingEvidence = "unknown" } = {}) =>
-  answerSupported === true && materialContradiction !== true && remainingEvidence === "confirmatory";
+export const shouldStopDaily = ({ answerSupported = false, materialContradiction = false, remainingEvidence = "unknown", exhaustiveRequested = false } = {}) =>
+  exhaustiveRequested !== true && answerSupported === true && materialContradiction !== true && remainingEvidence === "confirmatory";
 
 export const DAILY_AGENT_MODELS = Object.freeze({
   openai_orchestrator: "openai/gpt-6-luna",

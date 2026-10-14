@@ -68,6 +68,7 @@ same(bestOmo.sisyphus_agent.default_builder_enabled, true, "BEST OMO default Bui
 same(bestOmo.agents["OpenCode-Builder"].mode, "primary", "BEST OMO Builder mode");
 same(bestOmo.agents["OpenCode-Builder"].permission.call_omo_agent, "deny", "BEST OMO Builder legacy delegation permission");
 same(bestOmo.agents["OpenCode-Builder"].tools.call_omo_agent, false, "BEST OMO Builder legacy delegation tool");
+same(bestOmoModels.profiles["best-native"]["[native]"].task.provider_concurrency["chatgpt-subscription"], 2, "BEST subscription coder fanout concurrency");
 same(best.agent.explore.model, "opencode-go/qwen3.7-plus", "BEST explore model");
 same(best.agent.librarian.model, "opencode-go/qwen3.7-plus", "BEST librarian model");
 same(best.compaction, { auto: true, prune: true, reserved: 10000 }, "BEST compaction");
@@ -97,16 +98,51 @@ const go = read("go");
 same(go.model, "opencode-go/mimo-v2.5", "GO model");
 same(go.small_model, "opencode-go/mimo-v2.5", "GO small_model");
 same(go.default_agent, "OpenCode-Builder", "GO default_agent");
+same(go.agent.explore.mode, "subagent", "GO Explore subagent mode");
+same(go.agent.explore.model, "opencode-go/qwen3.7-plus", "GO Explore subscription model");
+same(go.agent.librarian.mode, "subagent", "GO Librarian subagent mode");
+same(go.agent.librarian.model, "opencode-go/qwen3.7-plus", "GO Librarian subscription model");
+same(go.agent.explore.permission.task, "deny", "GO Explore nested-task denial");
+same(go.agent.librarian.permission.task, "deny", "GO Librarian nested-task denial");
+assert(go.agent.explore.prompt.includes("GO subscription model") && go.agent.librarian.prompt.includes("GO subscription model"), "GO Explore/Librarian subscription prompts missing");
 same(go.compaction, { auto: true, prune: true, reserved: 10000 }, "GO compaction");
 const goOmo = JSON.parse(fs.readFileSync(path.join(home, "config", "go", "xdg-config", "opencode", "oh-my-openagent.jsonc"), "utf8"));
 assert(goOmo.browser_automation_engine?.provider === "playwright", "GO Playwright provider missing");
 assert(goOmo.browser_automation_engine?.playwright_mcp_args?.some((value) => value.endsWith("/go/playwright/output")), "GO Playwright output path missing");
+const goNativeProfile = goOmo.profiles?.["go-team-v2-visible"]?.["[native]"];
+assert(goNativeProfile, "GO runtime OMO_PROFILE is not defined by its generated config");
+same(goNativeProfile.model_profile, "opencode-go/mimo-v2.5", "GO OMO model profile");
+same(goNativeProfile.task.provider_concurrency["opencode-go"], 2, "GO subscription worker concurrency");
+for (const agent of ["explore", "librarian"]) same(goNativeProfile.agents[agent].models, ["opencode-go/qwen3.7-plus"], `GO ${agent} subscription worker model`);
 assertSkillMcp("best", "OpenCode-Builder");
 assert(go.permission?.skill_mcp === "allow" || go.permission?.["*"] === "allow", "GO skill_mcp permission missing");
 assert(go.disabled_providers.includes("openai"), "GO provider policy missing");
 assert(go.mcp?.serena?.enabled === true, "GO Serena MCP missing");
 assert(path.isAbsolute(go.mcp.serena.command[0]) && (go.mcp.serena.command[0].startsWith(path.join(home, "data")) || go.mcp.serena.command[0].startsWith(dependencyRoot)), "GO Serena path invalid");
 assert(go.provider?.["opencode-go"]?.options?.max_tokens === 32768, "GO provider options missing");
+for (const name of ["explore", "librarian"]) {
+  const agent = spawnSync("opencode", ["debug", "agent", name], {
+    cwd: root,
+    env: {
+      ...process.env,
+      OPENCODE_CONFIG: path.join(home, "config", "go", "opencode.jsonc"),
+      OPENCODE_CONFIG_DIR: path.join(home, "config", "go"),
+      OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+      OPENCODE_DISABLE_CLAUDE_CODE: "1",
+      OMO_PROFILE: "go-team-v2-visible",
+      HOME: home,
+      XDG_CONFIG_HOME: path.join(home, "config", "go", "xdg-config"),
+      XDG_DATA_HOME: path.join(home, "data", "go", "data"),
+      XDG_CACHE_HOME: path.join(home, "cache", "go"),
+      XDG_STATE_HOME: path.join(home, "state", "go"),
+    },
+    encoding: "utf8",
+  });
+  assert(agent.status === 0, `GO/${name} subscription subagent config rejected: ${agent.stderr}`);
+  const effective = JSON.parse(agent.stdout);
+  same(effective.mode, "subagent", `GO/${name} effective mode`);
+  same(effective.model, { providerID: "opencode-go", modelID: "qwen3.7-plus" }, `GO/${name} effective model`);
+}
 assert(go.plugin.length === 2 && path.isAbsolute(go.plugin[0]), "GO plugin order/path invalid");
 
 const openai = read("openai");
@@ -122,7 +158,9 @@ assert(openaiOmo.browser_automation_engine?.playwright_mcp_args?.some((value) =>
 assert(openai.mcp?.serena?.enabled === true, "OPENAI Serena MCP missing");
 assert(path.isAbsolute(openai.mcp.serena.command[0]) && (openai.mcp.serena.command[0].startsWith(path.join(home, "data")) || openai.mcp.serena.command[0].startsWith(dependencyRoot)), "OPENAI Serena path invalid");
 assert(openai.plugin.length === 4 && openai.plugin.every(path.isAbsolute), "OPENAI plugin paths invalid");
-assert(openai.agent.openai_orchestrator.prompt_append.includes("For a user-requested repository baseline") && openai.agent.openai_orchestrator.prompt_append.includes("for an explicitly requested read-only file listing") && openai.agent.openai_orchestrator.prompt_append.includes("The authorship guard rejects every other direct shell command"), "OPENAI orchestrator must describe its strictly bounded checkout preflight");
+assert(openai.agent.openai_orchestrator.prompt_append.includes("Repository inspection is unrestricted through read, glob, grep, LSP, Serena") && openai.agent.openai_orchestrator.prompt_append.includes("All repository writes must be delegated to codex_executor"), "OPENAI orchestrator must allow direct reads and delegate writes");
+assert(["read", "glob", "grep", "lsp_*", "serena_*", "webfetch", "websearch"].every((tool) => openai.agent.openai_orchestrator.tools?.[tool] === true), "OPENAI orchestrator direct read tools are missing");
+assert(["edit", "write", "apply_patch", "interactive_bash"].every((tool) => openai.agent.openai_orchestrator.tools?.[tool] === false), "OPENAI orchestrator native write/persistent shell tools must remain disabled");
 
 const daily = read("daily");
 const dailyOmo = JSON.parse(fs.readFileSync(path.join(home, "config", "daily", "xdg-config", "opencode", "oh-my-openagent.jsonc"), "utf8"));
@@ -146,8 +184,9 @@ assert(["task", "bash", "read", "glob", "grep"].every((tool) => dailyOrchestrato
 assert(dailyOrchestrator.tools?.["serena_*"] === true && dailyOrchestrator.permission?.["serena_*"] === "allow", "OPENAI DAILY orchestrator must expose Serena tools");
 assert(serenaMutationPatterns.every((pattern) => dailyOrchestrator.permission?.[pattern] === "deny"), "OPENAI DAILY orchestrator Serena mutation tools must remain denied");
 assert(dailyOrchestrator.permission?.bash === "allow", "OPENAI DAILY orchestrator shell permission missing");
-assert(dailyOrchestrator.prompt_append.includes("user explicitly requires a shell-availability or repository-baseline preflight before implementation") && dailyOrchestrator.prompt_append.includes("runtime permits these commands in semicolon- or &&-joined combinations") && dailyOrchestrator.prompt_append.includes('After a mutating-objective preflight, call task(subagent_type="codex_executor") exactly once'), "OPENAI DAILY orchestrator must allow only a bounded requested shell preflight before delegation");
-assert(dailyOrchestrator.prompt_append.includes("For a read-only repository-mapping request that explicitly asks to list files first, run only ls -la") && dailyOrchestrator.prompt_append.includes('call task(subagent_type="openai_explore") exactly once'), "OPENAI DAILY orchestrator must route read-only mapping after only the requested ls listing");
+assert(dailyOrchestrator.prompt_append.includes("direct read-only access to repository files and discovery tools without tool-count, time, duplicate-search, or mandatory-explorer limits") && dailyOrchestrator.prompt_append.includes("Delegate every repository write to codex_executor"), "OPENAI DAILY orchestrator must state unbounded read access and delegated writes");
+assert(["read", "glob", "grep", "lsp_*", "serena_*", "webfetch", "websearch"].every((tool) => dailyOrchestrator.tools?.[tool] === true), "OPENAI DAILY orchestrator direct read tools are missing");
+assert(["edit", "write", "apply_patch", "interactive_bash"].every((tool) => dailyOrchestrator.tools?.[tool] === false), "OPENAI DAILY orchestrator native write/persistent shell tools must remain disabled");
 assert(!daily.agent.openai_orchestrator.prompt_append.includes("should be redirected to BEST") && daily.agent.openai_orchestrator.prompt_append.includes("Never redirect or hand off a Daily task to BEST"), "OPENAI DAILY orchestrator must not redirect tasks to BEST");
 assert(daily.agent.openai_explore.prompt_append.includes("serena_activate_project"), "OPENAI DAILY explorer must activate the requested repository through Serena");
 

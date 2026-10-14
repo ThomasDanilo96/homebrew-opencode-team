@@ -42,7 +42,7 @@
           "default_concurrency": 4,
           "global_concurrency": 4,
           "provider_concurrency": {
-            "chatgpt-subscription": 1,
+            "chatgpt-subscription": 2,
             "opencode-go": 2
           },
           "max_depth": 1,

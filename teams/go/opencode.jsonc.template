@@ -22,6 +22,24 @@
       "enabled": true
     }
   },
+  "agent": {
+    "explore": {
+      "mode": "subagent",
+      "description": "GO subscription read-only repository explorer.",
+      "model": "opencode-go/qwen3.7-plus",
+      "prompt": "Explore the assigned repository scope using the GO subscription model. Return concise findings and paths; do not edit files.",
+      "permission": { "edit": "deny", "write": "deny", "apply_patch": "deny", "bash": "deny", "task": "deny" },
+      "tools": { "edit": false, "write": false, "apply_patch": false, "bash": false, "task": false }
+    },
+    "librarian": {
+      "mode": "subagent",
+      "description": "GO subscription documentation researcher.",
+      "model": "opencode-go/qwen3.7-plus",
+      "prompt": "Research the assigned documentation scope using the GO subscription model. Return source links and concise findings; do not edit files.",
+      "permission": { "edit": "deny", "write": "deny", "apply_patch": "deny", "bash": "deny", "task": "deny" },
+      "tools": { "edit": false, "write": false, "apply_patch": false, "bash": false, "task": false }
+    }
+  },
   "provider": {
     "opencode-go": { "options": { "max_tokens": 32768, "timeout": 300000 } }
   }

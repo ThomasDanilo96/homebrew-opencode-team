@@ -3,28 +3,46 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertDailyProviderModel, dailyCost, dailyFanout, dailyModelIdentity, dailySearchDecision, dailyInvestigationLimits, DAILY_AGENT_MODELS, DAILY_PRICING, shouldStopDaily } from "../teams/daily/daily-policy.mjs";
-import { admitDurableFanout, allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, isStopText, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
+import { assertDailyProviderModel, dailyCost, dailyFanout, dailyModelIdentity, dailyInvestigationLimits, DAILY_AGENT_MODELS, DAILY_PRICING, shouldStopDaily } from "../teams/daily/daily-policy.mjs";
+import { admitDurableFanout, allowsOrchestratorReadOnlyShell, backgroundDelegationAllowed, beginRequestCycle, admitDelegation, admitToolCall, canonicalDelegatedObjective, createGuardrailState, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, GuardrailPolicyError, isStopText, objectiveIsBound, preserveChildGuardState, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision } from "../teams/openai/config/opencode/openai-guardrails.js";
 import { summarizeDailyPackets } from "../teams/daily/bin/daily-report.mjs";
 import { analyzeObjective, objectiveRequestsLocalCommit, routeDelegatedAgent, selectAuthoritativeObjective } from "../teams/openai/config/opencode/openai-routing.js";
 import { OpenAIAuthorshipGuard } from "../teams/openai/config/opencode/openai-authorship-guard.js";
-import { dailyRootMutationToolPolicy, latestUserObjective, localCommitPostcondition, OpenAITeamTools, requestedDailyFanoutSlice, resolveInitialObjectiveFromClient, routeRootDelegation } from "../teams/openai/config/opencode/openai-team-tools.js";
+import { dailyRootToolPolicy, latestUserObjective, localCommitPostcondition, OpenAITeamTools, requestedDailyFanoutSlice, resolveInitialObjectiveFromClient, routeRootDelegation } from "../teams/openai/config/opencode/openai-team-tools.js";
 import { CODEX_SUBSCRIPTION_MODELS, resolveCodexModels } from "../teams/openai/config/opencode/codex-models.js";
 import { postExecutionPolicy } from "../teams/openai/config/opencode/execution-policy.js";
 
-test("Daily shell policy is bounded by the genuine objective", () => {
-  const env = { OPENAI_DAILY_PROFILE: "1" };
-  for (const command of ["printf ok", "test -f file", "node calculator.test.js", "ls", "build", "git status", "docker inspect app", "command -v ssh", "ssh -V"]) {
-    assert.equal(allowsDailyOrchestratorShell("bash", command, "Inspect the repository", env), true, command);
+test("Both profiles permit broad read-only shell work and refuse write-capable shell commands", () => {
+  for (const env of [{}, { OPENAI_DAILY_PROFILE: "1" }]) {
+    for (const command of [
+      "pwd",
+      "ls -la",
+      "ls -la 'path with spaces'",
+      "find . -maxdepth 3 -type f",
+      "rg --files",
+      "grep -R TODO src",
+      "cat README.md",
+      "git status --short",
+      "git diff --stat",
+      "git rev-parse HEAD",
+      "git worktree list",
+      "pwd && git rev-parse --show-toplevel && git rev-parse HEAD",
+      "ls -la; git status --short; git log -1 --oneline",
+    ]) assert.equal(allowsOrchestratorReadOnlyShell("bash", command), true, command);
+    for (const command of [
+      "git add .",
+      "git commit -m fix",
+      "git push",
+      "git clone source candidate",
+      "rm -rf tmp",
+      "touch file",
+      "python3 -c 'open(\"file\", \"w\").write(\"x\")'",
+      "ls -la > listing.txt",
+      "find . -exec touch {} \\;",
+      "rg --pre cat pattern",
+      "git status | cat",
+    ]) assert.equal(allowsOrchestratorReadOnlyShell("bash", command), false, command);
   }
-  assert.equal(allowsDailyOrchestratorShell("bash", "printf 'fixture' | patch -p0", "Inspect the repository", env), false);
-  assert.equal(allowsDailyOrchestratorShell("bash", "apply_patch <<'PATCH'\n*** Update File: fixture\nPATCH", "Inspect the repository", env), false);
-  assert.equal(allowsDailyOrchestratorShell("bash", "ssh host", "Inspect the repository", env), false);
-  assert.equal(allowsDailyOrchestratorShell("bash", "git push", "Push the branch", env), false);
-  assert.equal(allowsDailyOrchestratorShell("bash", "git push", "I explicitly confirm push", env), true);
-  assert.equal(allowsDailyOrchestratorShell("bash", "rm file", "Do not delete anything", env), false);
-  assert.equal(allowsDailyOrchestratorShell("bash", "rm file", "I explicitly confirm deletion", env), true);
-  assert.equal(allowsDailyOrchestratorShell("bash", "printf ok", "Inspect", {}), false);
 });
 
 test("Mutating Daily roots may run only bounded shell preflight before delegation", () => {
@@ -38,7 +56,7 @@ test("Mutating Daily roots may run only bounded shell preflight before delegatio
     "pwd && git rev-parse --show-toplevel && git rev-parse HEAD",
     "$pwd && git rev-parse --show-toplevel && git rev-parse HEAD",
   ]) {
-    assert.equal(allowsDailyOrchestratorShell("bash", command, objective, env), true, command);
+    assert.equal(allowsOrchestratorReadOnlyShell("bash", command, objective, env), true, command);
   }
   for (const command of [
     "git clone source clone",
@@ -47,27 +65,27 @@ test("Mutating Daily roots may run only bounded shell preflight before delegatio
     "pwd && git rev-parse HEAD && touch file",
     "git status | cat",
   ]) {
-    assert.equal(allowsDailyOrchestratorShell("bash", command, objective, env), false, command);
+    assert.equal(allowsOrchestratorReadOnlyShell("bash", command, objective, env), false, command);
   }
 });
 
 test("A compound read-only repository baseline is allowed in both OpenAI profiles", () => {
   const baseline = "date '+%Y-%m-%d %H:%M:%S %Z %z'; date +%s; git rev-parse --show-toplevel; git rev-parse HEAD; git branch --show-current; git status --porcelain=v1 --untracked-files=all; git diff --name-status; git diff --cached --name-status; git ls-files --others --exclude-standard; git worktree list; git log -1 --oneline";
   const objective = "Create evidence and a candidate in separate paths without changing the checkout.";
-  assert.equal(allowsDailyOrchestratorShell("bash", baseline, objective, {}), true);
-  assert.equal(allowsDailyOrchestratorShell("bash", baseline, objective, { OPENAI_DAILY_PROFILE: "1" }), true);
-  assert.equal(allowsDailyOrchestratorShell("bash", `${baseline}; touch evidence.txt`, objective, {}), false);
-  assert.equal(allowsDailyOrchestratorShell("bash", `${baseline} | cat`, objective, {}), false);
-  assert.equal(allowsDailyOrchestratorShell("bash", "git clone source candidate", objective, {}), false);
+  assert.equal(allowsOrchestratorReadOnlyShell("bash", baseline, objective, {}), true);
+  assert.equal(allowsOrchestratorReadOnlyShell("bash", baseline, objective, { OPENAI_DAILY_PROFILE: "1" }), true);
+  assert.equal(allowsOrchestratorReadOnlyShell("bash", `${baseline}; touch evidence.txt`, objective, {}), false);
+  assert.equal(allowsOrchestratorReadOnlyShell("bash", `${baseline} | cat`, objective, {}), false);
+  assert.equal(allowsOrchestratorReadOnlyShell("bash", "git clone source candidate", objective, {}), false);
 });
 
-test("A read-only repository mapping exposes only the requested ls preflight before Explore", () => {
+test("Daily root retains unrestricted read tools for both read-only and mutating objectives", () => {
   const objectives = [
     "Map all repository files and paths in read-only mode, then explain the layout.",
     "Avvio una ricognizione in sola lettura: prima mappo tutti i file e i percorsi di deploy, poi ricostruisco le configurazioni; senza modificare nulla.",
   ];
   for (const objective of objectives) {
-    const tools = dailyRootMutationToolPolicy({
+    const tools = dailyRootToolPolicy({
       daily: true,
       agent: "openai_orchestrator",
       root: true,
@@ -76,11 +94,13 @@ test("A read-only repository mapping exposes only the requested ls preflight bef
     });
     assert.equal(tools.task, true, objective);
     assert.equal(tools.bash, true, objective);
-    assert.equal(tools.read, false, objective);
-    assert.equal(allowsDailyOrchestratorShell("bash", "ls -la", objective, { OPENAI_DAILY_PROFILE: "1" }), true, objective);
-    assert.equal(allowsDailyOrchestratorShell("bash", "ls -la deploy", objective, { OPENAI_DAILY_PROFILE: "1" }), true, objective);
-    assert.equal(allowsDailyOrchestratorShell("bash", "ls -la; git status", objective, { OPENAI_DAILY_PROFILE: "1" }), false, objective);
-    assert.equal(allowsDailyOrchestratorShell("bash", "find .", objective, { OPENAI_DAILY_PROFILE: "1" }), false, objective);
+    assert.equal(tools.read, true, objective);
+    assert.equal(tools.glob, true, objective);
+    assert.equal(tools.grep, true, objective);
+    assert.equal(tools.serena_find_symbol, true, objective);
+    assert.equal(tools.edit, false, objective);
+    assert.equal(allowsOrchestratorReadOnlyShell("bash", "ls -la", objective), true, objective);
+    assert.equal(allowsOrchestratorReadOnlyShell("bash", "find . -type f", objective), true, objective);
   }
 });
 
@@ -102,7 +122,7 @@ test("Daily commit requests are mutating and route through Codex without grantin
       objective,
     );
 
-    const tools = dailyRootMutationToolPolicy({
+    const tools = dailyRootToolPolicy({
       daily: true,
       agent: "openai_orchestrator",
       root: true,
@@ -119,7 +139,7 @@ test("Daily commit requests are mutating and route through Codex without grantin
 
     assert.equal(tools.task, true, objective);
     assert.equal(tools.bash, true, objective);
-    assert.equal(tools.read, false, objective);
+    assert.equal(tools.read, true, objective);
     assert.equal(tools.interactive_bash, false, objective);
     assert.equal(tools.edit, false, objective);
     assert.equal(tools.write, false, objective);
@@ -156,7 +176,7 @@ test("Daily orchestrator shell never performs local Git repository mutations dir
     "git status && git commit -m 'Fix copy'",
   ]) {
     assert.equal(
-      allowsDailyOrchestratorShell("bash", command, objective, env),
+      allowsOrchestratorReadOnlyShell("bash", command, objective, env),
       false,
       command,
     );
@@ -171,7 +191,7 @@ test("Daily orchestrator shell never performs local Git repository mutations dir
     "git branch --show-current",
   ]) {
     assert.equal(
-      allowsDailyOrchestratorShell(
+      allowsOrchestratorReadOnlyShell(
         "bash",
         command,
         "Inspect the repository",
@@ -302,6 +322,10 @@ test("mandatory tester gate allows only the exact tester task and blocks root sh
   const packetID = "a".repeat(64);
   const pending = { ...createGuardrailState(), pendingVerificationPacketID: packetID };
   assert.equal(verificationGateDecision(pending, "bash", "openai_orchestrator", "printf ok").reason, "MANDATORY_TESTER_GATE");
+  for (const tool of ["read", "glob", "grep", "serena_find_symbol", "webfetch"]) {
+    assert.equal(verificationGateDecision(pending, tool, "openai_orchestrator", "").allowed, true, tool);
+  }
+  assert.equal(verificationGateDecision(pending, "edit", "openai_orchestrator", "").reason, "MANDATORY_TESTER_GATE");
   assert.equal(verificationGateDecision(createGuardrailState(), "bash", "openai_orchestrator", "printf ok").allowed, true);
   assert.equal(verificationGateDecision(pending, "task", "tester", `verify test_task_id=${packetID}`).allowed, true);
   assert.equal(verificationGateDecision(pending, "bash", "tester", "node gated.test.js", true).allowed, true);
@@ -322,23 +346,24 @@ test("mandatory gate survives a root request cycle and admits only its exact rev
   assert.equal(verificationGateDecision(cycled, "task", "reviewer", `review review_task_id=${"b".repeat(64)}`).reason, "MANDATORY_TESTER_GATE");
 });
 
-test("Daily template enables only orchestrator shell access and runtime forwards SSH vars conditionally", async () => {
+test("OpenAI and Daily expose read tools and read-only shell while disabling root writes", async () => {
   const template = await readFile(new URL("../teams/daily/opencode.jsonc.template", import.meta.url), "utf8");
   assert.match(template, /"bash": "allow"/);
-  assert.match(template, /"interactive_bash": "allow"/);
+  assert.match(template, /"interactive_bash": "deny"/);
   assert.match(template, /"bash": true/);
-  assert.match(template, /"interactive_bash": true/);
-  assert.match(template, /"edit": "allow"/);
-  assert.match(template, /"write": "allow"/);
-  assert.match(template, /"skill_mcp": "deny"/);
-  assert.match(template, /CodeGraph remains unavailable in DAILY; browser work may load the Playwright skill/);
+  assert.match(template, /"interactive_bash": false/);
+  assert.match(template, /"edit": "deny"/);
+  assert.match(template, /"write": "deny"/);
+  assert.match(template, /"read": true/);
+  assert.match(template, /"serena_\*": true/);
+  assert.match(template, /Delegate all repository writes to codex_executor/);
   assert.match(template, /"openai_run_codex": false/);
-  assert.match(template, /NORMAL repository work is never direct: repository mutations must use exactly one codex_executor child first, and read-only repository objectives must use exactly one openai_explore child first/);
-  assert.match(template, /do not launch a second repository child/);
   const premium = await readFile(new URL("../teams/openai/opencode.jsonc.template", import.meta.url), "utf8");
   assert.match(premium, /"bash": "allow"/);
-  assert.match(premium, /"interactive_bash": true/);
-  assert.match(premium, /"skill_mcp": "deny"/);
+  assert.match(premium, /"interactive_bash": false/);
+  assert.match(premium, /"read": true/);
+  assert.match(premium, /"serena_\*": true/);
+  assert.match(premium, /"edit": "deny"/);
   assert.match(premium, /CodeGraph remains unavailable in OPENAI; browser work may load the Playwright skill/);
   const runtime = await readFile(new URL("../core/bin/team-runtime", import.meta.url), "utf8");
   assert.match(runtime, /OPENCODE_AUTH_SOURCE OPENAI_CODEX_AUTH_SOURCE SSH_AUTH_SOCK SSH_AGENT_PID/);
@@ -355,13 +380,9 @@ test("Daily mutating root delegates to Codex before repository inspection", asyn
   const orchestrator = config.agent.openai_orchestrator;
   const prompt = orchestrator.prompt_append;
   assert.equal(orchestrator.tools.bash, true);
-  assert.match(prompt, /user explicitly requires a shell-availability or repository-baseline preflight before implementation/);
-  assert.match(prompt, /allowlisted read-only date\/pwd and git status\/rev-parse\/branch\/diff\/ls-files\/worktree\/log queries/);
-  assert.match(prompt, /runtime permits these commands in semicolon- or &&-joined combinations/);
-  assert.match(prompt, /For a read-only repository-mapping request that explicitly asks to list files first, run only ls -la/);
-  assert.match(prompt, /After a mutating-objective preflight, call task\(subagent_type="codex_executor"\) exactly once/);
-  assert.match(prompt, /For a read-only repository-mapping request that explicitly asks to list files first, run only ls -la/);
-  assert.match(prompt, /For other mutating objectives, call task\(subagent_type="codex_executor"\) as the first operational tool/);
+  assert.match(prompt, /direct read-only access to repository files and discovery tools without tool-count, time, duplicate-search, or mandatory-explorer limits/);
+  assert.match(prompt, /Honor user requests for exhaustive audits/);
+  assert.match(prompt, /Delegate every repository write to codex_executor/);
 });
 
 test("Mutating roots preserve explicit read-only discovery workers without allowing delegated edits", () => {
@@ -380,7 +401,7 @@ test("Mutating roots preserve explicit read-only discovery workers without allow
   }), { classification: "MUTATING", agent: "codex_executor" });
 });
 
-test("Daily mutating root exposes task and guarded bash preflight while denying other tools", () => {
+test("Daily mutating root keeps all read-only tools and delegates only writes", () => {
   const tools = {
     task: false,
     openai_run_codex: true,
@@ -395,7 +416,7 @@ test("Daily mutating root exposes task and guarded bash preflight while denying 
     serena_replace_symbol_body: true,
     webfetch: true,
   };
-  const restricted = dailyRootMutationToolPolicy({
+  const restricted = dailyRootToolPolicy({
     daily: true,
     agent: "openai_orchestrator",
     root: true,
@@ -406,12 +427,17 @@ test("Daily mutating root exposes task and guarded bash preflight while denying 
   for (const name of Object.keys(tools)) {
     assert.equal(
       restricted[name],
-      name === "task" || name === "bash",
-      `${name} must match the DAILY mutating-root policy`,
+      !["edit", "write", "serena_replace_symbol_body", "openai_run_codex"].includes(name),
+      `${name} must match the DAILY read/write policy`,
     );
   }
 
   assert.equal(restricted.task, true);
+  assert.equal(restricted.read, true);
+  assert.equal(restricted.glob, true);
+  assert.equal(restricted.grep, true);
+  assert.equal(restricted.serena_find_symbol, true);
+  assert.equal(restricted.openai_remote_read, true);
   assert.deepEqual(tools, {
     task: false,
     openai_run_codex: true,
@@ -427,7 +453,7 @@ test("Daily mutating root exposes task and guarded bash preflight while denying 
     webfetch: true,
   });
 
-  const emptyCatalog = dailyRootMutationToolPolicy({
+  const emptyCatalog = dailyRootToolPolicy({
     daily: true,
     agent: "openai_orchestrator",
     root: true,
@@ -439,31 +465,22 @@ test("Daily mutating root exposes task and guarded bash preflight while denying 
   assert.equal(emptyCatalog.bash, true);
 
   for (const name of [
-    "read",
-    "glob",
-    "grep",
     "interactive_bash",
     "apply_patch",
-    "todowrite",
     "openai_run_codex",
-    "openai_remote_read",
-    "serena_initial_instructions",
-    "serena_onboarding",
-    "serena_find_symbol",
-    "serena_search_for_pattern",
-    "list_mcp_resources",
-    "list_mcp_resource_templates",
-    "read_mcp_resource",
+    "edit",
+    "write",
+    "serena_replace_content",
     "multi_tool_use.parallel",
   ]) {
     assert.equal(
       emptyCatalog[name],
       false,
-      `${name} must be explicitly disabled for a DAILY mutating root`,
+      `${name} must not widen root writes or tool wrappers`,
     );
   }
 
-  const sparseCatalog = dailyRootMutationToolPolicy({
+  const sparseCatalog = dailyRootToolPolicy({
     daily: true,
     agent: "openai_orchestrator",
     root: true,
@@ -476,12 +493,12 @@ test("Daily mutating root exposes task and guarded bash preflight while denying 
 
   assert.equal(sparseCatalog.task, true);
   assert.equal(sparseCatalog.strange_new_tool, false);
-  assert.equal(sparseCatalog.read, false);
+  assert.equal(sparseCatalog.read, true);
   assert.equal(sparseCatalog.bash, true);
-  assert.equal(sparseCatalog.serena_initial_instructions, false);
+  assert.equal(sparseCatalog.serena_initial_instructions, true);
 
   const withoutTask = { read: true, edit: true, webfetch: true };
-  const withoutTaskRestricted = dailyRootMutationToolPolicy({
+  const withoutTaskRestricted = dailyRootToolPolicy({
     daily: true,
     agent: "openai_orchestrator",
     root: true,
@@ -491,10 +508,10 @@ test("Daily mutating root exposes task and guarded bash preflight while denying 
 
   assert.equal(withoutTaskRestricted.task, true);
   assert.equal(withoutTaskRestricted.bash, true);
-  assert.equal(withoutTaskRestricted.read, false);
+  assert.equal(withoutTaskRestricted.read, true);
   assert.equal(withoutTaskRestricted.edit, false);
-  assert.equal(withoutTaskRestricted.webfetch, false);
-  assert.equal(withoutTaskRestricted.serena_initial_instructions, false);
+  assert.equal(withoutTaskRestricted.webfetch, true);
+  assert.equal(withoutTaskRestricted.serena_initial_instructions, true);
 });
 
 test("Daily chat.message hook applies fail-closed tools to a mutating root with an absent catalog", async () => {
@@ -558,18 +575,18 @@ test("Daily chat.message hook applies fail-closed tools to a mutating root with 
 
     assert.equal(output.message.tools.task, true);
     assert.equal(output.message.tools.bash, true);
+    assert.equal(output.message.tools.read, true);
+    assert.equal(output.message.tools.glob, true);
+    assert.equal(output.message.tools.grep, true);
+    assert.equal(output.message.tools.serena_find_symbol, true);
 
     for (const name of [
-      "read",
-      "glob",
-      "grep",
       "interactive_bash",
       "apply_patch",
-      "todowrite",
       "openai_run_codex",
-      "openai_remote_read",
-      "serena_initial_instructions",
-      "serena_find_symbol",
+      "edit",
+      "write",
+      "serena_replace_content",
     ]) {
       assert.equal(output.message.tools[name], false, name);
     }
@@ -593,16 +610,16 @@ test("Daily chat.message hook applies fail-closed tools to a mutating root with 
   }
 });
 
-test("Daily root tool policy routes read-only roots through an OpenAI explorer child", () => {
+test("Daily root may inspect read-only objectives directly and still hides writes", () => {
   const tools = { task: false, read: true, bash: true, edit: true, serena_find_symbol: true };
-  const restricted = dailyRootMutationToolPolicy({ daily: true, agent: "openai_orchestrator", root: true, objective: "Inspect calculator.js", tools });
+  const restricted = dailyRootToolPolicy({ daily: true, agent: "openai_orchestrator", root: true, objective: "Inspect calculator.js", tools });
   assert.equal(restricted.task, true);
-  assert.equal(restricted.bash, false);
-  assert.equal(restricted.read, false);
+  assert.equal(restricted.bash, true);
+  assert.equal(restricted.read, true);
+  assert.equal(restricted.serena_find_symbol, true);
   assert.equal(restricted.edit, false);
-  assert.equal(restricted.serena_find_symbol, false);
 
-  const baseline = dailyRootMutationToolPolicy({
+  const baseline = dailyRootToolPolicy({
     daily: true,
     agent: "openai_orchestrator",
     root: true,
@@ -611,13 +628,14 @@ test("Daily root tool policy routes read-only roots through an OpenAI explorer c
   });
   assert.equal(baseline.task, true);
   assert.equal(baseline.bash, true);
-  assert.equal(baseline.read, false);
+  assert.equal(baseline.read, true);
+  assert.equal(baseline.edit, false);
 
   for (const policy of [
     { daily: true, agent: "openai_orchestrator", root: false, objective: "Add multiply(a, b)" },
     { daily: false, agent: "openai_orchestrator", root: true, objective: "Add multiply(a, b)" },
     { daily: true, agent: "openai_explore", root: true, objective: "Add multiply(a, b)" },
-  ]) assert.strictEqual(dailyRootMutationToolPolicy({ ...policy, tools }), tools);
+  ]) assert.strictEqual(dailyRootToolPolicy({ ...policy, tools }), tools);
 });
 
 test("Real Italian implementation objectives close the root surface before Codex", async () => {
@@ -629,7 +647,7 @@ test("Real Italian implementation objectives close the root surface before Codex
 
   for (const objective of objectives) {
     assert.equal(analyzeObjective(objective).classification, "MUTATING", objective);
-    const tools = dailyRootMutationToolPolicy({
+    const tools = dailyRootToolPolicy({
       daily: true,
       agent: "openai_orchestrator",
       root: true,
@@ -638,24 +656,25 @@ test("Real Italian implementation objectives close the root surface before Codex
     });
     assert.equal(tools.task, true, objective);
     assert.equal(tools.bash, true, objective);
-    for (const name of ["read", "glob", "grep", "edit"]) assert.equal(tools[name], false, `${name}: ${objective}`);
+    for (const name of ["read", "glob", "grep"]) assert.equal(tools[name], true, `${name}: ${objective}`);
+    assert.equal(tools.edit, false, objective);
   }
 
   const readOnly = "Analizza come vengono collegati oggi clienti, campagne e Google Ads e spiegami il flusso senza modificare nulla.";
   assert.equal(analyzeObjective(readOnly).classification, "READ_ONLY");
-  assert.equal(dailyRootMutationToolPolicy({
+  assert.equal(dailyRootToolPolicy({
     daily: true,
     agent: "openai_orchestrator",
     root: true,
     objective: readOnly,
     tools: { task: true, read: true, glob: true },
-  }).read, false);
+  }).read, true);
 
   const negated = "Non modificare nulla e non implementare niente: mostrami soltanto come funziona.";
   assert.equal(analyzeObjective(negated).classification, "READ_ONLY");
 });
 
-test("Daily chat.message closes an unresolved root before objective recovery", async () => {
+test("Daily chat.message preserves read-only tools while the root objective is unresolved", async () => {
   const previousDaily = process.env.OPENAI_DAILY_PROFILE;
   const previousRoot = process.env.OPENAI_TEAM_STATE_ROOT;
   process.env.OPENAI_DAILY_PROFILE = "1";
@@ -678,7 +697,8 @@ test("Daily chat.message closes an unresolved root before objective recovery", a
     await plugin["chat.message"]({ sessionID: "root-session", agent: "openai_orchestrator" }, output);
 
     assert.equal(output.message.tools.task, true);
-    for (const name of ["read", "glob", "grep", "bash", "edit"]) assert.equal(output.message.tools[name], false, name);
+    for (const name of ["read", "glob", "grep", "bash"]) assert.equal(output.message.tools[name], true, name);
+    assert.equal(output.message.tools.edit, false);
   } finally {
     await rm(process.env.OPENAI_TEAM_STATE_ROOT, { recursive: true, force: true });
     if (previousDaily === undefined) delete process.env.OPENAI_DAILY_PROFILE;
@@ -819,29 +839,24 @@ test("Daily fanout duplicate detection ignores ordinary coding and reviewer-gate
   assert.equal(requestedDailyFanoutSlice({ daily: false, root: true, agent: "openai_explore", objective: "Create a fanout for documentation." }), null);
 });
 
-test("Daily search policy rejects noisy discovery and duplicate evidence", () => {
-  const seen = new Set();
-  assert.equal(dailySearchDecision({ tool: "glob", args: { pattern: "**/*" }, seen }).reason, "ROOT_GLOB_STARSTAR");
-  assert.equal(dailySearchDecision({ tool: "glob", args: { pattern: "**/*", path: "." }, seen }).reason, "ROOT_GLOB_STARSTAR");
-  assert.equal(dailySearchDecision({ tool: "grep", args: { pattern: "animation", path: "core/lib" }, seen }).allowed, true);
-  const repeated = dailySearchDecision({ tool: "grep", args: { pattern: "animation", path: "core/lib" }, seen: new Set(["grep:animation core/lib"]) });
-  assert.equal(repeated.reason, "DUPLICATE_SEARCH");
-  assert.equal(dailySearchDecision({ tool: "grep", args: { pattern: "version", path: "." }, seen }).reason, "UNTARGETED_REPOSITORY_SEARCH");
-  assert.equal(dailySearchDecision({ tool: "grep", args: { pattern: "package-lock.json", path: "teams" }, seen }).reason, "PACKAGE_LOCK_NOISE");
-  assert.equal(dailySearchDecision({ tool: "bash", args: { command: "strings /opt/homebrew/opt/opencode/bin/opencode" }, seen }).reason, "BINARY_STRINGS_SCAN");
-});
-
 test("Daily stop policy ends confirmatory research once evidence is sufficient", () => {
   assert.equal(shouldStopDaily({ answerSupported: true, remainingEvidence: "confirmatory" }), true);
+  assert.equal(shouldStopDaily({ answerSupported: true, remainingEvidence: "confirmatory", exhaustiveRequested: true }), false);
   assert.equal(shouldStopDaily({ answerSupported: true, materialContradiction: true, remainingEvidence: "confirmatory" }), false);
   assert.equal(shouldStopDaily({ answerSupported: false, remainingEvidence: "confirmatory" }), false);
 });
 
-test("Daily trivial lookups stay direct and bounded", () => {
+test("Read-only operations are not capped by request time or tool budgets", () => {
   const state = beginRequestCycle(undefined, "What model does DAILY use by default?", 0, { OPENAI_DAILY_PROFILE: "1" });
   assert.equal(analyzeObjective("What model does DAILY use by default?").complexity, "TRIVIAL");
   assert.equal(state.limits.delegations, 0);
-  assert.equal(state.limits.toolCalls, 5);
+  let current = state;
+  for (let i = 0; i < 500; i += 1) {
+    current = admitToolCall(current, ["read", "glob", "grep", "serena_find_symbol", "bash"][i % 5], 60 * 60 * 1000);
+  }
+  assert.equal(current.toolCalls, 0);
+  assert.equal(current.weightedUnits, 0);
+  assert.throws(() => admitToolCall(current, "task", 60 * 60 * 1000), /BUDGET_EXHAUSTED/);
 });
 
 test("Daily pricing is optional observability math", () => {
@@ -872,7 +887,7 @@ test("Routing ignores explicitly negated mutations without hiding genuine mutati
 });
 
 
-test("Natural Italian editing requests expose only delegation and guarded shell preflight", () => {
+test("Natural Italian editing requests expose direct reads but keep writes delegated", () => {
   const objectives = [
     "Applica tutte le correzioni linguistiche individuate nei template.",
     "Apporta tutte le correzioni linguistiche individuate.",
@@ -890,7 +905,7 @@ test("Natural Italian editing requests expose only delegation and guarded shell 
       objective,
     );
 
-    const restricted = dailyRootMutationToolPolicy({
+    const restricted = dailyRootToolPolicy({
       daily: true,
       agent: "openai_orchestrator",
       root: true,
@@ -906,7 +921,7 @@ test("Natural Italian editing requests expose only delegation and guarded shell 
     });
 
     assert.equal(restricted.task, true, objective);
-    assert.equal(restricted.read, false, objective);
+    assert.equal(restricted.read, true, objective);
     assert.equal(restricted.bash, true, objective);
     assert.equal(restricted.apply_patch, false, objective);
     assert.equal(restricted.edit, false, objective);

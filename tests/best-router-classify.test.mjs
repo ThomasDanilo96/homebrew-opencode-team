@@ -22,6 +22,16 @@ test("BEST selects parallel coding fanout for an articulated multi-file implemen
   );
 });
 
+test("BEST does not send planning-only refactor requests to implementation coders", () => {
+  assert.equal(classify("Plan the workflow refactor across several packages and runtime components"), "<BEST_ROUTER_ROUTE>FOUR</BEST_ROUTER_ROUTE>");
+  assert.equal(classify("Plan the Docker runtime refactor across several services and packages"), "<BEST_ROUTER_ROUTE>FOUR</BEST_ROUTER_ROUTE>");
+  assert.equal(classify("Plan a simple one-file rename"), "");
+  assert.equal(
+    classify("Plan and implement a multi-file workflow refactor"),
+    "<BEST_ROUTER_ROUTE>FANOUT</BEST_ROUTER_ROUTE>",
+  );
+});
+
 test("BEST preserves selective routing for simple exploration and direct requests", () => {
   assert.equal(
     classify("Dove si trova la configurazione del router BEST in questo repository?"),

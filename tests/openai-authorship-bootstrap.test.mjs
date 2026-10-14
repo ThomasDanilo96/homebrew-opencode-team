@@ -51,7 +51,7 @@ test("authorship guard admits the allowlisted compound checkout baseline without
     ));
     await assert.rejects(() => listingGuard["tool.execute.before"](
       { tool: "bash", agent: "openai_orchestrator", sessionID: "root" },
-      { args: { command: "find ." } },
+      { args: { command: "find . -exec touch file \\;" } },
     ), /Repository mutations must be delegated/);
   } finally {
     if (previousDaily === undefined) delete process.env.OPENAI_DAILY_PROFILE;

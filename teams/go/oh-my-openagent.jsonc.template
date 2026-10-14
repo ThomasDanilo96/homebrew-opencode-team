@@ -3,5 +3,41 @@
   "browser_automation_engine": {
     "provider": "playwright",
     "playwright_mcp_args": ["--headless", "--isolated", "--output-dir", "@DATA_ROOT@/go/playwright/output"]
+  },
+  "profiles": {
+    "go-team-v2-visible": {
+      "[opencode]": {
+        "browser_automation_engine": {
+          "provider": "playwright",
+          "playwright_mcp_args": ["--headless", "--isolated", "--output-dir", "@DATA_ROOT@/go/playwright/output"]
+        },
+        "agents": {
+          "OpenCode-Builder": {
+            "mode": "primary",
+            "permission": { "task": "allow" }
+          }
+        }
+      },
+      "[native]": {
+        "model_profile": "opencode-go/mimo-v2.5",
+        "task": {
+          "default_concurrency": 4,
+          "global_concurrency": 4,
+          "provider_concurrency": { "opencode-go": 2 },
+          "max_depth": 1,
+          "resume_children": true
+        },
+        "agents": {
+          "explore": {
+            "models": ["opencode-go/qwen3.7-plus"],
+            "reasoning": "medium"
+          },
+          "librarian": {
+            "models": ["opencode-go/qwen3.7-plus"],
+            "reasoning": "medium"
+          }
+        }
+      }
+    }
   }
 }

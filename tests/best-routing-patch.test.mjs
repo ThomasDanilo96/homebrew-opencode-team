@@ -404,17 +404,25 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
 
   writeFileSync(routeScript, 'printf "%s\\n" "<BEST_ROUTER_ROUTE>FANOUT</BEST_ROUTER_ROUTE>"\n');
   const fanout = await routeSession("ses-fanout", "Implement a complex multi-file feature");
-  for (const agent of ["openai-coder-1", "openai-coder-2"]) {
-    await fanout.before("task", { subagent_type: agent, run_in_background: true }, `fanout-${agent}`);
-  }
+  await assert.rejects(
+    () => fanout.before("task", { subagent_type: "openai-coder-1", run_in_background: true, prompt: "Plan workflow refactor" }, "fanout-plan-only"),
+    /BEST FANOUT TASK REJECTED.*implementation prompt.*Files you own/,
+  );
+  await fanout.before("task", { subagent_type: "openai-coder-1", run_in_background: true, prompt: "Implement the workflow refactor.\nFiles you own: src/workflow.js" }, "fanout-openai-coder-1");
+  await assert.rejects(
+    () => fanout.before("task", { subagent_type: "openai-coder-2", run_in_background: true, prompt: "Implement Docker changes.\nFiles you own: src/workflow.js" }, "fanout-overlap"),
+    /BEST FANOUT TASK REJECTED.*overlaps/,
+  );
+  await fanout.before("task", { subagent_type: "openai-coder-2", run_in_background: true, prompt: "Implement Docker changes.\nFiles you own: src/docker.js" }, "fanout-openai-coder-2");
   for (const agent of ["openai-coder-1", "openai-coder-2"]) await fanout.after(`fanout-${agent}`);
   await assert.rejects(() => fanout.before("edit", { filePath: "src/index.js" }), /BEST ROUTING GATE/);
   await fanout.before("task", { subagent_type: "openai-reviewer", run_in_background: true }, "fanout-openai-reviewer");
   await fanout.after("fanout-openai-reviewer");
   await assert.rejects(
     () => fanout.before("task", { subagent_type: "openai-reviewer", run_in_background: true }, "fanout-reviewer-duplicate"),
-    /all required agents for route FANOUT were launched successfully/,
+    /BEST ROUTING DUPLICATE: openai-reviewer has already been launched/,
   );
+  await fanout.before("task", { subagent_type: "explore", run_in_background: true }, "fanout-extra-explore");
   await fanout.before("edit", { filePath: "src/index.js" });
   await fanout.before("bash", { command: "git add -- src/index.js" });
 
@@ -422,10 +430,10 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   const continuedFanout = await routeSession("ses-fanout", "continua con la seconda slice", "ses-fanout-next");
   assert.match(continuedFanout.output.parts.at(-1).text, /BEST ROUTE FANOUT/);
   await assert.rejects(() => continuedFanout.before("edit", { filePath: "src/second.js" }), /BEST ROUTING GATE/);
-  for (const agent of ["openai-coder-1", "openai-coder-2"]) {
-    await continuedFanout.before("task", { subagent_type: agent, run_in_background: true }, `fanout-next-${agent}`);
-    await continuedFanout.after(`fanout-next-${agent}`);
-  }
+  await continuedFanout.before("task", { subagent_type: "openai-coder-1", run_in_background: true, prompt: "Implement the next workflow slice.\nFiles you own: src/second.js" }, "fanout-next-openai-coder-1");
+  await continuedFanout.after("fanout-next-openai-coder-1");
+  await continuedFanout.before("task", { subagent_type: "openai-coder-2", run_in_background: true, prompt: "Implement the next Docker slice.\nFiles you own: src/third.js" }, "fanout-next-openai-coder-2");
+  await continuedFanout.after("fanout-next-openai-coder-2");
   await continuedFanout.before("task", { subagent_type: "openai-reviewer", run_in_background: true }, "fanout-next-reviewer");
   await continuedFanout.after("fanout-next-reviewer");
   await continuedFanout.before("edit", { filePath: "src/second.js" });
@@ -456,6 +464,8 @@ test("BEST OMO 5 profile enables persistent memory and retains BEST-specific Ope
   assert.equal(native.memory.recall.enabled, true);
   assert.equal(native.model_profile, "chatgpt-subscription/gpt-6-luna");
   assert.equal(native.task.default_concurrency, 4);
+  assert.equal(native.task.global_concurrency, 4);
+  assert.equal(native.task.provider_concurrency["chatgpt-subscription"], 2);
   assert.equal(native.task.max_depth, 1);
   assert.equal(native.categories["deep-high"].models.length, 1);
   assert.equal(native.agents["openai-architect"].tools.task, false);

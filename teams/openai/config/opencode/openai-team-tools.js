@@ -21,9 +21,9 @@ import { TaskStateError, claimTask, completeTask, readTask, transitionTask } fro
 import { workspaceFingerprint } from "./read-cache.js";
 import { ownerCanBeReclaimed, ownerForProcess } from "./lock-identity.js";
 import { gateTerminalPacketPatch, lifecycleCleanupOptions } from "./gate-state.js";
-import { GuardrailPolicyError, admitDelegation, admitDurableFanout, admitToolCall, allowsDailyOrchestratorShell, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, durableFanoutScope, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision, writeStopLatch } from "./openai-guardrails.js";
+import { GuardrailPolicyError, admitDelegation, admitDurableFanout, admitToolCall, allowsOrchestratorReadOnlyShell, backgroundDelegationAllowed, beginRequestCycle, canonicalDelegatedObjective, createGuardrailState, delegationScope, durableFanoutScope, delegatedScopeIsBound, explicitlyConfirms, finishDelegation, isGuardrailReadOnlyTool, isInternalContinuation, preserveChildGuardState, readStopLatch, recoverRootRequestState, settleVerificationGateState, updateStopLatch, verificationGateDecision, writeStopLatch } from "./openai-guardrails.js";
 import { guardToolExecution } from "../../../../shared/tool-output-guard.js";
-import { assertDailyProviderModel, dailySearchDecision } from "../../../daily/daily-policy.mjs";
+import { assertDailyProviderModel } from "../../../daily/daily-policy.mjs";
 import { appendTaskPacketMarker, extractTaskPacketMarker, objectiveBeforeMarker } from "./correlation-marker.js";
 import {
   CODEX_REQUIRED,
@@ -48,22 +48,6 @@ const ADMIT = join(TEAM_ROOT, "bin", "openai-admit.sh");
 const RELEASE = join(TEAM_ROOT, "bin", "openai-release.sh");
 const BIND = join(TEAM_ROOT, "bin", "openai-bind.sh");
 const reservations = new Map();
-const dailySearchesBySession = new Map();
-const DAILY_SEARCH_TOOLS = new Set(["glob", "grep", "rg", "bash"]);
-const enforceDailySearchPolicy = (input, output) => {
-  if (process.env.OPENAI_DAILY_PROFILE !== "1" || !DAILY_SEARCH_TOOLS.has(String(input.tool || "").toLowerCase())) return;
-  const tool = String(input.tool || "").toLowerCase();
-  const args = output.args || {};
-  const command = String(args.command || args.cmd || "");
-  if (tool === "bash" && !/\bstrings\b/i.test(command) && !/package-lock\.json/i.test(command)) return;
-  const seen = dailySearchesBySession.get(input.sessionID) || new Set();
-  const decision = dailySearchDecision({ tool, args, seen });
-  if (!decision.allowed) throw new GuardrailPolicyError(decision.reason, { terminal: false });
-  if (decision.signature) {
-    seen.add(decision.signature);
-    dailySearchesBySession.set(input.sessionID, seen);
-  }
-};
 export const retainParentCallReservation = (reservationMap, reservation, outcome, gatesPending) => {
   if (!(reservationMap instanceof Map) || outcome !== "success" || gatesPending !== true || !reservation?.task_call_id) return false;
   reservationMap.set(reservation.task_call_id, { ...reservation, token: null });
@@ -263,94 +247,33 @@ export const DEFAULT_AGENT_MODELS = agentModelsForEnv();
 const DAILY_AGENT_LABELS = Object.freeze({ openai_explore: "Explore", openai_librarian: "Librarian", openai_ops: "Ops", tester: "Tester", reviewer: "Reviewer", reviewer_critical: "Critical Reviewer", specialist: "Specialist", codex_executor: "Codex" });
 const FALLBACK_AUTHORITY_HINT = /\breturn\s+fallback_required\b|\bsimulat(?:e|ing)\s+(?:a\s+)?provider\s+failure\b|\bauthoriz(?:e|ing)\s+(?:native\s+)?terra\s+(?:editing|fallback)\b|\bopen\s+the\s+circuit\s+breaker\b|\bmanufactur(?:e|ing)\s+(?:a\s+)?fallback\b/i;
 const normalizedObjectiveEquality = (value) => String(value || "").normalize("NFKC").trim().replace(/\s+/gu, " ").toLowerCase();
-const DAILY_ROOT_MUTATION_DENIED_TOOLS = new Set([
-  "openai_run_codex",
-  "openai_remote_read",
-  "call_omo_agent",
-  "question",
-  "read",
-  "glob",
-  "grep",
-  "rg",
-  "bash",
-  "interactive_bash",
-  "shell",
-  "command",
-  "edit",
-  "write",
-  "apply_patch",
-  "delete",
-  "rename",
-  "file_create",
-  "file_delete",
-  "file_rename",
-  "create_file",
-  "remove_file",
-  "move_file",
-  "multi_edit",
-  "write_file",
-  "patch",
-  "todowrite",
-  "skill",
-  "skill_mcp",
-  "webfetch",
-  "websearch",
-  "web",
-  "documentation",
-  "session",
-  "browser",
-  "mcp",
-  "list_mcp_resources",
-  "list_mcp_resource_templates",
-  "read_mcp_resource",
-  "multi_tool_use.parallel",
-  "serena_initial_instructions",
-  "serena_get_current_config",
-  "serena_activate_project",
-  "serena_check_onboarding_performed",
-  "serena_onboarding",
-  "serena_get_symbols_overview",
-  "serena_find_symbol",
-  "serena_find_declaration",
-  "serena_find_implementations",
-  "serena_find_referencing_symbols",
-  "serena_get_diagnostics_for_file",
-  "serena_search_for_pattern",
-  "serena_list_dir",
-  "serena_find_file",
-  "serena_read_memory",
-  "serena_list_memories",
-  "serena_write_memory",
-  "serena_edit_memory",
-  "serena_delete_memory",
-  "serena_rename_memory",
-  "serena_replace_content",
-  "serena_replace_in_files",
-  "serena_replace_symbol_body",
-  "serena_insert_before_symbol",
-  "serena_insert_after_symbol",
-  "serena_rename_symbol",
-  "serena_safe_delete_symbol",
+const DAILY_ROOT_DISABLED_TOOLS = new Set([
+  "openai_run_codex", "call_omo_agent", "interactive_bash", "shell", "command", "edit", "write", "apply_patch",
+  "delete", "rename", "file_create", "file_delete", "file_rename", "create_file", "remove_file", "move_file",
+  "multi_edit", "write_file", "patch", "skill", "skill_mcp", "browser", "mcp", "multi_tool_use.parallel",
+  "serena_replace_content", "serena_replace_in_files", "serena_replace_symbol_body", "serena_insert_before_symbol",
+  "serena_insert_after_symbol", "serena_rename_symbol", "serena_safe_delete_symbol", "serena_write_memory",
+  "serena_edit_memory", "serena_delete_memory", "serena_rename_memory",
 ]);
-
-export const dailyRootMutationToolPolicy = ({ daily = false, agent = "", root = false, objective = "", tools = {} } = {}) => {
+const DAILY_ROOT_READ_TOOLS = new Set([
+  "read", "glob", "grep", "rg", "list", "webfetch", "websearch", "question", "skill_mcp", "docs", "documentation",
+  "todowrite", "openai_remote_read", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource",
+  "context7_resolve-library-id", "context7_query-docs", "websearch_web_search_exa", "websearch_web_search_tavily",
+  "websearch_web_search_brave", "session_list", "session_read", "session_search", "session_info",
+  "background_output", "look_at", "serena_initial_instructions", "serena_get_current_config",
+  "serena_get_symbols_overview", "serena_find_symbol", "serena_find_declaration", "serena_find_implementations",
+  "serena_find_referencing_symbols", "serena_get_diagnostics_for_file", "serena_search_for_pattern",
+  "serena_list_dir", "serena_find_file", "serena_read_memory", "serena_list_memories", "serena_activate_project",
+  "serena_list_mcp_resources", "serena_list_mcp_resource_templates", "serena_read_mcp_resource", "serena_open_dashboard",
+]);
+export const dailyRootToolPolicy = ({ daily = false, agent = "", root = false, tools = {} } = {}) => {
   if (daily !== true || agent !== "openai_orchestrator" || root !== true) return tools;
   if (!tools || typeof tools !== "object" || Array.isArray(tools)) return tools;
-  const names = new Set([
-    ...Object.keys(tools),
-    ...DAILY_ROOT_MUTATION_DENIED_TOOLS,
-    "task",
-  ]);
-  const mutationObjective = analyzeObjective(objective).classification === "MUTATING";
-  const baselinePreflightRequested = /\b(?:baseline|preflight|checkout inventory|git status|git rev-parse|worktree list)\b/i.test(String(objective || ""));
-  const readOnlyListingRequested = /(?:\b(?:map\w*|inventory|list\w*|ricognizion\w*|mapp\w*|elenc\w*)\b[\s\S]{0,180}\b(?:files?|paths?|directories|repository|deploy|percorsi|file|directory)\b|\b(?:files?|percorsi?)\b[\s\S]{0,120}\b(?:map\w*|list\w*|mapp\w*|elenc\w*)\b)/iu.test(String(objective || ""));
-
-  return Object.fromEntries(
-    [...names].map((name) => {
-      const normalized = String(name).toLowerCase();
-      return [name, normalized === "task" || (normalized === "bash" && (mutationObjective || baselinePreflightRequested || readOnlyListingRequested))];
-    }),
-  );
+  const names = new Set([...Object.keys(tools), ...DAILY_ROOT_DISABLED_TOOLS, ...DAILY_ROOT_READ_TOOLS, "task", "bash"]);
+  return Object.fromEntries([...names].map((name) => {
+    const normalized = String(name).toLowerCase();
+    return [name, normalized === "task" || normalized === "bash" || isGuardrailReadOnlyTool(normalized)];
+  }));
 };
 
 export const requestedDailyFanoutSlice = ({ daily = false, root = false, agent = "", objective = "" } = {}) => {
@@ -2942,7 +2865,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
       ? output.parts.filter((part) => part?.type === "text" && typeof part.text === "string").map((part) => part.text).join("\n")
       : "");
     const originalTools = output?.message?.tools;
-    const restrictedTools = dailyRootMutationToolPolicy({
+    const restrictedTools = dailyRootToolPolicy({
       daily: true,
       agent,
       root,
@@ -2956,7 +2879,6 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
   "tool.execute.before": async (input, output) => {
     try {
       guardToolExecution({ team: "openai", input, output });
-      enforceDailySearchPolicy(input, output);
       const toolName = String(input.tool || "").toLowerCase();
      let guard = await guardrailFor(input.sessionID);
       if (toolName === "task" && guard && (!guard.authoritativeObjective || /OMO_INTERNAL_INITIATOR/.test(String(guard.authoritativeObjective)))) {
@@ -3086,7 +3008,7 @@ export const OpenAITeamTools = async (pluginInput = {}) => {
     }
     if (isMutationCapableTool(toolName)) {
        const shellCommand = output.args?.command ?? output.args?.cmd ?? input.args?.command ?? input.args?.cmd;
-       if (sessionAgent === "openai_orchestrator" && allowsDailyOrchestratorShell(toolName, shellCommand, guard?.authoritativeObjective)) return;
+       if (sessionAgent === "openai_orchestrator" && allowsOrchestratorReadOnlyShell(toolName, shellCommand)) return;
        if (sessionAgent === "openai_orchestrator" && REPOSITORY_MUTATING_TOOLS.has(toolName)) {
         throw new Error("openai_orchestrator repository mutation is denied; delegate implementation to codex_executor");
       }

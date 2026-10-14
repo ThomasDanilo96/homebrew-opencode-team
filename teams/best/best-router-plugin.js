@@ -19,6 +19,17 @@ const ROUTES = new Set([
   "<BEST_ROUTER_ROUTE>FOUR</BEST_ROUTER_ROUTE>",
   "<BEST_ROUTER_ROUTE>FANOUT</BEST_ROUTER_ROUTE>"
 ]);
+const FANOUT_CODERS = new Set(["openai-coder-1", "openai-coder-2"]);
+const implementationTaskOwnership = (prompt) => {
+  const text = String(prompt || "");
+  if (!/\b(?:implement|edit|modify|change|create|add|fix|update|refactor|rewrite)\b/i.test(text)
+      || /\bplan[- ]only\b/i.test(text)) return [];
+  const match = text.match(/^\s*files you own\s*:\s*(.+)$/im)
+    || text.match(/^\s*owned files\s*:\s*(.+)$/im)
+    || text.match(/^\s*owned paths\s*:\s*(.+)$/im);
+  if (!match) return [];
+  return match[1].split(/[,;\s]+/).map((path) => path.replace(/^[`'"([{]+|[`'"})\]]+$/g, "").trim()).filter(Boolean);
+};
 const ROUTE_STATE_KEY = Symbol.for("brew-opencode-team.best-router.route-state.v1");
 const ROUTE_STATE = globalThis[ROUTE_STATE_KEY] ??= new Map();
 const COMPLETED_ROUTE_STATE = new Map();
@@ -247,6 +258,13 @@ export default async function bestRouterPlugin(input) {
       }
       const classification = ROUTES.has(route) ? route.match(/<BEST_ROUTER_ROUTE>(EXPLORE|LIBRARIAN|BOTH|FOUR|FANOUT)<\/BEST_ROUTER_ROUTE>/)[1] : "DIRECT";
       if (!ROUTES.has(route)) {
+        const source = originalParts[originalParts.length - 1];
+        const requestID = String(source?.id ?? hookInput.messageID ?? "unknown-request");
+        const previous = ROUTE_STATE.get(sessionID);
+        if (previous && previous.request_id !== requestID) {
+          ROUTE_STATE.delete(sessionID);
+          log({ event: "route_state_cleared_for_new_direct_request", session_id: sessionID, previous_request_id: previous.request_id, request_id: requestID });
+        }
         log({ event: "chat.message", session_id: sessionID, agent, classification, route_appended: false });
         return;
       }
@@ -295,6 +313,7 @@ export default async function bestRouterPlugin(input) {
           required_agents,
           pending_agents: [],
           launched_agents: required_agents.filter((required) => completedAgents.includes(required)),
+          file_ownership: {},
           gate_open: required_agents.every((required) => completedAgents.includes(required)),
         });
       }
@@ -316,12 +335,32 @@ export default async function bestRouterPlugin(input) {
       if (!state) return;
       if (state.gate_open) {
         if (tool === "task") {
-          throw new Error(`BEST ROUTING GATE: all required agents for route ${state.route} were launched successfully; continue the root task without duplicate delegation.`);
+          const requestedAgent = String(output.args?.subagent_type || output.args?.agent || "");
+          if (state.pending_agents.includes(requestedAgent) || state.launched_agents.includes(requestedAgent)) {
+            log({ event: "task_rejected_duplicate_after_route_gate", session_id: toolInput.sessionID, route: state.route, agent: requestedAgent, call_id: toolInput.callID });
+            throw new Error(`BEST ROUTING DUPLICATE: ${requestedAgent || "task"} has already been launched for route ${state.route}; continue with its existing result or request a distinct agent.`);
+          }
+          log({ event: "additional_task_after_route_gate", session_id: toolInput.sessionID, route: state.route, agent: requestedAgent, call_id: toolInput.callID });
         }
         return;
       }
       if (tool === "task") {
         const subagent = typeof output.args?.subagent_type === "string" ? output.args.subagent_type : "";
+        if (state.route === "FANOUT" && FANOUT_CODERS.has(subagent)) {
+          const assignedFiles = implementationTaskOwnership(output.args?.prompt || output.args?.description);
+          if (!assignedFiles.length) {
+            throw new Error(`BEST FANOUT TASK REJECTED: ${subagent} needs a concrete implementation prompt and a "Files you own: path1, path2" list; plan-only work belongs on a planning route.`);
+          }
+          const normalizedFiles = assignedFiles.map((path) => path.replace(/\\/g, "/").replace(/\/$/, "").toLowerCase());
+          const previousFiles = Object.entries(state.file_ownership || {})
+            .filter(([agent]) => agent !== subagent)
+            .flatMap(([, files]) => files);
+          const conflicts = normalizedFiles.filter((path) => previousFiles.some((other) => path === other || path.startsWith(`${other}/`) || other.startsWith(`${path}/`)));
+          if (conflicts.length) {
+            throw new Error(`BEST FANOUT TASK REJECTED: ${subagent} file ownership overlaps another coder: ${conflicts.join(", ")}. Reassign disjoint files.`);
+          }
+          state.file_ownership = { ...(state.file_ownership || {}), [subagent]: normalizedFiles };
+        }
         let background = output.args?.run_in_background;
         const details = {
           session_id: toolInput.sessionID,
@@ -350,7 +389,7 @@ export default async function bestRouterPlugin(input) {
           throw new Error(`BEST ROUTING GATE: task requires run_in_background=true for the exact route agent '${subagent}'. Use native task(subagent_type="${subagent}", run_in_background=true); general and duplicate tasks do not satisfy route ${state.route}.`);
         }
         state.pending_agents.push(subagent);
-        PENDING_TASKS.set(`${toolInput.sessionID}:${toolInput.callID}`, { sessionID: toolInput.sessionID, agent: subagent });
+        PENDING_TASKS.set(`${toolInput.sessionID}:${toolInput.callID}`, { sessionID: toolInput.sessionID, agent: subagent, request_id: state.request_id });
         log({ event: "task_pending", ...details, pending_agents: state.pending_agents, gate_action: "allow" });
         return;
       }
@@ -378,7 +417,7 @@ export default async function bestRouterPlugin(input) {
       if (!pending) return;
       PENDING_TASKS.delete(key);
       const state = ROUTE_STATE.get(toolInput.sessionID);
-      if (!state || !state.required_agents.includes(pending.agent)) return;
+      if (!state || state.request_id !== pending.request_id || !state.required_agents.includes(pending.agent)) return;
       const failed = output.metadata?.error !== undefined || output.metadata?.status === "error" || output.metadata?.success === false;
       state.pending_agents = state.pending_agents.filter((agent) => agent !== pending.agent);
       if (failed) {

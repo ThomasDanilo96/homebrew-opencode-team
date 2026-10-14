@@ -5,6 +5,8 @@
 
 set -uo pipefail
 
+source "$(dirname "${BASH_SOURCE[0]}")/bridge-tmux-policy.sh"
+
 SERVER_URL="${OPENCODE_SERVER_URL:?OPENCODE_SERVER_URL must be set}"
 RUN_STATE_DIR="${RUN_STATE_DIR:?RUN_STATE_DIR must be set}"
 PARENT_SESSION_ID="${PARENT_SESSION_ID:?PARENT_SESSION_ID must be set}"
@@ -18,18 +20,6 @@ NO_ATTACH_DIR="$RUN_STATE_DIR/no_attach"
 POLL_INTERVAL=3
 
 log() { echo "[$(date '+%H:%M:%S')] [bridge] $*" >&2; }
-
-native_ui_only_agent() {
-  local candidate="$1"
-  local configured
-  [ -n "${NATIVE_UI_ONLY_AGENTS:-}" ] || return 1
-  IFS=',' read -ra configured_agents <<< "$NATIVE_UI_ONLY_AGENTS"
-  for configured in "${configured_agents[@]}"; do
-    configured=$(echo "$configured" | tr -d '[:space:]')
-    [ "$candidate" = "$configured" ] && return 0
-  done
-  return 1
-}
 
 cleanup() {
   log "Bridge shutting down"
@@ -90,13 +80,6 @@ while true; do
       continue
     fi
 
-    if [ -f "$NO_ATTACH_DIR/${sess_id}.marker" ]; then
-      grep -q "^${sess_id}$" "$SEEN_FILE" 2>/dev/null || echo "$sess_id" >> "$SEEN_FILE"
-      rm -f "$NO_ATTACH_DIR/${sess_id}.marker"
-      log "Child $sess_id native-UI-only, skipping pane"
-      continue
-    fi
-
     grep -q "^${sess_id}$" "$SEEN_FILE" 2>/dev/null && {
       if [ -f "$DONE_DIR/${sess_id}" ] && ! grep -q "^${sess_id}$" "$ATTACHED_FILE" 2>/dev/null; then
         rm -f "$DONE_DIR/${sess_id}"
@@ -105,21 +88,20 @@ while true; do
       continue
     }
 
-    AGENT_LABEL="unknown"
-    case "$agent" in
-      explore) AGENT_LABEL="Explore" ;;
-      librarian) AGENT_LABEL="Librarian" ;;
-    esac
-    if [ "$AGENT_LABEL" = "unknown" ]; then
-      TITLE_LOWER=$(echo "$title" | tr '[:upper:]' '[:lower:]')
-      echo "$TITLE_LOWER" | grep -qE "explore|search|codebase" && AGENT_LABEL="Explore"
-      echo "$TITLE_LOWER" | grep -qE "librarian|research|doc" && AGENT_LABEL="Librarian"
-    fi
+    AGENT_LABEL=$(bridge_agent_label "$agent" "$title")
     [ "$AGENT_LABEL" = "unknown" ] && continue
 
-    if native_ui_only_agent "$agent"; then
+    if [ -f "$NO_ATTACH_DIR/${sess_id}.marker" ]; then
+      if [ "$(bridge_no_attach_action "$agent")" = "native-ui-only" ]; then
+        grep -q "^${sess_id}$" "$SEEN_FILE" 2>/dev/null || echo "$sess_id" >> "$SEEN_FILE"
+        rm -f "$NO_ATTACH_DIR/${sess_id}.marker" 2>/dev/null
+        log "Child $sess_id native-UI-policy, skipping pane"
+        continue
+      fi
+      rm -f "$NO_ATTACH_DIR/${sess_id}.marker"
+      log "Child $sess_id no-attach handoff accepted by tmux policy; attaching pane"
+    elif native_ui_only_agent "$agent"; then
       grep -q "^${sess_id}$" "$SEEN_FILE" 2>/dev/null || echo "$sess_id" >> "$SEEN_FILE"
-      rm -f "$NO_ATTACH_DIR/${sess_id}.marker" 2>/dev/null
       log "Child $sess_id native-UI-policy, skipping pane"
       continue
     fi

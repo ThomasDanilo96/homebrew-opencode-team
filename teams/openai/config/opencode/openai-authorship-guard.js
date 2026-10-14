@@ -1,7 +1,7 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { CODEX_REQUIRED, CODEX_SUCCESS, TERRA_FALLBACK, ensurePolicy, readPolicy } from "./codex-authority.js";
-import { allowsDailyOrchestratorShell } from "./openai-guardrails.js";
+import { allowsOrchestratorReadOnlyShell, isGuardrailReadOnlyTool } from "./openai-guardrails.js";
 import { isAllowlistedVerificationCommand, verificationCommandCategory } from "./execution-policy.js";
 import { createHash } from "node:crypto";
 import { extractTaskPacketMarker, objectiveBeforeMarker } from "./correlation-marker.js";
@@ -10,7 +10,7 @@ import { readTask, transitionTask } from "./task-state.js";
 import { updateWorkPacketByID } from "./work-packet.js";
 
 const READ_ONLY_TOOLS = new Set([
-  "read", "glob", "grep", "webfetch", "todowrite", "skill", "skill_mcp",
+  "read", "glob", "grep", "webfetch", "skill_mcp", "todowrite",
   "question",
   "task", "docs", "documentation",
   "lsp_diagnostics", "lsp_symbols", "lsp_definition", "lsp_references", "lsp_hover", "lsp_workspace_symbols",
@@ -135,7 +135,7 @@ const sessionRoot = async (pluginInput, sessionID) => {
 const isSerenaMutation = (toolName) => SERENA_MUTATION_PREFIXES.some((prefix) => toolName.startsWith(prefix));
 const isCustomMutation = (toolName) => /(?:mutat|write|edit|patch|delete|remove|rename|create|move|exec|bash|shell|command)/.test(toolName);
 const isDangerous = (toolName) => UNBOUNDED_EXECUTION.has(toolName) || NATIVE_MUTATIONS.has(toolName) || isSerenaMutation(toolName) || isCustomMutation(toolName);
-const isKnownTool = (toolName) => READ_ONLY_TOOLS.has(toolName) || toolName === "openai_run_codex" || UNBOUNDED_EXECUTION.has(toolName) || NATIVE_MUTATIONS.has(toolName) || isSerenaMutation(toolName);
+const isKnownTool = (toolName) => isGuardrailReadOnlyTool(toolName) || READ_ONLY_TOOLS.has(toolName) || toolName === "openai_run_codex" || UNBOUNDED_EXECUTION.has(toolName) || NATIVE_MUTATIONS.has(toolName) || isSerenaMutation(toolName);
 
 const resolveAgent = async (pluginInput, input) => {
   if (input.agent) return input.agent;
@@ -344,7 +344,7 @@ export const OpenAIAuthorshipGuard = async (pluginInput = {}) => ({
       await record("codex_tool_allowed", input, agent, CODEX_REQUIRED, "ALLOW");
       return;
     }
-    if (READ_ONLY_TOOLS.has(toolName)) return;
+    if (isGuardrailReadOnlyTool(toolName) || READ_ONLY_TOOLS.has(toolName)) return;
 
     const agent = await resolveAgent(pluginInput, input);
     if (agent === "tester" && toolName === "bash") {
@@ -383,7 +383,7 @@ export const OpenAIAuthorshipGuard = async (pluginInput = {}) => ({
     }
 
     const command = output.args?.command ?? output.args?.cmd ?? input.args?.command ?? input.args?.cmd;
-    if (agent === "openai_orchestrator" && allowsDailyOrchestratorShell(toolName, command, await genuineObjective(pluginInput, input))) {
+    if (agent === "openai_orchestrator" && allowsOrchestratorReadOnlyShell(toolName, command)) {
       await record("daily_orchestrator_shell_allowed", input, agent, "NONE", "ALLOW");
       return;
     }

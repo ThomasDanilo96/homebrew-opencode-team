@@ -69,11 +69,28 @@ export const confirmationCategory = (operation) => Object.entries(CATEGORIES).fi
 const negatedCategoryAction = (request, category) => category === "destructive" && /(?:(?:\b(?:do\s+not|don['’]t|must\s+not|never|no)\b|不(?:要|得)?|禁止|别|\bnon\b|\bno\b)[^\n]{0,40}(?:\b(?:destruct(?:ive|ion)|delet(?:e|ing|ed|ion)|remov(?:e|ing|ed)|drop(?:ping|ped)?|reset(?:ting|ted)?|rm)\b|删除|移除|丢弃|重置|消除|\b(?:elimina|eliminare|rimuovi|rimuovere|cancella|cancellare|reimposta|eliminar|elimine|rimuovere|borrar|borra)\b))/iu.test(String(request || ""));
 export const explicitlyConfirms = (request, category) => Boolean(category && CATEGORIES[category] && !/\b(?:continue|go ahead|proceed)\b/i.test(String(request || "")) && !negatedCategoryAction(request, category) && /(?:\b(?:authorize|authorise|confirm|explicitly|approved?|consent|yes|conferma|confermato|approva|autorizza)\b|确认|同意|批准)/iu.test(String(request || "")) && CATEGORIES[category].test(String(request || "")));
 const DAILY_SHELL_TOOLS = new Set(["bash", "interactive_bash", "shell", "command"]);
-const SAFE_SSH_PROBE = /^\s*(?:command\s+-v\s+ssh|ssh\s+-V|ssh\s+-G\s+[A-Za-z0-9._-]+)\s*$/i;
-const DAILY_ROOT_PREFLIGHT_REQUEST = /\b(?:baseline|preflight|checkout inventory|git status|git rev-parse|worktree list)\b/i;
-const DAILY_ROOT_LISTING_REQUEST = /(?:\b(?:map\w*|inventory|list\w*|ricognizion\w*|mapp\w*|elenc\w*)\b[\s\S]{0,180}\b(?:files?|paths?|directories|repository|deploy|percorsi|file|directory)\b|\b(?:files?|percorsi?)\b[\s\S]{0,120}\b(?:map\w*|list\w*|mapp\w*|elenc\w*)\b)/iu;
-const DAILY_ROOT_LISTING_COMMAND = /^ls -la(?:\s+(?:\.{1,2}|\/[A-Za-z0-9._/-]+|[A-Za-z0-9._/-]+))?$/i;
-const DAILY_ROOT_PREFLIGHT_COMMAND = /^(?:pwd|date (?:\+%s|['"]\+%Y-%m-%d %H:%M:%S %Z %z['"])|git status(?: --short| --porcelain=v1 --untracked-files=all)?|git rev-parse (?:--show-toplevel|HEAD)|git branch --show-current|git diff(?: --name-status| --cached --name-status)?|git ls-files --others --exclude-standard|git worktree list|git log -1 --oneline|command -v (?:bash|git|python3?))$/i;
+const ROOT_PREFLIGHT_COMMAND = /^(?:pwd|date (?:\+%s|['"]\+%Y-%m-%d %H:%M:%S %Z %z['"])|git status(?: --short| --porcelain=v1 --untracked-files=all)?|git rev-parse (?:--show-toplevel|HEAD)|git branch --show-current|git diff(?: --name-status| --cached --name-status)?|git ls-files --others --exclude-standard|git worktree list|git log -1 --oneline|command -v (?:bash|git|python3?))$/i;
+const ROOT_READ_ONLY_SHELL_COMMAND = /^(?:pwd|date(?:\s+[^;&|<>`$()]*)?|ls(?:\s+[^;&|<>`$()]*)?|find(?:\s+[^;&|<>`$()]*)?|(?:rg|grep|cat|head|tail|wc|file|stat|du|tree|which|test)\s+[^;&|<>`$()]+|git\s+(?:(?:status|diff|show|log|rev-parse|ls-files|ls-tree|grep)\b[^;&|<>`$()]*|branch(?:\s+(?:--show-current|--list\b|-l\b)[^;&|<>`$()]*)?|worktree\s+list\b[^;&|<>`$()]*|remote\s+-v\b[^;&|<>`$()]*|tag(?:\s+(?:--list|-l))?|config\s+--get(?:-all)?\b[^;&|<>`$()]*))$/i;
+const ROOT_READ_ONLY_TOOLS = new Set([
+  "read", "glob", "grep", "rg", "list", "webfetch", "websearch", "question", "skill_mcp", "docs", "documentation",
+  "todowrite", "openai_remote_read", "list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource",
+  "context7_resolve-library-id", "context7_query-docs", "websearch_web_search_exa", "websearch_web_search_tavily",
+  "websearch_web_search_brave", "session_list", "session_read", "session_search", "session_info",
+  "background_output", "look_at", "serena_initial_instructions", "serena_get_current_config",
+  "serena_get_symbols_overview", "serena_find_symbol", "serena_find_declaration", "serena_find_implementations",
+  "serena_find_referencing_symbols", "serena_get_diagnostics_for_file", "serena_search_for_pattern",
+  "serena_list_dir", "serena_find_file", "serena_read_memory", "serena_list_memories", "serena_activate_project",
+  "serena_list_mcp_resources", "serena_list_mcp_resource_templates", "serena_read_mcp_resource", "serena_open_dashboard",
+]);
+const SERENA_MUTATION_TOOL = /^serena_(?:replace_|insert_|rename_|delete_|write_|safe_delete_|edit_)/i;
+export const isGuardrailReadOnlyTool = (tool) => {
+  const name = String(tool || "").toLowerCase();
+  return ROOT_READ_ONLY_TOOLS.has(name)
+    || name.startsWith("lsp_")
+    || name.startsWith("context7_")
+    || name.startsWith("websearch_")
+    || (name.startsWith("serena_") && !SERENA_MUTATION_TOOL.test(name));
+};
 const shellStages = (operation) => {
   const stages = [];
   let stage = "";
@@ -102,27 +119,30 @@ const isDailyRootPreflight = (operation) => {
   const normalized = operation.trim().replace(/^\$/, "").trim();
   if (!normalized || /[|<>`$()\n]/.test(normalized)) return false;
   const stages = normalized.split(/\s*(?:;|&&)\s*/);
-  return stages.length > 0 && stages.length <= 16 && stages.every((stage) => DAILY_ROOT_PREFLIGHT_COMMAND.test(stage.trim()));
+  return stages.length > 0 && stages.length <= 16 && stages.every((stage) => ROOT_PREFLIGHT_COMMAND.test(stage.trim()));
+};
+const isRootReadOnlyShellOperation = (operation) => {
+  if (typeof operation !== "string" || operation.length > 20000) return false;
+  const normalized = operation.trim().replace(/^\$/, "").trim();
+  if (!normalized || /[|<>`$()\n\r]/.test(normalized)) return false;
+  const stages = normalized.split(/\s*(?:;|&&)\s*/);
+  return stages.length > 0 && stages.every((stage) => {
+    const command = stage.trim();
+    return !/[;&|]/.test(command)
+      && !/(?:^|\s)(?:-exec(?:dir)?|-delete|--output|--pre|--upload-pack|--receive-pack)(?:\s|$)/i.test(command)
+      && !/\bsed\s+-i\b/i.test(command)
+      && ROOT_READ_ONLY_SHELL_COMMAND.test(command);
+  });
 };
 const DAILY_SHELL_MUTATION = /^(?:(["'])(patch|apply_patch)\1|(patch|apply_patch))(?=\s|$|<)/i;
 const DAILY_GIT_REPOSITORY_MUTATION = /^git\s+(?:add|commit|checkout|switch|reset|restore|clean|merge|rebase|cherry-pick|revert|rm|mv|apply|am)\b/i;
 const hasDailyShellMutation = (operation) => shellStages(operation).some((stage) => DAILY_SHELL_MUTATION.test(stage.trim()));
 const hasDailyGitRepositoryMutation = (operation) => shellStages(operation).some((stage) => DAILY_GIT_REPOSITORY_MUTATION.test(stage.trim()));
-export const allowsDailyOrchestratorShell = (tool, command, authoritativeObjective, env = process.env) => {
+export const allowsOrchestratorReadOnlyShell = (tool, command) => {
   if (!DAILY_SHELL_TOOLS.has(String(tool || "").toLowerCase())) return false;
-  const objective = String(authoritativeObjective || "");
   const operation = String(command || "");
   if (hasDailyShellMutation(operation) || hasDailyGitRepositoryMutation(operation)) return false;
-  if (isDailyRootPreflight(operation)) return true;
-  if (DAILY_ROOT_PREFLIGHT_REQUEST.test(objective)) return false;
-  if (DAILY_ROOT_LISTING_REQUEST.test(objective)) return DAILY_ROOT_LISTING_COMMAND.test(operation);
-  if (env.OPENAI_DAILY_PROFILE !== "1") return false;
-  if (analyzeObjective(objective).classification === "MUTATING") return isDailyRootPreflight(operation);
-  const category = confirmationCategory(operation);
-  if (category === "vps_ssh" && SAFE_SSH_PROBE.test(operation)) return true;
-  if (category === "vps_ssh" && !CATEGORIES.vps_ssh.test(objective)) return false;
-  if (["push", "deploy", "cron", "destructive"].includes(category) && !explicitlyConfirms(objective, category)) return false;
-  return true;
+  return isDailyRootPreflight(operation) || isRootReadOnlyShellOperation(operation);
 };
 export const requiresExplicitConfirmation = (operation) => confirmationCategory(operation) !== null;
 export class GuardrailPolicyError extends Error { constructor(reason, details = {}) { super(`OPENAI_GUARDRAIL_${reason}: stop and report state; do not create todos or retry.`); this.name = "GuardrailPolicyError"; this.code = `OPENAI_GUARDRAIL_${reason}`; this.policy = { type: "policy_error", reason, stop: true, retry: false, ...details }; } }
@@ -238,6 +258,7 @@ export const verificationGateDecision = (state, tool, agent, prompt, activeTeste
   const packetID = state?.pendingVerificationPacketID;
   if (!packetID) return { allowed: true };
   const name = String(tool || "").toLowerCase();
+  if (isGuardrailReadOnlyTool(name)) return { allowed: true, readOnly: true };
   if (["bash", "interactive_bash", "shell", "command"].includes(name) && agent === "openai_orchestrator") return { allowed: false, reason: "MANDATORY_TESTER_GATE" };
   if (agent === "tester" && activeTester) return { allowed: true, testerGate: true };
   if (name !== "task") return { allowed: false, reason: "MANDATORY_TESTER_GATE" };
@@ -258,8 +279,8 @@ export const settleVerificationGateState = (state, packetID, taskState) => {
     ? { ...state, pendingVerificationPacketID: null, pendingTesterActive: false }
     : state;
 };
-const toolWeight = (tool) => /^(read|search|glob|grep|lsp_|serena_(find|search|get)|diagnostic)/i.test(String(tool || "")) ? 0.5 : String(tool || "").trim() ? 1 : 0;
-export const admitToolCall = (state, tool = "tool", now = Date.now()) => { if (typeof tool === "number") { now = tool; tool = "tool"; } if (state.stopped) throw new GuardrailPolicyError("STOPPED"); if (state.verificationTerminal) throw new GuardrailPolicyError("VERIFICATION_TERMINAL"); if (state.budgetTerminal) throw new GuardrailPolicyError("BUDGET_EXHAUSTED"); if (now - state.startedAt >= state.limits.minutes * 60000) { state.budgetTerminal = true; throw new GuardrailPolicyError("BUDGET_EXHAUSTED", { terminal: true }); } const weight = toolWeight(tool), units = (state.weightedUnits || 0) + weight; if (units > state.limits.toolCalls) { state.budgetTerminal = true; throw new GuardrailPolicyError("BUDGET_EXHAUSTED", { terminal: true }); } return { ...state, toolCalls: state.toolCalls + (weight ? 1 : 0), weightedUnits: units }; };
+const toolWeight = (tool) => isGuardrailReadOnlyTool(tool) || ["bash", "interactive_bash", "shell", "command"].includes(String(tool || "").toLowerCase()) ? 0 : String(tool || "").trim() ? 1 : 0;
+export const admitToolCall = (state, tool = "tool", now = Date.now()) => { if (typeof tool === "number") { now = tool; tool = "tool"; } if (state.stopped) throw new GuardrailPolicyError("STOPPED"); const weight = toolWeight(tool); if (weight === 0) return { ...state }; if (state.verificationTerminal) throw new GuardrailPolicyError("VERIFICATION_TERMINAL"); if (state.budgetTerminal) throw new GuardrailPolicyError("BUDGET_EXHAUSTED"); if (now - state.startedAt >= state.limits.minutes * 60000) { state.budgetTerminal = true; throw new GuardrailPolicyError("BUDGET_EXHAUSTED", { terminal: true }); } const units = (state.weightedUnits || 0) + weight; if (units > state.limits.toolCalls) { state.budgetTerminal = true; throw new GuardrailPolicyError("BUDGET_EXHAUSTED", { terminal: true }); } return { ...state, toolCalls: state.toolCalls + 1, weightedUnits: units }; };
 export const admitDelegation = (state, objective, { review = false, explicitlyRequestedReview = false } = {}) => { if (state.stopped) throw new GuardrailPolicyError("STOPPED"); if (state.verificationTerminal && !review) throw new GuardrailPolicyError("VERIFICATION_TERMINAL"); if (state.activeDelegation && !state.daily) throw new GuardrailPolicyError("CONCURRENT_DELEGATION"); if (state.delegations >= state.limits.delegations) throw new GuardrailPolicyError("DELEGATION_LIMIT"); if (!objectiveIsBound(state.authoritativeObjective || state.objective, objective)) throw new GuardrailPolicyError("OBJECTIVE_UNBOUND"); if (review && !explicitlyRequestedReview) throw new GuardrailPolicyError("REVIEW_NOT_REQUESTED"); const scope = delegationScope(objective); if (!review && state.limits.delegations > 1 && state.delegationScopes?.includes(scope)) throw new GuardrailPolicyError("DUPLICATE_DELEGATION_SCOPE"); const units = (state.weightedUnits || 0) + 2; if (units > state.limits.toolCalls) { state.budgetTerminal = true; throw new GuardrailPolicyError("BUDGET_EXHAUSTED", { terminal: true }); } const activeDelegations = (state.activeDelegations || 0) + 1; return { ...state, weightedUnits: units, delegations: state.delegations + 1, activeDelegations, activeDelegation: activeDelegations > 0, delegationScopes: [...(state.delegationScopes || []), scope] }; };
 export const admitDurableFanout = (state, objective, packets = [], { parentSessionID = null, rootObjectiveSHA = null } = {}) => {
   if (!state?.daily || !Number.isInteger(state.limits?.delegations)) return { scope: delegationScope(objective), existingScopes: [], remaining: null };
