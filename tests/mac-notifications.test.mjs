@@ -118,7 +118,7 @@ test("notification click opens a detached chat in Terminal when no tmux client i
 
 test("each profile loads the shared macOS notification plugin", async () => {
   const { readFile } = await import("node:fs/promises");
-  for (const team of ["best", "free", "go", "openai", "daily"]) {
+  for (const team of ["best", "best-ecc", "free", "go", "openai", "daily"]) {
     const config = await readFile(new URL(`../teams/${team}/opencode.jsonc.template`, import.meta.url), "utf8");
     assert.ok(config.includes("@PACKAGE_ROOT@/shared/mac-notifications/plugin.js"), team);
   }
