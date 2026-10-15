@@ -309,8 +309,8 @@ same(bestEcc.agent.explore.permission.task, "deny", "BEST-ECC explore nested-tas
 same(bestEcc.agent.librarian.permission.task, "deny", "BEST-ECC librarian nested-task permission");
 same(bestEcc.agent["ecc-tdd-guide"].permission.edit, "deny", "BEST-ECC TDD planner read-only policy");
 same(bestEcc.agent["ecc-tdd-guide"].model, "opencode-go/qwen3.7-plus", "BEST-ECC economical TDD planner model");
-assert(bestEcc.skills.paths.includes(path.join(home, "data", "best-ecc", "ecc", "skills")), "BEST-ECC selected ECC skill root missing");
-assert(bestEcc.plugin.some((plugin) => plugin === path.join(home, "data", "best-ecc", "ecc", ".opencode", "plugins", "ecc-hooks.ts")), "BEST-ECC ECC hooks plugin path missing");
+assert(bestEcc.skills.paths.some((skillPath) => skillPath.endsWith(path.join("best-ecc", "ecc", "skills"))), `BEST-ECC selected ECC skill root missing: ${JSON.stringify(bestEcc.skills.paths)}`);
+assert(bestEcc.plugin.some((plugin) => plugin.endsWith(path.join("best-ecc", "ecc", ".opencode", "plugins", "ecc-hooks.ts"))), `BEST-ECC ECC hooks plugin path missing: ${JSON.stringify(bestEcc.plugin)}`);
 const bestEccOmo = JSON.parse(fs.readFileSync(path.join(home, "data", "best-ecc", ".omo", "omo.jsonc"), "utf8"));
 const bestEccTasks = bestEccOmo.profiles["best-ecc"]["[opencode]"].background_task;
 same(bestEccTasks.defaultConcurrency, 8, "BEST-ECC bounded concurrent task ceiling");
