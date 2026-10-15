@@ -11,6 +11,9 @@ test("BEST-ECC has an isolated profile and only opts the BEST router in at runti
   assert.match(runtime, /^TEAM_NAME=best-ecc$/m);
   assert.match(runtime, /^SANDBOX=@DATA_ROOT@\/best-ecc$/m);
   assert.match(runtime, /^OMO_PROFILE=best-ecc$/m);
+  assert.match(runtime, /^CLAUDE_CONFIG_DIR_OVERRIDE=@CONFIG_ROOT@\/best-ecc\/claude-config$/m);
+  const claudeSettings = JSON.parse(read("teams/best-ecc/claude-config/settings.json.template").replaceAll("@PACKAGE_ROOT@", "/tmp/opencode-team"));
+  assert.equal(claudeSettings.hooks.UserPromptSubmit[0].hooks[0].command, "bash /tmp/opencode-team/teams/best/router-classify.sh");
   assert.match(read("teams/best-ecc/runtime-env.sh"), /export BEST_ECC_MODE=1/);
   assert.match(read("teams/best-ecc/runtime-env.sh"), /OPENCODE_DISABLE_EXTERNAL_SKILLS=1 OPENCODE_DISABLE_CLAUDE_CODE_SKILLS=1/);
   assert.match(read("teams/best/best-router-plugin.js"), /process\.env\.BEST_ECC_MODE === "1" \? \["ecc-tdd-guide"\]/);

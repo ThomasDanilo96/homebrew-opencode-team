@@ -139,6 +139,8 @@ jobs:
              "$package_root/teams/best-ecc/opencode.jsonc.template" \
              "$package_root/teams/best-ecc/omo.jsonc.template" \
              "$package_root/teams/best-ecc/setup-ecc.sh" \
+             "$package_root/teams/best-ecc/claude-config/settings.json.template" \
+             "$package_root/teams/best-ecc/claude-config/settings.json.template" \
              "$package_root/teams/best-ecc/ecc.lock" \
              "$package_root/tests/best-native-router.test.mjs" \
              "$package_root/tests/best-ecc-config.test.mjs" \

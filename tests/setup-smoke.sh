@@ -73,6 +73,7 @@ for team in best best-ecc free go openai daily; do
   test -f "$TEAM_HOME/config/$team/opencode.jsonc"
   node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$TEAM_HOME/config/$team/opencode.jsonc"
 done
+test -f "$TEAM_HOME/config/best-ecc/claude-config/settings.json"
 for tui_file in "${TUI_FILES[@]}"; do
   test -f "$tui_file"
   node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$tui_file"

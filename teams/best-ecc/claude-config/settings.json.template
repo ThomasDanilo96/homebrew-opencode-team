@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": { "type": "any" },
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash @PACKAGE_ROOT@/teams/best/router-classify.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

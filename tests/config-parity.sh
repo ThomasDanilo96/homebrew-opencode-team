@@ -296,7 +296,28 @@ for (const team of ["openai", "daily"]) {
   );
 }
 
-for (const team of ["best", "free", "go", "openai", "daily"]) {
+const bestEcc = read("best-ecc");
+const bestEccAgentNames = [
+  "OpenCode-Builder", "ecc-architect", "ecc-build-error-resolver", "ecc-code-reviewer",
+  "ecc-go-build-resolver", "ecc-go-reviewer", "ecc-planner", "ecc-security-reviewer",
+  "ecc-tdd-guide", "explore", "librarian", "openai-coder-1", "openai-coder-2", "openai-reviewer",
+].sort();
+same(bestEcc.model, "openai/gpt-6-luna", "BEST-ECC model");
+same(bestEcc.default_agent, "OpenCode-Builder", "BEST-ECC default agent");
+same(Object.keys(bestEcc.agent).sort(), bestEccAgentNames, "BEST-ECC agent catalog");
+same(bestEcc.agent.explore.permission.task, "deny", "BEST-ECC explore nested-task permission");
+same(bestEcc.agent.librarian.permission.task, "deny", "BEST-ECC librarian nested-task permission");
+same(bestEcc.agent["ecc-tdd-guide"].permission.edit, "deny", "BEST-ECC TDD planner read-only policy");
+same(bestEcc.agent["ecc-tdd-guide"].model, "opencode-go/qwen3.7-plus", "BEST-ECC economical TDD planner model");
+assert(bestEcc.skills.paths.includes(path.join(home, "data", "best-ecc", "ecc", "skills")), "BEST-ECC selected ECC skill root missing");
+assert(bestEcc.plugin.some((plugin) => plugin === path.join(home, "data", "best-ecc", "ecc", ".opencode", "plugins", "ecc-hooks.ts")), "BEST-ECC ECC hooks plugin path missing");
+const bestEccOmo = JSON.parse(fs.readFileSync(path.join(home, "data", "best-ecc", ".omo", "omo.jsonc"), "utf8"));
+const bestEccTasks = bestEccOmo.profiles["best-ecc"]["[opencode]"].background_task;
+same(bestEccTasks.defaultConcurrency, 8, "BEST-ECC bounded concurrent task ceiling");
+same(bestEccTasks.providerConcurrency, { openai: 4, "opencode-go": 4 }, "BEST-ECC provider concurrency");
+same(bestEccTasks.maxDepth, 2, "BEST-ECC task graph depth");
+
+for (const team of ["best", "best-ecc", "free", "go", "openai", "daily"]) {
   const config = read(team);
   const serialized = JSON.stringify(config);
   assert(config.plugin.some((plugin) => plugin === path.join(root, "shared", "mac-notifications", "plugin.js")), `${team} shared macOS notification plugin missing`);

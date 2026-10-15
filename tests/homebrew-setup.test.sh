@@ -128,6 +128,7 @@ for team in best best-ecc free go openai daily; do
   test -f "$success_home/config/$team/team-runtime.conf"
   test -f "$success_home/config/$team/opencode.jsonc"
 done
+test -f "$success_home/config/best-ecc/claude-config/settings.json"
 test -f "$success_home/state/maintenance/launchagents/it.danilodantoni.opencode-team.runtime-gc.plist"
 test -f "$success_home/state/maintenance/launchagents/it.danilodantoni.opencode-team.version-check.plist"
 
