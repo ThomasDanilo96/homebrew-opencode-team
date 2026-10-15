@@ -172,7 +172,7 @@ set_runtime_status() {
 
 resume_profile() {
   case "$TEAM_NAME" in
-    best|go|openai) printf '%s\n' "$TEAM_NAME" ;;
+    best|best-ecc|go|openai) printf '%s\n' "$TEAM_NAME" ;;
     opencode-openai-daily) printf '%s\n' daily ;;
     *) return 1 ;;
   esac

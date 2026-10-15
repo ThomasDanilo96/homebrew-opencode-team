@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: release `v0.1.57`.
+Status: release `v0.1.58`.
 
 ## Goal
 
@@ -25,6 +25,11 @@ opencode-team setup
 opencode-team doctor
 opencode-team best
 ```
+
+For the separate ECC-powered profile, run `opencode-team best-ecc-setup` once
+after setup, then launch `opencode-team best-ecc`. ECC is pinned to a reviewed
+commit and only the selected skill/agent assets are installed; `best` keeps its
+own configuration and remains independent.
 
 The Homebrew formula also installs Zsh completions for profiles and subcommands.
 Open a new shell after upgrading, or reload completions in the current shell
@@ -53,6 +58,15 @@ route-gating extension, is available separately as `best-native`. On first
 Native use, migrate the isolated BEST provider and model configuration with
 `opencode-team best-native-setup`; run it without flags to review and approve
 the import. OpenAI OAuth requires `/login chatgpt-subscription` inside OmO.
+
+`best-ecc` is an isolated OpenCode profile that layers ECC's selected TDD,
+verification, security, backend and frontend skills plus specialist agents on
+the BEST coordinator. Its ECC TDD planner uses the OpenCode Go Qwen model and
+is read-only; implementation and final review remain on the OpenAI models.
+Skills are discovered on demand rather than injected wholesale. Serena is the
+preferred code-navigation path to reduce broad scans and repeated context, but
+token savings are workload-dependent and are not guaranteed to be 50% without
+measuring comparable sessions.
 
 The install-scoped `HOMEBREW_NO_INSTALL_CLEANUP=1` prevents an unrelated broken
 Homebrew package from aborting this install. It does not change Homebrew's global
@@ -95,6 +109,10 @@ Profiles:
 - `BEST Native`: OmO Native v5 with persistent memory, session continuity, and
   native enforcement of the BEST explore/librarian/four-agent routes, launched
   with `opencode-team best-native`.
+- `BEST-ECC`: isolated BEST OpenCode profile with pinned ECC skills/agents,
+  Serena-first navigation, and an ECC test-first planning task on each
+  implementation, launched with `opencode-team best-ecc` after
+  `opencode-team best-ecc-setup`.
 - `GO`: OpenCode Go profile with the certified GO OMO patches.
 - `OPENAI`: OpenAI-only orchestration profile with Codex and Serena integration.
 

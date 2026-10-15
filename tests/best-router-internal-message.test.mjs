@@ -14,11 +14,11 @@ test("BEST route guidance defines the exact first native task contract", () => {
   assert.match(guidance[2], /one task\(subagent_type="explore", run_in_background=true\)/);
   assert.match(guidance[2], /one task\(subagent_type="librarian", run_in_background=true\)/);
   assert.match(guidance[3], /exactly four native tasks in parallel/);
-  assert.match(guidance[4], /exactly two native tasks in parallel/);
-  assert.match(guidance[4], /openai-coder-1 and openai-coder-2/);
-  assert.match(guidance[4], /implementation request, not planning-only work/);
+  assert.match(guidance[4], /exactly four native tasks in parallel/);
+  assert.match(guidance[4], /openai-coder-1, and openai-coder-2/);
+  assert.match(guidance[4], /required for every implementation request/);
   assert.match(guidance[4], /Files you own/);
-  assert.match(guidance[4], /successful task-tool launch is not completion/);
+  assert.match(guidance[4], /wait for both coder results/i);
   assert.match(guidance[4], /launching exactly one openai-reviewer against the completed diff/);
   assert.match(guidance[4], /non-overlapping ownership/);
   for (const agent of ["explore", "librarian", "openai-architect", "openai-reviewer"]) {
@@ -27,6 +27,21 @@ test("BEST route guidance defines the exact first native task contract", () => {
   for (const text of guidance) {
     assert.match(text, /do not use general/i);
     assert.match(text, /do not launch (?:a )?duplicate/i);
+  }
+});
+
+test("BEST-ECC enables its test-first planner only with the isolated profile flag", () => {
+  const prior = process.env.BEST_ECC_MODE;
+  try {
+    delete process.env.BEST_ECC_MODE;
+    assert.doesNotMatch(routeGuidanceFor("FANOUT"), /ecc-tdd-guide/);
+    process.env.BEST_ECC_MODE = "1";
+    assert.match(routeGuidanceFor("FANOUT"), /five native tasks/);
+    assert.match(routeGuidanceFor("FANOUT"), /ecc-tdd-guide/);
+    assert.match(routeGuidanceFor("FANOUT"), /tdd-workflow skill/);
+  } finally {
+    if (prior === undefined) delete process.env.BEST_ECC_MODE;
+    else process.env.BEST_ECC_MODE = prior;
   }
 });
 

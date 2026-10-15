@@ -12,6 +12,7 @@ check_profile() {
 }
 
 check_profile best best
+check_profile best-ecc best-ecc
 check_profile go go
 check_profile openai openai
 check_profile opencode-openai-daily daily

@@ -1,0 +1,29 @@
+{
+  "$schema": "https://raw.githubusercontent.com/code-yeongyu/oh-my-openagent/dev/assets/omo.schema.json",
+  "profiles": {
+    "best-ecc": {
+      "[opencode]": {
+        "background_task": {
+          "defaultConcurrency": 8,
+          "providerConcurrency": {
+            "openai": 4,
+            "opencode-go": 4
+          },
+          "maxDepth": 2
+        },
+        "agents": {
+          "OpenCode-Builder": {
+            "mode": "primary",
+            "permission": {
+              "task": "allow",
+              "call_omo_agent": "deny"
+            },
+            "tools": {
+              "call_omo_agent": false
+            }
+          }
+        }
+      }
+    }
+  }
+}

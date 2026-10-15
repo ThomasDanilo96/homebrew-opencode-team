@@ -414,7 +414,10 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
     /BEST FANOUT TASK REJECTED.*overlaps/,
   );
   await fanout.before("task", { subagent_type: "openai-coder-2", run_in_background: true, prompt: "Implement Docker changes.\nFiles you own: src/docker.js" }, "fanout-openai-coder-2");
-  for (const agent of ["openai-coder-1", "openai-coder-2"]) await fanout.after(`fanout-${agent}`);
+  for (const agent of ["explore", "librarian", "openai-coder-1", "openai-coder-2"]) {
+    if (agent === "explore" || agent === "librarian") await fanout.before("task", { subagent_type: agent, run_in_background: true }, `fanout-${agent}`);
+    await fanout.after(`fanout-${agent}`);
+  }
   await assert.rejects(() => fanout.before("edit", { filePath: "src/index.js" }), /BEST ROUTING GATE/);
   await fanout.before("task", { subagent_type: "openai-reviewer", run_in_background: true }, "fanout-openai-reviewer");
   await fanout.after("fanout-openai-reviewer");
@@ -422,8 +425,29 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
     () => fanout.before("task", { subagent_type: "openai-reviewer", run_in_background: true }, "fanout-reviewer-duplicate"),
     /BEST ROUTING DUPLICATE: openai-reviewer has already been launched/,
   );
-  await fanout.before("task", { subagent_type: "explore", run_in_background: true }, "fanout-extra-explore");
+  await fanout.before("task", { subagent_type: "openai-architect", run_in_background: true }, "fanout-extra-architect");
   await fanout.before("edit", { filePath: "src/index.js" });
+
+  const priorEccMode = process.env.BEST_ECC_MODE;
+  try {
+    process.env.BEST_ECC_MODE = "1";
+    const eccFanout = await routeSession("ses-best-ecc-fanout", "Implement an ECC-gated feature");
+    assert.match(eccFanout.output.parts.at(-1).text, /exactly five native tasks/);
+    for (const agent of ["explore", "librarian", "openai-coder-1", "openai-coder-2"]) {
+      const prompt = agent.startsWith("openai-coder") ? `Implement the assigned changes.\nFiles you own: src/${agent}.js` : "Research the assigned slice.";
+      await eccFanout.before("task", { subagent_type: agent, run_in_background: true, prompt }, `ecc-fanout-${agent}`);
+      await eccFanout.after(`ecc-fanout-${agent}`);
+    }
+    await assert.rejects(() => eccFanout.before("edit", { filePath: "src/index.js" }), /BEST ROUTING GATE/);
+    await eccFanout.before("task", { subagent_type: "ecc-tdd-guide", run_in_background: true, prompt: "Load tdd-workflow; return a test-first plan without edits." }, "ecc-fanout-tdd");
+    await eccFanout.after("ecc-fanout-tdd");
+    await eccFanout.before("task", { subagent_type: "openai-reviewer", run_in_background: true }, "ecc-fanout-review");
+    await eccFanout.after("ecc-fanout-review");
+    await eccFanout.before("edit", { filePath: "src/index.js" });
+  } finally {
+    if (priorEccMode === undefined) delete process.env.BEST_ECC_MODE;
+    else process.env.BEST_ECC_MODE = priorEccMode;
+  }
   await fanout.before("bash", { command: "git add -- src/index.js" });
 
   writeFileSync(routeScript, 'printf "%s\\n" "DIRECT"\n');
@@ -434,6 +458,10 @@ test("BEST safe root inspection allows bounded diagnosis and denies broad or mut
   await continuedFanout.after("fanout-next-openai-coder-1");
   await continuedFanout.before("task", { subagent_type: "openai-coder-2", run_in_background: true, prompt: "Implement the next Docker slice.\nFiles you own: src/third.js" }, "fanout-next-openai-coder-2");
   await continuedFanout.after("fanout-next-openai-coder-2");
+  for (const agent of ["explore", "librarian"]) {
+    await continuedFanout.before("task", { subagent_type: agent, run_in_background: true }, `fanout-next-${agent}`);
+    await continuedFanout.after(`fanout-next-${agent}`);
+  }
   await continuedFanout.before("task", { subagent_type: "openai-reviewer", run_in_background: true }, "fanout-next-reviewer");
   await continuedFanout.after("fanout-next-reviewer");
   await continuedFanout.before("edit", { filePath: "src/second.js" });
@@ -451,7 +479,7 @@ test("BEST source config enables the primary Builder through OMO and denies lega
   assert.match(opencodeTemplate, /"tools": \{\s*"call_omo_agent": false\s*\}/);
   assert.match(opencodeTemplate, /"OpenCode-Builder": \{[\s\S]*"tools": \{[\s\S]*"call_omo_agent": false/);
   assert.match(opencodeTemplate, /bounded read-only root preflight/);
-  assert.match(opencodeTemplate, /&&-joined combinations\) may run before the required tasks/);
+  assert.match(opencodeTemplate, /&&-joined combinations\) may run before required tasks/);
 });
 
 test("BEST OMO 5 profile enables persistent memory and retains BEST-specific OpenCode settings", () => {

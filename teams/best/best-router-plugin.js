@@ -286,7 +286,7 @@ export default async function bestRouterPlugin(input) {
         : classification === "FOUR"
           ? ["explore", "librarian", "openai-architect", "openai-reviewer"]
           : classification === "FANOUT"
-            ? ["openai-coder-1", "openai-coder-2", "openai-reviewer"]
+            ? ["explore", "librarian", ...(process.env.BEST_ECC_MODE === "1" ? ["ecc-tdd-guide"] : []), "openai-coder-1", "openai-coder-2", "openai-reviewer"]
             : [classification.toLowerCase()];
       const requestID = String(source?.id ?? hookInput.messageID ?? "unknown-request");
       const current = ROUTE_STATE.get(sessionID);

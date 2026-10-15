@@ -21,3 +21,5 @@ fi
 grep -Fq 'teams/best/verify-omo.sh' "$workflow"
 grep -Fq 'teams/go/verify-omo.sh' "$workflow"
 grep -Fq 'release_state' "$workflow"
+grep -Fq 'opencode-team best-ecc-setup' "$workflow"
+grep -Fq 'for team in best best-ecc go openai daily' "$workflow"

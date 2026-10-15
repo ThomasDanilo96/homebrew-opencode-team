@@ -38,6 +38,7 @@ class OpencodeTeam < Formula
     assert_match "free", help
     assert_match "alias for best", help
     assert_match "best-native", help
+    assert_match "best-ecc", help
     assert_predicate libexec/"core/lib/runtime-lifecycle.mjs", :file?
     assert_predicate libexec/"core/lib/runtime-reaper.sh", :file?
     assert_predicate libexec/"shared/maintenance/version-check.mjs", :file?
@@ -52,6 +53,8 @@ class OpencodeTeam < Formula
     ENV["OPENCODE_TEAM_DEPENDENCY_ROOT"] = shared.to_s
     ENV["OPENCODE_TEAM_HOME"] = first.to_s
     system bin/"opencode-team", "setup"
+    system bin/"opencode-team", "best-ecc-setup"
+    assert_predicate first/"data/best-ecc/ecc/.opencode/plugins/ecc-hooks.ts", :file?
     assert_predicate first/"state/maintenance/launchagents/it.danilodantoni.opencode-team.version-check.plist", :file?
     ENV["OPENCODE_TEAM_HOME"] = second.to_s
     system bin/"opencode-team", "setup"

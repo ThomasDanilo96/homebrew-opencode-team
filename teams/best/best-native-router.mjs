@@ -11,12 +11,13 @@ const ROUTER = process.env.BEST_ROUTER_PATH ?? join(PROFILE_ROOT, "router-classi
 const STATE_ROOT = process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state");
 const DEFAULT_LOG = join(STATE_ROOT, "opencode-team", "best", "native-router.log");
 const ROUTE_MARKER = /<BEST_ROUTER_ROUTE>(EXPLORE|LIBRARIAN|BOTH|FOUR|FANOUT)<\/BEST_ROUTER_ROUTE>/;
+const FOLLOW_UP_REQUEST = /\b(?:continue|continue with|keep going|carry on|next step|finish(?: the)?|complete(?: the)?|proceed with|now implement|implement it|apply the changes|remaining work|continua|continua con|prosegui|vai avanti|prossimo passo|completa|finisci|procedi con|ora implementa|applica le modifiche|lavoro restante|fai anche|aggiungi anche)\b/i;
 const ROUTE_AGENTS = {
   EXPLORE: ["explore"],
   LIBRARIAN: ["librarian"],
   BOTH: ["explore", "librarian"],
   FOUR: ["explore", "librarian", "openai-architect", "openai-reviewer"],
-  FANOUT: ["openai-coder-1", "openai-coder-2", "openai-reviewer"],
+  FANOUT: ["explore", "librarian", "openai-coder-1", "openai-coder-2", "openai-reviewer"],
 };
 
 function log(entry) {
@@ -64,6 +65,7 @@ function memoryCircuitOpen() {
 
 export function createBestNativeRouter({ classify = classifyPrompt, logger = log } = {}) {
   const routes = new Map();
+  const completedRoutes = new Map();
   const pendingTasks = new Map();
 
   return (pi) => {
@@ -80,13 +82,22 @@ export function createBestNativeRouter({ classify = classifyPrompt, logger = log
         return { action: "continue" };
       }
 
-      const requiredAgents = ROUTE_AGENTS[route];
+      let requiredAgents = ROUTE_AGENTS[route];
+      const sessionID = ctx.sessionManager.getSessionId();
+      if (!requiredAgents && FOLLOW_UP_REQUEST.test(event.text)) {
+        const previousRoute = completedRoutes.get(sessionID);
+        if (previousRoute) {
+          route = previousRoute;
+          requiredAgents = ROUTE_AGENTS[route];
+          logger({ event: "route_inherited_followup", route, session_id: sessionID });
+        }
+      }
       if (!requiredAgents) {
-        logger({ event: "input_classified", route: "DIRECT", session_id: ctx.sessionManager.getSessionId() });
+        completedRoutes.delete(sessionID);
+        logger({ event: "input_classified", route: "DIRECT", session_id: sessionID });
         return { action: "continue" };
       }
 
-      const sessionID = ctx.sessionManager.getSessionId();
       routes.set(sessionID, { route, requiredAgents, pendingAgents: [], launchedAgents: [] });
       logger({ event: "route_registered", route, required_agents: requiredAgents, session_id: sessionID });
       return {
@@ -162,6 +173,7 @@ export function createBestNativeRouter({ classify = classifyPrompt, logger = log
       logger({ event: "task_launch_succeeded", session_id: sessionID, route: state.route, agent: pending.agent });
       if (state.requiredAgents.every((agent) => state.launchedAgents.includes(agent))) {
         routes.delete(sessionID);
+        completedRoutes.set(sessionID, state.route);
         logger({ event: "route_gate_open", session_id: sessionID, route: state.route });
       }
       return undefined;

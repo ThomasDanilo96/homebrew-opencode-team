@@ -21,6 +21,8 @@ usage() {
     '  opencode-team setup' \
     '  opencode-team doctor' \
     '  opencode-team best [--resume SESSION] (OpenCode BEST profile)' \
+    '  opencode-team best-ecc [--resume SESSION] (isolated BEST + ECC profile)' \
+    '  opencode-team best-ecc-setup (install pinned ECC skills and agents)' \
     '  opencode-team free [--resume SESSION] (BEST profile with OpenCode Zen free models)' \
     '  opencode-team best-opencode [--resume SESSION] (alias for best)' \
     '  opencode-team best-native [OMO OPTIONS]' \
@@ -28,7 +30,7 @@ usage() {
     '  opencode-team go [--resume SESSION]' \
     '  opencode-team openai [--resume SESSION]' \
     '  opencode-team daily [--resume SESSION]' \
-    '  opencode-team start <best|free|best-opencode|best-native|go|openai|daily> [options]' \
+    '  opencode-team start <best|best-ecc|free|best-opencode|best-native|go|openai|daily> [options]' \
     '  opencode-team daily-report [--markdown]' \
     '  opencode-team daily-benchmark <list|validate|prepare|report|execute> [options]' \
     '  opencode-team runtime-status' \
@@ -375,7 +377,11 @@ doctor() {
   else
     printf '  %-16s OPTIONAL / missing\n' "GitHub CLI"
   fi
-  for team in best free go openai daily; do
+  for team in best best-ecc free go openai daily; do
+    if [ "$team" = best-ecc ] && [ ! -f "$DATA_ROOT/best-ecc/ecc/.opencode/plugins/ecc-hooks.ts" ]; then
+      printf '  %-16s NOT READY (run opencode-team best-ecc-setup)\n' "$team profile"
+      continue
+    fi
     if [ -f "$CONFIG_ROOT/$team/team-runtime.conf" ] && [ -f "$CONFIG_ROOT/$team/opencode.jsonc" ]; then
       validate_profile_config "$team" || failed=1
     else
@@ -783,6 +789,7 @@ install_dependencies() {
   local team="$1" dependency_team="$1"
   [ "$team" = daily ] && dependency_team=openai
   [ "$team" = free ] && dependency_team=best
+  [ "$team" = best-ecc ] && dependency_team=best
   local dependency_root="$DEPENDENCY_ROOT/$dependency_team"
   local package_file="$PACKAGE_ROOT/teams/$dependency_team/package.json"
   local lock_file="$PACKAGE_ROOT/teams/$dependency_team/package-lock.json"
@@ -828,6 +835,27 @@ verify_best_native() {
     return 1
   }
   printf '  %-18s OK (5.1.27, isolated native memory profile)\n' "best Native OMO"
+}
+
+verify_best_ecc_assets() {
+  local source="$DATA_ROOT/best-ecc/ecc" expected actual
+  expected="$(<"$PACKAGE_ROOT/teams/best-ecc/ecc.lock")"
+  [ -d "$source/.git" ] || { printf 'BEST-ECC assets missing; run opencode-team best-ecc-setup\n' >&2; return 1; }
+  actual="$(git -C "$source" rev-parse HEAD 2>/dev/null || true)"
+  [ "$actual" = "$expected" ] || {
+    printf 'BEST-ECC source revision mismatch (expected %s, got %s)\n' "$expected" "${actual:-unknown}" >&2
+    return 1
+  }
+  for asset in \
+    .opencode/plugins/ecc-hooks.ts \
+    .opencode/prompts/agents/tdd-guide.txt \
+    skills/tdd-workflow/SKILL.md \
+    skills/verification-loop/SKILL.md \
+    skills/security-review/SKILL.md \
+    skills/agent-harness-construction/SKILL.md; do
+    [ -f "$source/$asset" ] || { printf 'BEST-ECC asset missing: %s\n' "$asset" >&2; return 1; }
+  done
+  printf '  %-18s OK (pinned ECC source %s)\n' "BEST-ECC assets" "$actual"
 }
 
 prepare_best_native() {
@@ -918,6 +946,7 @@ values = {
     "@RUNTIME_ROOT@": os.environ["RUNTIME_ROOT"],
     "@OMO_PLUGIN@": os.environ.get("OMO_PLUGIN", "oh-my-openagent"),
     "@SERENA_BIN@": os.environ["SERENA_BIN"],
+    "@ECC_SOURCE@": os.environ.get("ECC_SOURCE", os.path.join(os.environ["DATA_ROOT"], "best-ecc", "ecc")),
 }
 for marker, value in values.items():
     template = template.replace(marker, value)
@@ -946,6 +975,9 @@ for path in sorted(config_root.glob("*/**/*")):
     text = path.read_text(errors="replace")
     for candidate in path_pattern.findall(text):
         candidate = candidate.rstrip(".;")
+        # ECC resources are provisioned separately by best-ecc-setup.
+        if "/best-ecc/ecc/" in candidate:
+            continue
         if candidate.startswith(package_root):
             continue
         if not pathlib.Path(candidate).exists():
@@ -962,10 +994,11 @@ refresh_generated_configs() {
     printf 'Cannot refresh stale package config: Serena is missing; run setup\n' >&2
     return 1
   }
-  for team in best free go openai daily; do
+  for team in best best-ecc free go openai daily; do
     dependency_team="$team"
     [ "$team" = daily ] && dependency_team=openai
     [ "$team" = free ] && dependency_team=best
+    [ "$team" = best-ecc ] && dependency_team=best
     export OMO_PLUGIN="$DEPENDENCY_ROOT/$dependency_team/node_modules/oh-my-openagent/dist/index.js"
     [ -f "$OMO_PLUGIN" ] || {
       printf 'Cannot refresh stale package config: OMO plugin is missing: %s\n' "$OMO_PLUGIN" >&2
@@ -989,10 +1022,10 @@ refresh_generated_configs() {
       render_template "$PACKAGE_ROOT/teams/$team/oh-my-openagent.jsonc.template" "$CONFIG_ROOT/$team/xdg-config/opencode/oh-my-openagent.jsonc" || return 1
       chmod 600 "$CONFIG_ROOT/$team/xdg-config/opencode/oh-my-openagent.jsonc"
     fi
-    if [ "$team" = best ] && [ -f "$PACKAGE_ROOT/teams/best/omo.jsonc.template" ]; then
-      mkdir -p "$DATA_ROOT/best/.omo"
-      render_template "$PACKAGE_ROOT/teams/best/omo.jsonc.template" "$DATA_ROOT/best/.omo/omo.jsonc" || return 1
-      chmod 600 "$DATA_ROOT/best/.omo/omo.jsonc"
+    if [ -f "$PACKAGE_ROOT/teams/$team/omo.jsonc.template" ]; then
+      mkdir -p "$DATA_ROOT/$team/.omo"
+      render_template "$PACKAGE_ROOT/teams/$team/omo.jsonc.template" "$DATA_ROOT/$team/.omo/omo.jsonc" || return 1
+      chmod 600 "$DATA_ROOT/$team/.omo/omo.jsonc"
     fi
     if [ -f "$PACKAGE_ROOT/teams/$team/tui.json.template" ]; then
       render_template "$PACKAGE_ROOT/teams/$team/tui.json.template" "$CONFIG_ROOT/$team/xdg-config/opencode/tui.json" || return 1
@@ -1016,13 +1049,16 @@ ensure_generated_config_current() {
   export PYTHON_BIN OPENCODE_TEAM_PYTHON
   local stale config_missing=0 team
   stale="$(stale_generated_package_paths)"
-  for team in best free go openai daily; do
+  for team in best best-ecc free go openai daily; do
     [ -f "$CONFIG_ROOT/$team/team-runtime.conf" ] || continue
     grep -q '^OPENCODE_TEAM_PYTHON=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
     grep -q '^RUNTIME_ROOT=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
     grep -q '^PERSISTENT_DATA_ROOT=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
   done
   if [ -f "$CONFIG_ROOT/best/team-runtime.conf" ] && [ -f "$PACKAGE_ROOT/teams/best/omo.jsonc.template" ] && [ ! -f "$DATA_ROOT/best/.omo/omo.jsonc" ]; then
+    config_missing=1
+  fi
+  if [ -f "$CONFIG_ROOT/best-ecc/team-runtime.conf" ] && [ -f "$PACKAGE_ROOT/teams/best-ecc/omo.jsonc.template" ] && [ ! -f "$DATA_ROOT/best-ecc/.omo/omo.jsonc" ]; then
     config_missing=1
   fi
   if [ -n "$stale" ] || [ "$config_missing" -eq 1 ]; then
@@ -1038,7 +1074,7 @@ install_time_machine_exclusions() {
   [ "$(uname -s)" = Darwin ] || return 0
   command -v tmutil >/dev/null 2>&1 || return 0
   export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
-  for team in best free go openai daily; do
+  for team in best best-ecc free go openai daily; do
     mkdir -p "$DATA_ROOT/$team/playwright/output"
   done
   local result
@@ -1117,14 +1153,15 @@ setup() {
   ensure_python || return 1
   ensure_serena || return 1
   ensure_codex || return 1
-  for team in best free go openai daily; do
+  for team in best best-ecc free go openai daily; do
     dependency_team="$team"
     [ "$team" = daily ] && dependency_team=openai
     [ "$team" = free ] && dependency_team=best
+    [ "$team" = best-ecc ] && dependency_team=best
     export OMO_PLUGIN="$DEPENDENCY_ROOT/$dependency_team/node_modules/oh-my-openagent/dist/index.js"
     ensure_profile_roots "$team"
     case "$team" in
-      best|free) hook_source="$PACKAGE_ROOT/teams/best/patch-omo-hook-timeout.sh"; hook_name="patch-omo-hook-timeout.sh" ;;
+      best|best-ecc|free) hook_source="$PACKAGE_ROOT/teams/best/patch-omo-hook-timeout.sh"; hook_name="patch-omo-hook-timeout.sh" ;;
       go) hook_source="$PACKAGE_ROOT/teams/go/patch-omo-task-completion.sh"; hook_name="patch-omo-task-completion.sh" ;;
       *) hook_source=""; hook_name="" ;;
     esac
@@ -1145,10 +1182,10 @@ setup() {
       render_template "$PACKAGE_ROOT/teams/$team/oh-my-openagent.jsonc.template" "$CONFIG_ROOT/$team/xdg-config/opencode/oh-my-openagent.jsonc"
       chmod 600 "$CONFIG_ROOT/$team/xdg-config/opencode/oh-my-openagent.jsonc"
     fi
-    if [ "$team" = best ] && [ -f "$PACKAGE_ROOT/teams/best/omo.jsonc.template" ]; then
-      mkdir -p "$DATA_ROOT/best/.omo"
-      render_template "$PACKAGE_ROOT/teams/best/omo.jsonc.template" "$DATA_ROOT/best/.omo/omo.jsonc"
-      chmod 600 "$DATA_ROOT/best/.omo/omo.jsonc"
+    if [ -f "$PACKAGE_ROOT/teams/$team/omo.jsonc.template" ]; then
+      mkdir -p "$DATA_ROOT/$team/.omo"
+      render_template "$PACKAGE_ROOT/teams/$team/omo.jsonc.template" "$DATA_ROOT/$team/.omo/omo.jsonc"
+      chmod 600 "$DATA_ROOT/$team/.omo/omo.jsonc"
     fi
     if [ -f "$PACKAGE_ROOT/teams/$team/tui.json.template" ]; then
       mkdir -p "$CONFIG_ROOT/$team/xdg-config/opencode"
@@ -1242,9 +1279,9 @@ start_team() {
   local team="$1"
   shift
   case "$team" in
-    best|free|go|openai|daily) ;;
+    best|best-ecc|free|go|openai|daily) ;;
     *)
-      printf 'Unknown team: %s (expected best, free, go, openai, or daily)\n' "$team" >&2
+      printf 'Unknown team: %s (expected best, best-ecc, free, go, openai, or daily)\n' "$team" >&2
       return 1
       ;;
   esac
@@ -1273,6 +1310,18 @@ start_team() {
     -u SESSION_MODE \
     -u RESUME_SESSION_ID \
     "$PACKAGE_ROOT/core/bin/team-runtime" --config "$config_file" "$@"
+}
+
+setup_best_ecc() {
+  setup_roots
+  ensure_profile_roots best-ecc
+  bash "$PACKAGE_ROOT/teams/best-ecc/setup-ecc.sh" "$DATA_ROOT/best-ecc"
+}
+
+start_best_ecc() {
+  setup_roots
+  verify_best_ecc_assets || return 1
+  start_team best-ecc "$@"
 }
 
 case "${1:-}" in
@@ -1355,6 +1404,8 @@ case "${1:-}" in
       start_team best "$@"
     elif [ "$team" = best-native ]; then
       start_best_native "$@"
+    elif [ "$team" = best-ecc ]; then
+      start_best_ecc "$@"
     else
       start_team "$team" "$@"
     fi
@@ -1362,6 +1413,14 @@ case "${1:-}" in
   best)
     shift
     start_team best "$@"
+    ;;
+  best-ecc)
+    shift
+    start_best_ecc "$@"
+    ;;
+  best-ecc-setup)
+    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+    setup_best_ecc
     ;;
   free|go|openai|daily)
     team="$1"

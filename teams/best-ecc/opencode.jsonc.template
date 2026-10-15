@@ -1,0 +1,142 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    "@OMO_PLUGIN@",
+    "@PACKAGE_ROOT@/teams/best/best-router-plugin.js",
+    "@PACKAGE_ROOT@/shared/mac-notifications/plugin.js",
+    "@ECC_SOURCE@/.opencode/plugins/ecc-hooks.ts"
+  ],
+  "model": "openai/gpt-6-luna",
+  "small_model": "opencode-go/mimo-v2.5",
+  "default_agent": "OpenCode-Builder",
+  "subagent_depth": 2,
+  "skills": {
+    "paths": ["@ECC_SOURCE@/skills"]
+  },
+  "permission": {
+    "*": "allow",
+    "skill": "allow",
+    "skill_mcp": "allow",
+    "external_directory": "allow",
+    "doom_loop": "allow"
+  },
+  "tools": {
+    "call_omo_agent": false
+  },
+  "agent": {
+    "OpenCode-Builder": {
+      "description": "BEST-ECC coordinator. Preserve the mandatory discovery, test-first, disjoint implementation and independent review gates. Use Serena for symbol-level navigation; load ECC skills only when relevant.",
+      "prompt_append": "Use Serena before broad file scans: search symbols/references and read only the relevant ranges. Keep delegated prompts and reports concise. For every implementation, follow BEST-ECC FANOUT guidance: launch explore, librarian, ecc-tdd-guide and both OpenAI coders in parallel; do not start editing until the coder tasks finish; then launch openai-reviewer against the completed diff. ecc-tdd-guide must load the ECC tdd-workflow skill and return a brief test-first plan without edits. The Builder loads verification-loop only when selecting final focused checks. Skills are on-demand: never load the whole ECC catalog or unrelated skills. For large work, decompose into independent owned slices and dispatch in bounded waves of at most eight active tasks; child agents may not recursively delegate. Keep the user-facing summary and tool output compact; do not claim a token reduction without measuring it.",
+      "permission": {
+        "task": "allow",
+        "call_omo_agent": "deny",
+        "skill": "allow",
+        "serena_initial_instructions": "allow",
+        "serena_get_current_config": "allow"
+      },
+      "tools": {
+        "call_omo_agent": false
+      }
+    },
+    "explore": {
+      "model": "opencode-go/qwen3.7-plus",
+      "permission": {"task": "deny"},
+      "prompt_append": "Use Serena symbols and references first. Return only relevant files, symbols, existing patterns and risks; avoid broad recursive scans."
+    },
+    "librarian": {
+      "model": "opencode-go/qwen3.7-plus",
+      "permission": {"task": "deny"},
+      "prompt_append": "Use external documentation only when this task depends on library or framework behavior that local code cannot establish. Return concise source-linked findings or 'not applicable'."
+    },
+    "ecc-tdd-guide": {
+      "mode": "subagent",
+      "model": "opencode-go/qwen3.7-plus",
+      "prompt": "{file:@ECC_SOURCE@/.opencode/prompts/agents/tdd-guide.txt}\n\nLoad the ECC tdd-workflow skill. Inspect relevant code with Serena and return a compact test-first plan. Do not edit files, run shell commands, or delegate.",
+      "permission": {"task": "deny", "bash": "deny", "edit": "deny", "write": "deny", "skill": "allow"}
+    },
+    "ecc-planner": {
+      "mode": "subagent",
+      "model": "opencode-go/qwen3.7-plus",
+      "prompt": "{file:@ECC_SOURCE@/.opencode/prompts/agents/planner.txt}\n\nUse Serena for targeted navigation. Return the smallest viable plan and risks; do not edit, run shell commands, or delegate.",
+      "permission": {"task": "deny", "bash": "deny", "edit": "deny", "write": "deny", "skill": "allow"}
+    },
+    "ecc-architect": {
+      "mode": "subagent",
+      "model": "openai/gpt-6-sol",
+      "prompt": "{file:@ECC_SOURCE@/.opencode/prompts/agents/architect.txt}\n\nUse Serena for targeted navigation. Return decisions, trade-offs and risks; do not edit or delegate.",
+      "permission": {"task": "deny", "bash": "deny", "edit": "deny", "write": "deny", "skill": "allow"}
+    },
+    "ecc-code-reviewer": {
+      "mode": "subagent",
+      "model": "openai/gpt-6-sol",
+      "prompt": "{file:@ECC_SOURCE@/.opencode/prompts/agents/code-reviewer.txt}\n\nReview only the requested diff. Report actionable correctness, security and regression findings first. Do not edit or delegate.",
+      "permission": {"task": "deny", "bash": "deny", "edit": "deny", "write": "deny", "skill": "allow"}
+    },
+    "ecc-security-reviewer": {
+      "mode": "subagent",
+      "model": "openai/gpt-6-sol",
+      "prompt": "{file:@ECC_SOURCE@/.opencode/prompts/agents/security-reviewer.txt}\n\nUse Serena to inspect only security-relevant symbols and changed lines. Report evidence and severity; do not edit or delegate.",
+      "permission": {"task": "deny", "bash": "deny", "edit": "deny", "write": "deny", "skill": "allow"}
+    },
+    "ecc-go-reviewer": {
+      "mode": "subagent",
+      "model": "opencode-go/qwen3.7-plus",
+      "prompt": "{file:@ECC_SOURCE@/.opencode/prompts/agents/go-reviewer.txt}\n\nReview the changed Go code only. Use Serena and report actionable idiom, concurrency, error-handling and performance findings. Do not edit or delegate.",
+      "permission": {"task": "deny", "bash": "deny", "edit": "deny", "write": "deny", "skill": "allow"}
+    },
+    "ecc-go-build-resolver": {
+      "mode": "subagent",
+      "model": "opencode-go/qwen3.7-plus",
+      "prompt": "{file:@ECC_SOURCE@/.opencode/prompts/agents/go-build-resolver.txt}\n\nUse Serena to locate the reported Go failure. Make only the minimal assigned Go fix; do not delegate.",
+      "permission": {"task": "deny", "bash": "deny", "edit": "allow", "write": "allow", "skill": "allow"}
+    },
+    "ecc-build-error-resolver": {
+      "mode": "subagent",
+      "model": "opencode-go/qwen3.7-plus",
+      "prompt": "{file:@ECC_SOURCE@/.opencode/prompts/agents/build-error-resolver.txt}\n\nUse Serena to locate the reported failure. Make only the minimal assigned fix; do not delegate.",
+      "permission": {"task": "deny", "bash": "deny", "edit": "allow", "write": "allow", "skill": "allow"}
+    },
+    "openai-coder-1": {
+      "model": "openai/gpt-6-sol",
+      "description": "BEST-ECC implementation worker 1. Concrete edits in the exact owned file slice; no delegation.",
+      "prompt": "Implement only the exact files and behavior assigned by the Builder. This is a shared worktree: do not touch files outside your owned slice, do not change shared interfaces unless explicitly assigned, and do not delegate. Use Serena to navigate to relevant symbols and load only applicable ECC skills. Make the implementation and report files changed plus focused checks still needed.",
+      "permission": {"task": "deny", "bash": "deny", "edit": "allow", "write": "allow", "skill": "allow", "delete": "deny", "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny"},
+      "tools": {"task": false, "bash": false, "edit": true, "write": true, "delete": false}
+    },
+    "openai-coder-2": {
+      "model": "openai/gpt-6-luna",
+      "description": "BEST-ECC implementation worker 2. Concrete edits in the exact owned file slice; no delegation.",
+      "prompt": "Implement only the exact files and behavior assigned by the Builder. This is a shared worktree: do not touch files outside your owned slice, do not change shared interfaces unless explicitly assigned, and do not delegate. Use Serena to navigate to relevant symbols and load only applicable ECC skills. Make the implementation and report files changed plus focused checks still needed.",
+      "permission": {"task": "deny", "bash": "deny", "edit": "allow", "write": "allow", "skill": "allow", "delete": "deny", "serena_replace_*": "deny", "serena_insert_*": "deny", "serena_rename_*": "deny", "serena_delete_*": "deny", "serena_write_*": "deny", "serena_safe_delete_*": "deny", "serena_edit_*": "deny"},
+      "tools": {"task": false, "bash": false, "edit": true, "write": true, "delete": false}
+    },
+    "openai-reviewer": {
+      "mode": "subagent",
+      "model": "openai/gpt-6-sol",
+      "prompt": "You are the independent BEST-ECC reviewer. Review the completed diff against the task and repository behavior. Use Serena to inspect changed symbols and callers, and load the ECC security-review skill only when security-sensitive behavior changed. Report only actionable correctness, security, regression and test gaps with file/line evidence. Do not edit, delegate, or reproduce the full implementation.",
+      "permission": {"task": "deny", "bash": "deny", "edit": "deny", "write": "deny", "skill": "allow"}
+    }
+  },
+  "command": {
+    "ecc-plan": {"description": "Plan a change with ECC planner", "template": "Use Serena for targeted repository analysis. Load the ECC agent-harness-construction skill only if orchestration design is involved. Return a concise plan for: $ARGUMENTS", "agent": "ecc-planner", "subtask": true},
+    "ecc-security": {"description": "Run ECC security review", "template": "Load the ECC security-review skill. Review the requested files or diff: $ARGUMENTS. Return actionable findings with evidence; make no edits.", "agent": "ecc-security-reviewer", "subtask": true},
+    "ecc-review": {"description": "Review a code diff with ECC", "template": "Review this diff or scope: $ARGUMENTS. Load ECC security-review only if the change handles security-sensitive behavior. Return only actionable findings with file/line evidence; make no edits.", "agent": "ecc-code-reviewer", "subtask": true},
+    "ecc-verify": {"description": "Choose focused verification using ECC", "template": "Load the ECC verification-loop skill. Inspect the current diff and relevant package scripts; propose and run only focused verification for: $ARGUMENTS. Report exact commands and results.", "agent": "OpenCode-Builder"}
+  },
+  "disabled_providers": [
+    "anthropic", "google", "opencode-omniroute", "openrouter", "bedrock",
+    "vertex", "xai", "mistral", "groq", "cohere", "fireworks", "together",
+    "deepinfra", "cerebras", "perplexity", "voyage", "ollama", "lmstudio", "litellm"
+  ],
+  "compaction": {"auto": true, "prune": true, "reserved": 10000},
+  "mcp": {
+    "serena": {
+      "type": "local",
+      "command": ["@SERENA_BIN@", "start-mcp-server", "--context", "ide", "--project-from-cwd", "--open-web-dashboard", "false"],
+      "enabled": true
+    }
+  },
+  "provider": {
+    "opencode-go": {"options": {"max_tokens": 32768, "timeout": 300000}}
+  }
+}

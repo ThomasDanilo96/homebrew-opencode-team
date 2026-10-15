@@ -4,6 +4,7 @@ _opencode_team__profiles() {
   local -a profiles
   profiles=(
     'best:General OpenCode Team profile'
+    'best-ecc:Isolated BEST + ECC profile'
     'free:BEST routing with OpenCode Zen free models'
     'best-opencode:Alias for best'
     'best-native:Native OMO profile'
@@ -46,6 +47,8 @@ _opencode-team() {
         'setup:Configure and verify all profiles'
         'doctor:Check installed configuration and runtime health'
         'best:Start the BEST profile'
+        'best-ecc:Start the isolated BEST + ECC profile'
+        'best-ecc-setup:Install the pinned ECC skill and agent subset'
         'free:Start the FREE OpenCode Zen profile'
         'best-opencode:Alias for best'
         'best-native:Start the native OMO profile'
@@ -81,8 +84,11 @@ _opencode-team() {
             profile) _opencode_team__profiles ;;
           esac
           ;;
-        best|free|go|openai|daily|best-opencode)
+        best|best-ecc|free|go|openai|daily|best-opencode)
           _opencode_team__runtime_options
+          ;;
+        best-ecc-setup)
+          _arguments '(-h --help)'{-h,--help}'[Show help]'
           ;;
         best-native)
           _arguments '(-h --help)'{-h,--help}'[Show help]' '*:OMO option:'

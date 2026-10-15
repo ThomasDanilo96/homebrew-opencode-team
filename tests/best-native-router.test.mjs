@@ -63,7 +63,7 @@ test("Native BEST FANOUT route admits two disjoint implementation workers and a 
   const transformed = await routePrompt(harness, "ROUTE_FANOUT: implement a complex multi-file feature");
   assert.match(transformed.text, /BEST ROUTE FANOUT/);
   assert.match(transformed.text, /<BEST_ROUTER_ROUTE>FANOUT<\/BEST_ROUTER_ROUTE>/);
-  const agents = ["openai-coder-1", "openai-coder-2"];
+  const agents = ["explore", "librarian", "openai-coder-1", "openai-coder-2"];
   const callIds = new Map();
   for (const agent of agents) {
     const callId = `fanout-${agent}`;
@@ -76,6 +76,27 @@ test("Native BEST FANOUT route admits two disjoint implementation workers and a 
   await toolCall(harness, "task", { subagent_type: "openai-reviewer", run_in_background: true }, reviewerCallID);
   await toolResult(harness, "task", {}, reviewerCallID);
   assert.equal(await toolCall(harness, "read", { path: "README.md" }), undefined);
+});
+
+test("Native BEST re-arms delegation for a short continuation in the same session", async () => {
+  const harness = createHarness("ses-native-followup");
+  const initial = await routePrompt(harness, "ROUTE_FANOUT: implement the requested feature");
+  assert.equal(initial.action, "transform");
+  const initialAgents = ["explore", "librarian", "openai-coder-1", "openai-coder-2"];
+  for (const agent of initialAgents) {
+    const id = `initial-${agent}`;
+    await toolCall(harness, "task", { subagent_type: agent, run_in_background: true }, id);
+    await toolResult(harness, "task", {}, id);
+  }
+  const reviewerID = "initial-reviewer";
+  await toolCall(harness, "task", { subagent_type: "openai-reviewer", run_in_background: true }, reviewerID);
+  await toolResult(harness, "task", {}, reviewerID);
+
+  const followup = await routePrompt(harness, "continua con la prossima parte");
+  assert.equal(followup.action, "transform");
+  assert.match(followup.text, /BEST ROUTE FANOUT/);
+  assert.match(followup.text, /<BEST_ROUTER_ROUTE>FANOUT<\/BEST_ROUTER_ROUTE>/);
+  assert.equal((await toolCall(harness, "edit", { path: "src/next.js" })).block, true);
 });
 
 test("Native BEST router blocks legacy delegation and unsafe recursive scans", async () => {

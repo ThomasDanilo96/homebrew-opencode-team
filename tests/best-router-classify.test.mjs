@@ -15,11 +15,13 @@ function classify(prompt) {
   return result.stdout.trim();
 }
 
-test("BEST selects parallel coding fanout for an articulated multi-file implementation request", () => {
+test("BEST selects the mandatory implementation workflow for both complex and small changes", () => {
   assert.equal(
     classify("Implementa una feature end-to-end che integra più moduli e aggiorna il flusso."),
     "<BEST_ROUTER_ROUTE>FANOUT</BEST_ROUTER_ROUTE>",
   );
+  assert.equal(classify("Fix the typo in one configuration file"), "<BEST_ROUTER_ROUTE>FANOUT</BEST_ROUTER_ROUTE>");
+  assert.equal(classify("Implement a small helper"), "<BEST_ROUTER_ROUTE>FANOUT</BEST_ROUTER_ROUTE>");
 });
 
 test("BEST does not send planning-only refactor requests to implementation coders", () => {
