@@ -946,7 +946,7 @@ values = {
     "@RUNTIME_ROOT@": os.environ["RUNTIME_ROOT"],
     "@OMO_PLUGIN@": os.environ.get("OMO_PLUGIN", "oh-my-openagent"),
     "@SERENA_BIN@": os.environ["SERENA_BIN"],
-    "@ECC_SOURCE@": os.environ.get("ECC_SOURCE", os.path.join(os.environ["DATA_ROOT"], "best-ecc", "ecc")),
+    "@ECC_SOURCE@": os.path.join(os.environ["DATA_ROOT"], "best-ecc", "ecc"),
 }
 for marker, value in values.items():
     template = template.replace(marker, value)

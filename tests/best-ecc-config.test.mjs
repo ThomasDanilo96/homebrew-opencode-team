@@ -53,3 +53,9 @@ test("ECC setup pins upstream and checks out only the curated skills and prompts
   assert.match(installer, /Refusing to update locally modified ECC source/);
   assert.match(installer, /https:\/\/github\.com\/affaan-m\/ECC\.git/);
 });
+
+test("ECC assets always resolve inside the isolated BEST-ECC data root", () => {
+  const cli = read("bin/opencode-team");
+  assert.match(cli, /"@ECC_SOURCE@": os\.path\.join\(os\.environ\["DATA_ROOT"\], "best-ecc", "ecc"\)/);
+  assert.doesNotMatch(cli, /os\.environ\.get\("ECC_SOURCE"/);
+});
