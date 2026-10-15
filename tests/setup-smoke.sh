@@ -199,7 +199,20 @@ for pid in $upgrade_identity_pids; do
     exit 1
   fi
 done
-test ! -e "$upgrade_run_dir"
+if [ -e "$upgrade_run_dir" ]; then
+  printf 'runtime state remained after self-heal shutdown: %s\n' "$upgrade_run_dir" >&2
+  for state_file in state status stage failure_reason; do
+    if [ -f "$upgrade_run_dir/$state_file" ]; then
+      printf '%s: ' "$state_file" >&2
+      tr '\n' ' ' < "$upgrade_run_dir/$state_file" >&2
+      printf '\n' >&2
+    fi
+  done
+  node "$ROOT/core/lib/runtime-manifest.mjs" "$upgrade_run_dir" status >&2 || true
+  ps -axo pid=,command= | rg "$TEAM_HOME" | rg -v 'rg ' >&2 || true
+  cat "$TEST_ROOT/upgrade-start.out" >&2
+  exit 1
+fi
 post_readiness="$(OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" runtime-readiness)"
 printf '%s' "$post_readiness" | jq -e --arg run "$upgrade_run_rel" '[.runs[] | select(.run == $run)] | length == 0' >/dev/null
 printf '%s\n' 'UPGRADE SELF-HEAL START PASS'
