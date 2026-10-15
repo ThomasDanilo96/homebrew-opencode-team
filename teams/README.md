@@ -11,8 +11,9 @@ Native memory and recall profile. BEST and GO OpenCode patchers remain
 deterministic source files in this repository; historical staging paths are
 never consulted at runtime.
 
-BEST-ECC is a separate OpenCode profile. `opencode-team best-ecc-setup` checks
-out only the ECC skill, prompt and plugin paths pinned in `best-ecc/ecc.lock`;
-its user configuration, memory, session data, logs and caches remain isolated
-from BEST. BEST's routing plugin enables the ECC TDD planner only when the
-BEST-ECC runtime exports its explicit opt-in flag.
+BEST-ECC is a separate OpenCode profile. Normal setup checks out only the ECC
+skill, prompt and plugin paths pinned in `best-ecc/ecc.lock`; the explicit
+`best-ecc-setup` command can verify or repair the checkout. Its user
+configuration, memory, session data, logs and caches remain isolated from BEST.
+BEST's routing plugin enables the ECC TDD planner only when its explicit
+runtime flag is enabled.

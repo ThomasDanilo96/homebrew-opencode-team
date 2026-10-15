@@ -73,6 +73,7 @@ run_setup() {
     OPEN_STUB_LOG="$stub_bin/path/open.log" \
     OPENCODE_TEAM_HOME="$home" \
     OPENCODE_TEAM_DEPENDENCY_ROOT="$dependency_root" \
+    OPENCODE_TEAM_TEST_SKIP_ECC_SETUP=1 \
     bash "$ROOT/bin/opencode-team" setup >"$output" 2>&1
   rc=$?
   set -e
@@ -268,6 +269,7 @@ BREW_STUB_BIN="$fresh_opencode_failure_bin/path" \
   BREW_STUB_FAIL_INSTALL_OPENCODE=1 \
   OPENCODE_TEAM_HOME="$fresh_opencode_failure_home" \
   OPENCODE_TEAM_DEPENDENCY_ROOT="$success_dependencies" \
+  OPENCODE_TEAM_TEST_SKIP_ECC_SETUP=1 \
   PATH="$fresh_opencode_failure_bin/path:/usr/bin:/bin" \
   bash "$ROOT/bin/opencode-team" setup >"$TEST_ROOT/fresh-opencode-failure.out" 2>&1
 fresh_opencode_failure_rc=$?
@@ -286,6 +288,7 @@ for launchctl_mode in bootstrap-fail verify-fail; do
   set +e
   HOME="$launchctl_home" \
     OPENCODE_TEAM_DEPENDENCY_ROOT="$success_dependencies" \
+    OPENCODE_TEAM_TEST_SKIP_ECC_SETUP=1 \
     LAUNCHCTL_MODE="$launchctl_mode" \
     LAUNCHCTL_STATE="$launchctl_bin/path/launchctl.state" \
     PATH="$launchctl_bin/path:/usr/bin:/bin" \
@@ -312,6 +315,7 @@ PATH="$failure_bin/path:/usr/bin:/bin" \
   BREW_STUB_LOG="$failure_bin/path/brew.log" \
   OPENCODE_TEAM_HOME="$failure_home" \
   OPENCODE_TEAM_DEPENDENCY_ROOT="$failure_dependencies" \
+  OPENCODE_TEAM_TEST_SKIP_ECC_SETUP=1 \
   bash "$ROOT/bin/opencode-team" setup >"$TEST_ROOT/failure.out" 2>&1
 failure_rc=$?
 set -e
@@ -331,6 +335,7 @@ PATH="$plist_failure_bin/path:/usr/bin:/bin" \
   BREW_STUB_LOG="$plist_failure_bin/path/brew.log" \
   OPENCODE_TEAM_HOME="$plist_failure_home" \
   OPENCODE_TEAM_DEPENDENCY_ROOT="$success_dependencies" \
+  OPENCODE_TEAM_TEST_SKIP_ECC_SETUP=1 \
   bash "$ROOT/bin/opencode-team" setup >"$TEST_ROOT/plist-failure.out" 2>&1
 plist_failure_rc=$?
 set -e
@@ -349,6 +354,7 @@ PATH="$rename_failure_bin/path:/usr/bin:/bin" \
   BROKEN_PYTHON_LOG="$rename_failure_bin/path/broken-python.log" \
   OPENCODE_TEAM_HOME="$rename_failure_home" \
   OPENCODE_TEAM_DEPENDENCY_ROOT="$success_dependencies" \
+  OPENCODE_TEAM_TEST_SKIP_ECC_SETUP=1 \
   bash "$ROOT/bin/opencode-team" setup >"$TEST_ROOT/rename-failure.out" 2>&1
 rename_failure_rc=$?
 set -e

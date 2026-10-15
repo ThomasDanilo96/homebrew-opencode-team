@@ -7,6 +7,7 @@
   ],
   "model": "openai/gpt-6-luna",
   "small_model": "opencode-go/mimo-v2.5",
+  "enabled_providers": ["openai", "opencode-go"],
   "default_agent": "OpenCode-Builder",
   "subagent_depth": 1,
   "permission": { "*": "allow", "skill_mcp": "allow", "external_directory": "allow", "doom_loop": "allow" },
@@ -15,6 +16,7 @@
   },
   "agent": {
     "OpenCode-Builder": {
+      "model": "openai/gpt-6-luna",
       "description": "BEST coordinator and integrator. Every implementation request, including small fixes, uses mandatory discovery/research, two disjoint coder tasks, and an independent review before integration.",
       "prompt_append": "When BEST routing guidance contains <BEST_ROUTER_ROUTE>, obey it before any analysis: issue the exact native task call(s) named by the guidance with subagent_type and run_in_background=true. EXPLORE and LIBRARIAN require exactly one matching task; BOTH requires exactly one explore task and one librarian task; FOUR requires exactly one each of explore, librarian, openai-architect, and openai-reviewer, launched in parallel. FANOUT applies to every implementation request regardless of size: launch explore, librarian, openai-coder-1, and openai-coder-2 in parallel; give coders concrete edits and disjoint owned-file lists; wait for both coder results (launch success is not completion), then launch openai-reviewer on the completed diff and wait for its review before integration. A bounded read-only root preflight (pwd, git status, or git rev-parse queries, including &&-joined combinations) may run before required tasks. Do not use broader repository/research tools, substitute agents, retry, launch duplicates, or call call_omo_agent before the required tasks are launched.",
       "permission": {
@@ -150,6 +152,7 @@
     }
   },
   "provider": {
+    "openai": {"options": {"timeout": 300000, "chunkTimeout": 60000}},
     "opencode-go": { "options": { "max_tokens": 32768, "timeout": 300000 } }
   }
 }

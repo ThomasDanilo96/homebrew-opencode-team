@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: release `v0.1.62`.
+Status: release `v0.1.63`.
 
 ## Goal
 
@@ -26,10 +26,11 @@ opencode-team doctor
 opencode-team best
 ```
 
-For the separate ECC-powered profile, run `opencode-team best-ecc-setup` once
-after setup, then launch `opencode-team best-ecc`. ECC is pinned to a reviewed
-commit and only the selected skill/agent assets are installed; `best` keeps its
-own configuration and remains independent.
+For the separate ECC-powered profile, the normal `opencode-team setup` also
+installs the pinned, curated ECC skills and hooks. Then launch
+`opencode-team best-ecc`. `opencode-team best-ecc-setup` remains available to
+repair or re-check those assets; `best` keeps its own configuration and remains
+independent.
 
 The Homebrew formula also installs Zsh completions for profiles and subcommands.
 Open a new shell after upgrading, or reload completions in the current shell
@@ -111,8 +112,8 @@ Profiles:
   with `opencode-team best-native`.
 - `BEST-ECC`: isolated BEST OpenCode profile with pinned ECC skills/agents,
   Serena-first navigation, and an ECC test-first planning task on each
-  implementation, launched with `opencode-team best-ecc` after
-  `opencode-team best-ecc-setup`.
+  implementation, installed by `opencode-team setup` and launched with
+  `opencode-team best-ecc`.
 - `GO`: OpenCode Go profile with the certified GO OMO patches.
 - `OPENAI`: OpenAI-only orchestration profile with Codex and Serena integration.
 

@@ -1200,6 +1200,12 @@ setup() {
     install_dependencies "$team"
     printf '  %-18s OK\n' "$team profile"
   done
+  if [ "${OPENCODE_TEAM_TEST_SKIP_ECC_SETUP:-0}" = "1" ]; then
+    printf '  %-18s SKIPPED (isolated setup test)\n' "best-ecc assets"
+  else
+    bash "$PACKAGE_ROOT/teams/best-ecc/setup-ecc.sh" "$DATA_ROOT/best-ecc" || return 1
+    printf '  %-18s OK (pinned skills and hooks installed)\n' "best-ecc assets"
+  fi
   native_runtime="$(resolve_native_runtime)" || return 1
   prepare_best_native "$native_runtime" || return 1
   verify_best_omo

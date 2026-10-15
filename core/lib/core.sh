@@ -365,6 +365,9 @@ PY
 
 bridge_opencode_auth() {
   local source_path="${OPENCODE_AUTH_SOURCE:-${OPENCODE_TEAM_OPENCODE_AUTH_SOURCE:-}}"
+  if [ -z "$source_path" ] && { [ "${TEAM_NAME:-}" = "best" ] || [ "${TEAM_NAME:-}" = "best-ecc" ]; } && [ -f "$HOME/.local/share/opencode/auth.json" ]; then
+    source_path="$HOME/.local/share/opencode/auth.json"
+  fi
   [ -n "$source_path" ] || return 0
   local destination="$XDG_DATA_HOME/opencode/auth.json"
   bridge_private_auth_file "$source_path" "$destination" "$SANDBOX" "OpenCode"

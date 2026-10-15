@@ -71,6 +71,9 @@ same(bestOmo.agents["OpenCode-Builder"].tools.call_omo_agent, false, "BEST OMO B
 same(bestOmoModels.profiles["best-native"]["[native]"].task.provider_concurrency["chatgpt-subscription"], 2, "BEST subscription coder fanout concurrency");
 same(best.agent.explore.model, "opencode-go/qwen3.7-plus", "BEST explore model");
 same(best.agent.librarian.model, "opencode-go/qwen3.7-plus", "BEST librarian model");
+same(best.enabled_providers, ["openai", "opencode-go"], "BEST provider set");
+same(best.agent["OpenCode-Builder"].model, "openai/gpt-6-luna", "BEST Builder model");
+same(best.provider.openai.options.timeout, 300000, "BEST OpenAI provider availability");
 same(best.compaction, { auto: true, prune: true, reserved: 10000 }, "BEST compaction");
 assert(bestOmo.browser_automation_engine?.provider === "playwright", "BEST Playwright provider missing");
 assert(bestOmo.browser_automation_engine?.playwright_mcp_args?.includes("--isolated"), "BEST Playwright isolation missing");
@@ -303,8 +306,11 @@ const bestEccAgentNames = [
   "ecc-tdd-guide", "explore", "librarian", "openai-coder-1", "openai-coder-2", "openai-reviewer",
 ].sort();
 same(bestEcc.model, "openai/gpt-6-luna", "BEST-ECC model");
+same(bestEcc.enabled_providers, ["openai", "opencode-go"], "BEST-ECC explicit provider set");
 same(bestEcc.default_agent, "OpenCode-Builder", "BEST-ECC default agent");
 same(Object.keys(bestEcc.agent).sort(), bestEccAgentNames, "BEST-ECC agent catalog");
+same(bestEcc.agent["OpenCode-Builder"].model, "openai/gpt-6-luna", "BEST-ECC Builder model");
+same(bestEcc.provider.openai.options.timeout, 300000, "BEST-ECC OpenAI provider availability");
 same(bestEcc.agent.explore.permission.task, "deny", "BEST-ECC explore nested-task permission");
 same(bestEcc.agent.librarian.permission.task, "deny", "BEST-ECC librarian nested-task permission");
 same(bestEcc.agent["ecc-tdd-guide"].permission.edit, "deny", "BEST-ECC TDD planner read-only policy");

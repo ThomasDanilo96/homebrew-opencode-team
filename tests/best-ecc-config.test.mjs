@@ -30,6 +30,9 @@ test("BEST-ECC OpenCode and OmO templates are valid after runtime substitution",
   const rendered = opencodeTemplate.replace(/@[A-Z_]+@/g, (token) => values[token] ?? `/tmp/${token.slice(1, -1).toLowerCase()}`);
   const config = JSON.parse(rendered);
   assert.equal(config.default_agent, "OpenCode-Builder");
+  assert.ok(config.enabled_providers.includes("openai"));
+  assert.equal(config.agent["OpenCode-Builder"].model, "openai/gpt-6-luna");
+  assert.equal(config.provider.openai.options.timeout, 300000);
   assert.ok(config.skills.paths.includes("/tmp/ecc/skills"));
   assert.ok(config.plugin.includes("/tmp/ecc/.opencode/plugins/ecc-hooks.ts"));
   assert.equal(config.agent["ecc-tdd-guide"].permission.edit, "deny");
@@ -58,4 +61,6 @@ test("ECC assets always resolve inside the isolated BEST-ECC data root", () => {
   const cli = read("bin/opencode-team");
   assert.match(cli, /"@ECC_SOURCE@": os\.path\.join\(os\.environ\["DATA_ROOT"\], "best-ecc", "ecc"\)/);
   assert.doesNotMatch(cli, /os\.environ\.get\("ECC_SOURCE"/);
+  assert.match(cli, /setup-ecc\.sh" "\$DATA_ROOT\/best-ecc" \|\| return 1/);
+  assert.match(read("core/lib/core.sh"), /TEAM_NAME:-.*best-ecc.*HOME\/\.local\/share\/opencode\/auth\.json/s);
 });

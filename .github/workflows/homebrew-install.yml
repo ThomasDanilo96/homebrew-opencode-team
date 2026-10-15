@@ -89,6 +89,10 @@ jobs:
            shared_dependencies="$test_home/shared-dependencies"
            OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup
            OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team best-ecc-setup
+           ecc_models="$(XDG_CONFIG_HOME="$test_home/config/best-ecc/xdg-config" XDG_DATA_HOME="$test_home/data/best-ecc/data" OPENCODE_CONFIG="$test_home/config/best-ecc/opencode.jsonc" OPENCODE_CONFIG_DIR="$test_home/config/best-ecc" OPENCODE_DISABLE_PROJECT_CONFIG=1 opencode models openai)"
+           printf '%s\n' "$ecc_models" | rg -q '^openai/gpt-6-luna$'
+           go_models="$(XDG_CONFIG_HOME="$test_home/config/best-ecc/xdg-config" XDG_DATA_HOME="$test_home/data/best-ecc/data" OPENCODE_CONFIG="$test_home/config/best-ecc/opencode.jsonc" OPENCODE_CONFIG_DIR="$test_home/config/best-ecc" OPENCODE_DISABLE_PROJECT_CONFIG=1 opencode models opencode-go)"
+           printf '%s\n' "$go_models" | rg -q '^opencode-go/qwen3\.7-plus$'
            opencode --version
           opencode_prefix="$(brew --prefix opencode)"
           test -x "$opencode_prefix/bin/opencode"

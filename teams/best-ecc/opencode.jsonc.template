@@ -8,6 +8,7 @@
   ],
   "model": "openai/gpt-6-luna",
   "small_model": "opencode-go/mimo-v2.5",
+  "enabled_providers": ["openai", "opencode-go"],
   "default_agent": "OpenCode-Builder",
   "subagent_depth": 2,
   "skills": {
@@ -25,6 +26,7 @@
   },
   "agent": {
     "OpenCode-Builder": {
+      "model": "openai/gpt-6-luna",
       "description": "BEST-ECC coordinator. Preserve the mandatory discovery, test-first, disjoint implementation and independent review gates. Use Serena for symbol-level navigation; load ECC skills only when relevant.",
       "prompt_append": "Use Serena before broad file scans: search symbols/references and read only the relevant ranges. Keep delegated prompts and reports concise. For every implementation, follow BEST-ECC FANOUT guidance: launch explore, librarian, ecc-tdd-guide and both OpenAI coders in parallel; do not start editing until the coder tasks finish; then launch openai-reviewer against the completed diff. ecc-tdd-guide must load the ECC tdd-workflow skill and return a brief test-first plan without edits. The Builder loads verification-loop only when selecting final focused checks. Skills are on-demand: never load the whole ECC catalog or unrelated skills. For large work, decompose into independent owned slices and dispatch in bounded waves of at most eight active tasks; child agents may not recursively delegate. Keep the user-facing summary and tool output compact; do not claim a token reduction without measuring it.",
       "permission": {
@@ -137,6 +139,7 @@
     }
   },
   "provider": {
+    "openai": {"options": {"timeout": 300000, "chunkTimeout": 60000}},
     "opencode-go": {"options": {"max_tokens": 32768, "timeout": 300000}}
   }
 }

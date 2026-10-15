@@ -54,6 +54,7 @@ class OpencodeTeam < Formula
     ENV["OPENCODE_TEAM_HOME"] = first.to_s
     system bin/"opencode-team", "setup"
     assert_predicate first/"config/best-ecc/claude-config/settings.json", :file?
+    assert_predicate first/"data/best-ecc/ecc/.opencode/plugins/ecc-hooks.ts", :file?
     system bin/"opencode-team", "best-ecc-setup"
     assert_predicate first/"data/best-ecc/ecc/.opencode/plugins/ecc-hooks.ts", :file?
     assert_predicate first/"state/maintenance/launchagents/it.danilodantoni.opencode-team.version-check.plist", :file?
