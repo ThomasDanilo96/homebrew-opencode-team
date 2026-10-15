@@ -418,6 +418,22 @@ setup_roots() {
   fi
 }
 
+remove_legacy_shared_oauth_copies() {
+  local source="$HOME/.local/share/opencode/auth.json" destination team removed=0
+  [ -z "${OPENCODE_AUTH_SOURCE:-${OPENCODE_TEAM_OPENCODE_AUTH_SOURCE:-}}" ] || return 0
+  [ -f "$source" ] && [ ! -L "$source" ] || return 0
+  for team in best best-ecc; do
+    destination="$DATA_ROOT/$team/data/opencode/auth.json"
+    [ -f "$destination" ] && [ ! -L "$destination" ] || continue
+    cmp -s "$source" "$destination" || continue
+    rm -f -- "$destination"
+    removed=$((removed + 1))
+  done
+  if [ "$removed" -gt 0 ]; then
+    printf '  %-18s removed legacy shared OAuth copies; sign in separately in BEST and BEST-ECC\n' "OAuth migration"
+  fi
+}
+
 managed_python_healthy() {
   local candidate
   if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
@@ -1142,6 +1158,7 @@ setup() {
   export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
   mkdir -p "$CONFIG_ROOT" "$DATA_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$RUNTIME_ROOT" "$DEPENDENCY_ROOT"
   chmod 700 "$CONFIG_ROOT" "$DATA_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$RUNTIME_ROOT" "$DEPENDENCY_ROOT"
+  remove_legacy_shared_oauth_copies
   printf 'OpenCode Team setup\n'
   printf '  config root       %s\n' "$CONFIG_ROOT"
   printf '  data root         %s\n' "$DATA_ROOT"

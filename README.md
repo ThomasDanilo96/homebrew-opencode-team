@@ -1,6 +1,6 @@
 # OpenCode Team
 
-Status: release `v0.1.63`.
+Status: release `v0.1.64`.
 
 ## Goal
 
@@ -31,6 +31,12 @@ installs the pinned, curated ECC skills and hooks. Then launch
 `opencode-team best-ecc`. `opencode-team best-ecc-setup` remains available to
 repair or re-check those assets; `best` keeps its own configuration and remains
 independent.
+
+OAuth credentials are intentionally not copied between OpenCode profiles,
+because rotating refresh tokens become invalid when multiple isolated copies
+are used. On first use, connect each provider inside the target profile with
+`/connect openai` and `/connect opencode-go`. Setup removes legacy shared-token
+copies from BEST/BEST-ECC when it detects the previous bridge behavior.
 
 The Homebrew formula also installs Zsh completions for profiles and subcommands.
 Open a new shell after upgrading, or reload completions in the current shell

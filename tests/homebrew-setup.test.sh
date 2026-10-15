@@ -119,6 +119,16 @@ for dependency_name in best go openai bin uv-cache; do
   fi
 done
 make_stub_bin "$success_bin"
+legacy_auth_source="$success_home/user-home/.local/share/opencode/auth.json"
+mkdir -p "$(dirname "$legacy_auth_source")"
+printf '%s\n' '{"legacy-test-auth":"opaque-fixture"}' >"$legacy_auth_source"
+chmod 600 "$legacy_auth_source"
+for team in best best-ecc; do
+  destination="$success_home/data/$team/data/opencode/auth.json"
+  mkdir -p "$(dirname "$destination")"
+  cp "$legacy_auth_source" "$destination"
+  chmod 600 "$destination"
+done
 run_setup "$success_home" "$success_dependencies" "$success_bin" "$TEST_ROOT/success.out"
 rg -q '^cleanup=1 args=install --cask codex$' "$success_bin/path/brew.log"
 rg -q 'Setup complete\. No runtime was started\.' "$TEST_ROOT/success.out"
@@ -130,6 +140,10 @@ for team in best best-ecc free go openai daily; do
   test -f "$success_home/config/$team/opencode.jsonc"
 done
 test -f "$success_home/config/best-ecc/claude-config/settings.json"
+test -f "$legacy_auth_source"
+test ! -e "$success_home/data/best/data/opencode/auth.json"
+test ! -e "$success_home/data/best-ecc/data/opencode/auth.json"
+rg -q 'removed legacy shared OAuth copies' "$TEST_ROOT/success.out"
 test -f "$success_home/state/maintenance/launchagents/it.danilodantoni.opencode-team.runtime-gc.plist"
 test -f "$success_home/state/maintenance/launchagents/it.danilodantoni.opencode-team.version-check.plist"
 

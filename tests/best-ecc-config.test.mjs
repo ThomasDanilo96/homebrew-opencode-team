@@ -62,5 +62,8 @@ test("ECC assets always resolve inside the isolated BEST-ECC data root", () => {
   assert.match(cli, /"@ECC_SOURCE@": os\.path\.join\(os\.environ\["DATA_ROOT"\], "best-ecc", "ecc"\)/);
   assert.doesNotMatch(cli, /os\.environ\.get\("ECC_SOURCE"/);
   assert.match(cli, /setup-ecc\.sh" "\$DATA_ROOT\/best-ecc" \|\| return 1/);
-  assert.match(read("core/lib/core.sh"), /TEAM_NAME:-.*best-ecc.*HOME\/\.local\/share\/opencode\/auth\.json/s);
+  assert.match(cli, /remove_legacy_shared_oauth_copies\(\)/);
+  const core = read("core/lib/core.sh");
+  assert.match(core, /source_path="\$\{OPENCODE_AUTH_SOURCE:-\$\{OPENCODE_TEAM_OPENCODE_AUTH_SOURCE:-\}\}"/);
+  assert.doesNotMatch(core, /HOME\/\.local\/share\/opencode\/auth\.json/);
 });
