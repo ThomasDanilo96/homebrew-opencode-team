@@ -26,6 +26,7 @@ grep -Fq 'brew audit --strict --formula ThomasDanilo96/opencode-team/opencode-te
 grep -Fq 'run: brew update' "$workflow"
 grep -Fq 'timeout-minutes: 60' "$workflow"
 grep -Fq 'brew install --verbose ThomasDanilo96/opencode-team/opencode-team' "$workflow"
+grep -Fq 'runs-on: macos-26' "$workflow"
 grep -Fq 'opencode-team best-ecc-setup' "$workflow"
 grep -Fq 'opencode models openai' "$workflow"
 grep -Fq 'opencode-team deep-audit-setup' "$workflow"

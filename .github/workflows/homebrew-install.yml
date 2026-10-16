@@ -69,7 +69,8 @@ jobs:
   clean-install:
     needs: release_state
     if: needs.release_state.outputs.published == 'true'
-    runs-on: macos-14
+    # The current node@22 bottle is available on Tahoe; macos-14 would build V8 from source.
+    runs-on: macos-26
     timeout-minutes: 60
     steps:
       - name: Checkout development code
