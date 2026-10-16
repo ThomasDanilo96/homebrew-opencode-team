@@ -70,6 +70,7 @@ jobs:
     needs: release_state
     if: needs.release_state.outputs.published == 'true'
     runs-on: macos-14
+    timeout-minutes: 60
     steps:
       - name: Checkout development code
         uses: actions/checkout@v4
@@ -83,7 +84,7 @@ jobs:
           brew trust --formula ThomasDanilo96/opencode-team/opencode-team
 
       - name: Install from tap
-        run: HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ThomasDanilo96/opencode-team/opencode-team
+        run: HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_AUTO_UPDATE=1 brew install --verbose ThomasDanilo96/opencode-team/opencode-team
 
       - name: Verify toolchain
         run: |
