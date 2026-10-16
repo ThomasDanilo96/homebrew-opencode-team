@@ -200,7 +200,12 @@ opencode_version_supported() {
 validate_opencode() {
   local executable="$1" version
   [ -x "$executable" ] || return 1
-  version="$($executable --version 2>/dev/null | awk 'NR == 1 {print $1}')"
+  version="$($executable --version 2>/dev/null | awk '
+    NR != 1 { next }
+    $1 ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/ { version = $1 }
+    $1 == "opencode" && $2 ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/ { version = $2 }
+    version != "" { sub(/^v/, "", version); print version }
+  ')"
   opencode_version_supported "$version" || return 1
   OPENCODE_VERSION="$version"
   export OPENCODE_VERSION

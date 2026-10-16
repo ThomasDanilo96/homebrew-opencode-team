@@ -113,6 +113,18 @@ test("the centralized resolver rejects unsupported Homebrew OpenCode versions", 
   assert.match(result.stdout, /unsupported-version-rejected/);
 });
 
+test("Homebrew OpenCode version parser accepts the product-prefixed CLI format", async (t) => {
+  const root = await makeTempRoot();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const fake = await fakeOpenCode(root, "opencode 2.0.30");
+  const functions = ["opencode_version_supported", "validate_opencode"].map(extractFunction).join("\n");
+  const result = runBash(`set -euo pipefail\n${functions}\nOPENCODE_MIN_VERSION=1.18.30\nvalidate_opencode "$SELECTED"\nprintf '%s\\n' "$OPENCODE_VERSION"`, {
+    env: { SELECTED: fake.executable },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(result.stdout.trim(), "2.0.30");
+});
+
 const debugConfig = {
   model: "openai/gpt-6-astra",
   agent: {
