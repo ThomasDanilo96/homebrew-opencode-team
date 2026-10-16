@@ -84,6 +84,22 @@ ready_with_ecc="$(PACKAGE_ROOT="$ROOT" RUNTIME_ROOT="$RUNTIME_ROOT" node "$ROOT/
 printf '%s\n' "$ready_with_ecc" | jq -e '.ready == true and any(.runs[]; (.run | startswith("best-ecc/")) and .state == "ACTIVE")' >/dev/null
 printf '%s\n' 'BEST_ECC_RUNTIME_READY = PASS'
 
+run_dir="$RUNTIME_ROOT/deep-audit/runs/abcd1234"
+mkdir -p "$run_dir"
+printf '%s\n' abcd1234 >"$run_dir/run_id"
+printf '%s\n' deep-audit >"$run_dir/team"
+printf '%s\n' interactive >"$run_dir/job_type"
+printf '%s\n' "$RUNTIME_ROOT" >"$run_dir/runtime_root"
+printf '%s\n' ACTIVE >"$run_dir/state"
+write_identity "$run_dir" launcher "$launcher_pid"
+write_identity "$run_dir" server "$server_pid"
+PACKAGE_ROOT="$ROOT" node "$ROOT/core/lib/runtime-manifest.mjs" "$run_dir" publish
+printf '%s\n' ses_deep_audit_readiness >"$run_dir/parent_session_id"
+PACKAGE_ROOT="$ROOT" node "$ROOT/core/lib/runtime-manifest.mjs" "$run_dir" state ACTIVE
+ready_with_deep_audit="$(PACKAGE_ROOT="$ROOT" RUNTIME_ROOT="$RUNTIME_ROOT" node "$ROOT/core/lib/runtime-lifecycle.mjs" readiness)"
+printf '%s\n' "$ready_with_deep_audit" | jq -e '.ready == true and any(.runs[]; (.run | startswith("deep-audit/")) and .state == "ACTIVE")' >/dev/null
+printf '%s\n' 'DEEP_AUDIT_RUNTIME_READY = PASS'
+
 kill "$server_pid"
 wait "$server_pid" 2>/dev/null || true
 rm -rf "$RUNTIME_ROOT/best"

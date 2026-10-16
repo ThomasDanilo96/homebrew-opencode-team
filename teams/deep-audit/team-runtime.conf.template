@@ -1,0 +1,15 @@
+# Isolated, read-only audit profile. Requires launcher registration.
+TEAM_NAME=deep-audit
+OPENCODE_BIN=@OPENCODE_BIN@
+OPENCODE_TEAM_PYTHON=@PYTHON_BIN@
+SANDBOX=@DATA_ROOT@/deep-audit
+RUNTIME_ROOT=@CACHE_ROOT@/runtime/deep-audit
+PERSISTENT_DATA_ROOT=@DATA_ROOT@/deep-audit/data
+TMUX_PREFIX=oc-deep-audit
+OMO_PROFILE=deep-audit
+OPENCODE_CONFIG=@CONFIG_ROOT@/deep-audit/opencode.jsonc
+XDG_CONFIG_HOME_OVERRIDE=@CONFIG_ROOT@/deep-audit/xdg-config
+RUNTIME_ENV_HOOK=@PACKAGE_ROOT@/teams/deep-audit/runtime-env.sh
+NATIVE_UI_ONLY_AGENTS=audit-architecture,audit-security,audit-dependencies,audit-tests,audit-reviewer
+RESUME_ALLOWED_AGENTS=audit-orchestrator,compaction
+BRIDGE_MODE=tmux

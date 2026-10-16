@@ -23,6 +23,10 @@ usage() {
     '  opencode-team best [--resume SESSION] (OpenCode BEST profile)' \
     '  opencode-team best-ecc [--resume SESSION] (isolated BEST + ECC profile)' \
     '  opencode-team best-ecc-setup (install pinned ECC skills and agents)' \
+    '  opencode-team deep-audit [--resume SESSION] [TARGET]' \
+    '  opencode-team deep-audit-setup' \
+    '  opencode-team deep-audit-doctor' \
+    '  opencode-team deep-audit-report [options]' \
     '  opencode-team free [--resume SESSION] (BEST profile with OpenCode Zen free models)' \
     '  opencode-team best-opencode [--resume SESSION] (alias for best)' \
     '  opencode-team best-native [OMO OPTIONS]' \
@@ -30,7 +34,7 @@ usage() {
     '  opencode-team go [--resume SESSION]' \
     '  opencode-team openai [--resume SESSION]' \
     '  opencode-team daily [--resume SESSION]' \
-    '  opencode-team start <best|best-ecc|free|best-opencode|best-native|go|openai|daily> [options]' \
+    '  opencode-team start <best|best-ecc|deep-audit|free|best-opencode|best-native|go|openai|daily> [options]' \
     '  opencode-team daily-report [--markdown]' \
     '  opencode-team daily-benchmark <list|validate|prepare|report|execute> [options]' \
     '  opencode-team runtime-status' \
@@ -60,6 +64,7 @@ node_version_compatible() {
   local version major minor patch
   version="${1#v}"
   IFS=. read -r major minor patch _ <<< "$version"
+  [[ "$major" =~ ^[0-9]+$ && "$minor" =~ ^[0-9]+$ && "$patch" =~ ^[0-9]+$ ]] || return 1
   case "$major" in
     22) [ "$minor" -gt 22 ] || { [ "$minor" -eq 22 ] && [ "${patch:-0}" -ge 2 ]; } ;;
     24) [ "$minor" -gt 15 ] || { [ "$minor" -eq 15 ] && [ "${patch:-0}" -ge 0 ]; } ;;
@@ -68,12 +73,21 @@ node_version_compatible() {
 }
 
 check_node() {
-  local version
+  local version node_bin
   if ! command -v node >/dev/null 2>&1; then
     printf '  %-16s MISSING\n' "node"
     return 1
   fi
-  version="$(node --version)"
+  node_bin="$(command -v node)"
+  # A --version shim (or Bun masquerading as node) cannot run our Node scripts.
+  version="$("$node_bin" -p 'process.release.name === "node" ? process.versions.node : ""' 2>/dev/null)" || {
+    printf '  %-16s INVALID (not a working Node.js runtime)\n' "node"
+    return 1
+  }
+  [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+    printf '  %-16s INVALID (not a working Node.js runtime)\n' "node"
+    return 1
+  }
   if node_version_compatible "$version"; then
     printf '  %-16s %s COMPATIBLE\n' "node" "$version"
     return 0
@@ -135,6 +149,7 @@ serena_version_ok() {
 
 validate_profile_config() {
   local team="$1" config_file="$CONFIG_ROOT/$1/opencode.jsonc" xdg_root="$CONFIG_ROOT/$1/xdg-config"
+  ensure_opencode_loaded || { printf '  %-16s INVALID (supported Homebrew OpenCode is unavailable)\n' "$team profile"; return 1; }
   validate_generated_surface "$team" || return 1
   if ! OPENCODE_CONFIG="$config_file" \
     OPENCODE_CONFIG_DIR="$(dirname "$config_file")" \
@@ -157,8 +172,9 @@ resolve_opencode() {
   local brew_prefix candidate
   if command -v brew >/dev/null 2>&1; then
     brew_prefix="$(HOMEBREW_NO_INSTALL_CLEANUP=1 brew --prefix opencode 2>/dev/null || true)"
+    [ -n "$brew_prefix" ] || return 1
     candidate="$brew_prefix/bin/opencode"
-    if [ -x "$candidate" ]; then
+    if [ -f "$candidate" ] && [ -x "$candidate" ]; then
       printf '%s\n' "$candidate"
       return 0
     fi
@@ -185,21 +201,33 @@ validate_opencode() {
   local executable="$1" version
   [ -x "$executable" ] || return 1
   version="$($executable --version 2>/dev/null | awk 'NR == 1 {print $1}')"
-  opencode_version_supported "$version"
+  opencode_version_supported "$version" || return 1
   OPENCODE_VERSION="$version"
   export OPENCODE_VERSION
 }
 
+load_opencode() {
+  OPENCODE_BIN="$(resolve_opencode 2>/dev/null)" || return 1
+  [ -n "$OPENCODE_BIN" ] && validate_opencode "$OPENCODE_BIN" || return 1
+  export OPENCODE_BIN
+}
+
+ensure_opencode_loaded() {
+  # Never trust an ambient executable over the Homebrew-managed installation.
+  if [ -n "${OPENCODE_BIN:-}" ] && [ "$OPENCODE_BIN" = "$(resolve_opencode 2>/dev/null || true)" ] && validate_opencode "$OPENCODE_BIN"; then
+    export OPENCODE_BIN
+    return 0
+  fi
+  load_opencode
+}
+
 ensure_opencode() {
-  OPENCODE_BIN="$(resolve_opencode 2>/dev/null || true)"
-  if [ -z "$OPENCODE_BIN" ] || ! validate_opencode "$OPENCODE_BIN"; then
+  if ! load_opencode; then
     require_command brew >/dev/null || return 1
     printf '  %-18s missing or unsupported; installing Homebrew core OpenCode\n' "OpenCode"
     HOMEBREW_NO_INSTALL_CLEANUP=1 brew install opencode || return 1
-    OPENCODE_BIN="$(resolve_opencode 2>/dev/null || true)"
-    [ -n "$OPENCODE_BIN" ] && validate_opencode "$OPENCODE_BIN" || return 1
+    load_opencode || return 1
   fi
-  export OPENCODE_BIN
   printf '  %-18s OK (%s, %s)\n' "OpenCode" "$OPENCODE_VERSION" "$OPENCODE_BIN"
 }
 
@@ -326,8 +354,7 @@ doctor() {
     failed=1
   fi
   require_command brew || failed=1
-  if OPENCODE_BIN="$(resolve_opencode 2>/dev/null || true)" && [ -n "$OPENCODE_BIN" ] && validate_opencode "$OPENCODE_BIN"; then
-    export OPENCODE_BIN
+  if load_opencode; then
     printf '  %-16s OK (%s, %s)\n' "OpenCode" "$OPENCODE_VERSION" "$OPENCODE_BIN"
   else
     printf '  %-16s MISSING\n' "OpenCode"
@@ -377,12 +404,17 @@ doctor() {
   else
     printf '  %-16s OPTIONAL / missing\n' "GitHub CLI"
   fi
-  for team in best best-ecc free go openai daily; do
+  for team in best best-ecc deep-audit free go openai daily; do
     if [ "$team" = best-ecc ] && [ ! -f "$DATA_ROOT/best-ecc/ecc/.opencode/plugins/ecc-hooks.ts" ]; then
       printf '  %-16s NOT READY (run opencode-team best-ecc-setup)\n' "$team profile"
       continue
     fi
     if [ -f "$CONFIG_ROOT/$team/team-runtime.conf" ] && [ -f "$CONFIG_ROOT/$team/opencode.jsonc" ]; then
+      if [ "$team" = deep-audit ]; then
+        validate_profile_config "$team" || failed=1
+        deep_audit_doctor || true
+        continue
+      fi
       validate_profile_config "$team" || failed=1
     else
       printf '  %-16s NOT CONFIGURED\n' "$team profile"
@@ -397,6 +429,8 @@ doctor() {
 
 setup_roots() {
   if [ -n "${OPENCODE_TEAM_HOME:-}" ]; then
+    mkdir -p "$OPENCODE_TEAM_HOME"
+    OPENCODE_TEAM_HOME="$(cd -P "$OPENCODE_TEAM_HOME" && pwd)"
     CONFIG_ROOT="$OPENCODE_TEAM_HOME/config"
     DATA_ROOT="$OPENCODE_TEAM_HOME/data"
     STATE_ROOT="$OPENCODE_TEAM_HOME/state"
@@ -490,6 +524,23 @@ ensure_profile_roots() {
     "$STATE_ROOT/$team" \
     "$CACHE_ROOT/$team" \
     "$RUNTIME_ROOT/$team"
+}
+
+render_deep_audit_profile() {
+  ensure_profile_roots deep-audit
+  mkdir -p "$CONFIG_ROOT/deep-audit/xdg-config/opencode" "$DATA_ROOT/deep-audit/reports" "$DATA_ROOT/deep-audit/plugins" "$DATA_ROOT/deep-audit/serena"
+  chmod 700 "$DATA_ROOT/deep-audit/reports" "$DATA_ROOT/deep-audit/plugins" "$DATA_ROOT/deep-audit/serena"
+  export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  SERENA_BIN="${SERENA_BIN:-$DATA_ROOT/bin/serena}"
+  export SERENA_BIN
+  render_template "$PACKAGE_ROOT/teams/deep-audit/team-runtime.conf.template" "$CONFIG_ROOT/deep-audit/team-runtime.conf" || return 1
+  render_template "$PACKAGE_ROOT/teams/deep-audit/opencode.jsonc.template" "$CONFIG_ROOT/deep-audit/opencode.jsonc" || return 1
+  render_template "$PACKAGE_ROOT/teams/deep-audit/tui.json.template" "$CONFIG_ROOT/deep-audit/xdg-config/opencode/tui.json" || return 1
+  render_template "$PACKAGE_ROOT/teams/deep-audit/report-plugin.mjs.template" "$DATA_ROOT/deep-audit/plugins/report-plugin.mjs" || return 1
+  render_template "$PACKAGE_ROOT/teams/deep-audit/scanner-plugin.mjs.template" "$DATA_ROOT/deep-audit/plugins/scanner-plugin.mjs" || return 1
+  render_template "$PACKAGE_ROOT/teams/deep-audit/test-runner-plugin.mjs.template" "$DATA_ROOT/deep-audit/plugins/test-runner-plugin.mjs" || return 1
+  render_template "$PACKAGE_ROOT/teams/deep-audit/serena_config.yml.template" "$DATA_ROOT/deep-audit/serena/serena_config.yml" || return 1
+  chmod 600 "$CONFIG_ROOT/deep-audit/team-runtime.conf" "$CONFIG_ROOT/deep-audit/opencode.jsonc" "$CONFIG_ROOT/deep-audit/xdg-config/opencode/tui.json" "$DATA_ROOT/deep-audit/plugins/report-plugin.mjs" "$DATA_ROOT/deep-audit/plugins/scanner-plugin.mjs" "$DATA_ROOT/deep-audit/plugins/test-runner-plugin.mjs" "$DATA_ROOT/deep-audit/serena/serena_config.yml"
 }
 
 maintenance_tasks() {
@@ -771,11 +822,10 @@ install_maintenance() {
 maintenance_command() {
   setup_roots
   if [ "${1:-}" != version-check ]; then
-    if ! OPENCODE_BIN="$(resolve_opencode)"; then
+    if ! ensure_opencode_loaded; then
       printf 'OpenCode is required for setup\n' >&2
       return 1
     fi
-    export OPENCODE_BIN
   fi
   export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
   if [ "${1:-}" = status ]; then
@@ -851,6 +901,354 @@ verify_best_native() {
     return 1
   }
   printf '  %-18s OK (5.1.27, isolated native memory profile)\n' "best Native OMO"
+}
+
+deep_audit_model_check() {
+  local openai_models resolved_config
+  ensure_opencode_loaded || {
+    printf '  %-18s UNAVAILABLE (supported Homebrew OpenCode is missing)\n' "Deep Audit models" >&2
+    return 1
+  }
+  openai_models="$(XDG_CONFIG_HOME="$CONFIG_ROOT/deep-audit/xdg-config" \
+    XDG_DATA_HOME="$DATA_ROOT/deep-audit/data" \
+    XDG_CACHE_HOME="$CACHE_ROOT/deep-audit" \
+    OPENCODE_CONFIG="$CONFIG_ROOT/deep-audit/opencode.jsonc" \
+    OPENCODE_CONFIG_DIR="$CONFIG_ROOT/deep-audit" \
+    OPENCODE_DISABLE_PROJECT_CONFIG=1 \
+    "$OPENCODE_BIN" models openai 2>/dev/null)" || {
+      printf '  %-18s UNAVAILABLE (OpenCode cannot enumerate OpenAI models)\n' "Deep Audit models" >&2
+      return 1
+    }
+  for model in openai/gpt-6-astra openai/gpt-6.1-sol; do
+    printf '%s\n' "$openai_models" | grep -Fxq "$model" || {
+      printf '  %-18s MISSING %s (no model fallback permitted)\n' "Deep Audit model" "$model" >&2
+      return 1
+    }
+  done
+  resolved_config="$(XDG_CONFIG_HOME="$CONFIG_ROOT/deep-audit/xdg-config" \
+    XDG_DATA_HOME="$DATA_ROOT/deep-audit/data" \
+    XDG_CACHE_HOME="$CACHE_ROOT/deep-audit" \
+    OPENCODE_CONFIG="$CONFIG_ROOT/deep-audit/opencode.jsonc" \
+    OPENCODE_CONFIG_DIR="$CONFIG_ROOT/deep-audit" \
+    OPENCODE_DISABLE_PROJECT_CONFIG=1 \
+    "$OPENCODE_BIN" debug config 2>/dev/null)" || {
+      printf 'Deep Audit resolved OpenCode config could not be inspected\n' >&2
+      return 1
+    }
+  printf '%s\n' "$resolved_config" | jq -e '
+    .model == "openai/gpt-6-astra" and
+    .agent["audit-orchestrator"].model == "openai/gpt-6-astra" and
+    .agent["audit-orchestrator"].variant == "xhigh" and
+    .agent["audit-reviewer"].model == "openai/gpt-6-astra" and
+    .agent["audit-reviewer"].variant == "max" and
+    .agent["audit-performance"].model == "openai/gpt-6.1-sol" and
+    .agent["audit-inventory"].model == "openai/gpt-6-luna"
+  ' >/dev/null || {
+    printf 'Deep Audit resolved model/variant config does not match the pinned policy\n' >&2
+    return 1
+  }
+  printf '  %-18s OK (GPT-6 Astra + GPT-6.1 Sol; model catalog only)\n' "Deep Audit models"
+}
+
+verify_deep_audit_ecc() {
+  local source="$DATA_ROOT/deep-audit/ecc" expected actual skill
+  expected="$(<"$PACKAGE_ROOT/teams/best-ecc/ecc.lock")"
+  [ -d "$source/.git" ] || { printf 'Deep Audit ECC assets missing; run opencode-team deep-audit-setup\n' >&2; return 1; }
+  actual="$(git -C "$source" rev-parse HEAD 2>/dev/null || true)"
+  [ "$actual" = "$expected" ] || { printf 'Deep Audit ECC pin mismatch (expected %s, got %s)\n' "$expected" "${actual:-unknown}" >&2; return 1; }
+  for skill in coding-standards backend-patterns security-review verification-loop production-audit django-patterns django-security django-verification django-tdd python-patterns python-testing mysql-patterns database-migrations api-design e2e-testing agent-architecture-audit workspace-surface-audit mcp-dependency-review; do
+    [ -f "$source/skills/$skill/SKILL.md" ] || { printf 'Deep Audit ECC skill missing: %s\n' "$skill" >&2; return 1; }
+  done
+  printf '  %-18s OK (18 pinned skills, no hooks)\n' "Deep Audit ECC"
+}
+
+verify_deep_audit_sandbox() {
+  local root target profile report_probe
+  DEEP_AUDIT_DEPENDENCY_ROOT="$DEPENDENCY_ROOT"
+  DEEP_AUDIT_SERENA_BIN="$SERENA_BIN"
+  export DEEP_AUDIT_DEPENDENCY_ROOT
+  export DEEP_AUDIT_SERENA_BIN
+  [ -x /usr/bin/sandbox-exec ] || { printf 'sandbox-exec is unavailable\n' >&2; return 1; }
+  root="$(mktemp -d "${TMPDIR:-/tmp}/deep-audit-sandbox-check.XXXXXX")" || return 1
+  root="$(cd -P "$root" && pwd)"
+  target="$root/target"
+  profile="$root/readonly-project.sb"
+  mkdir -m 700 "$target"
+  if SANDBOX="$DATA_ROOT/deep-audit" OPENCODE_CONFIG_DIR="$CONFIG_ROOT/deep-audit" XDG_CONFIG_HOME="$CONFIG_ROOT/deep-audit/xdg-config" RUNTIME_ROOT="$CACHE_ROOT/runtime/deep-audit" DEEP_AUDIT_TARGET_ROOT="$target" DEEP_AUDIT_REAL_OPENCODE_BIN=/usr/bin/touch DEEP_AUDIT_SANDBOX_PROFILE="$profile" OPENCODE_TEAM_PYTHON="$PYTHON_BIN" "$PACKAGE_ROOT/teams/deep-audit/bin/read-only-opencode.sh" "$target/must-not-exist" >/dev/null 2>&1; then
+    rm -rf "$root"
+    printf 'sandbox-exec allowed a write inside the audit target\n' >&2
+    return 1
+  fi
+  [ ! -e "$target/must-not-exist" ] || { rm -rf "$root"; printf 'Read-only sandbox target was modified\n' >&2; return 1; }
+  report_probe="$root/report-probe"
+  if ! SANDBOX="$DATA_ROOT/deep-audit" OPENCODE_CONFIG_DIR="$CONFIG_ROOT/deep-audit" XDG_CONFIG_HOME="$CONFIG_ROOT/deep-audit/xdg-config" RUNTIME_ROOT="$CACHE_ROOT/runtime/deep-audit" DEEP_AUDIT_TARGET_ROOT="$target" DEEP_AUDIT_REAL_OPENCODE_BIN=/usr/bin/touch DEEP_AUDIT_SANDBOX_PROFILE="$profile" OPENCODE_TEAM_PYTHON="$PYTHON_BIN" "$PACKAGE_ROOT/teams/deep-audit/bin/read-only-opencode.sh" "$report_probe" >/dev/null 2>&1; then
+    rm -rf "$root"
+    printf 'sandbox-exec blocked writes outside the audit target unexpectedly\n' >&2
+    return 1
+  fi
+  [ -f "$report_probe" ] || { rm -rf "$root"; printf 'Sandbox report-write probe missing\n' >&2; return 1; }
+  local profile_probe="$DATA_ROOT/deep-audit/reports/.sandbox-write-probe.$$" auth_probe="$DATA_ROOT/deep-audit/data/opencode/.sandbox-auth-probe.$$" config_probe="$CONFIG_ROOT/deep-audit/.sandbox-config-probe.$$" host_probe="$HOME/.deep-audit-unapproved-write-probe.$$" other_profile_probe sibling_root sibling_created=0 fake_home="$root/fake-home" secret_file
+  mkdir -p "$fake_home/.ssh" "$fake_home/.docker" "$fake_home/.config/opencode" "$fake_home/.config/gh" "$fake_home/.local/share/opencode" "$DATA_ROOT/deep-audit/data/opencode"
+  printf '%s\n' 'sandbox fixture secret' >"$fake_home/.ssh/id_ed25519"
+  printf '%s\n' '{"auths":{"registry.example.invalid":{"auth":"fixture"}}}' >"$fake_home/.docker/config.json"
+  printf '%s\n' 'sandbox fixture OAuth' >"$fake_home/.config/opencode/auth.json"
+  printf '%s\n' 'sandbox fixture GitHub token' >"$fake_home/.config/gh/hosts.yml"
+  printf '%s\n' 'sandbox shared OAuth' >"$fake_home/.local/share/opencode/auth.json"
+  if ! SANDBOX="$DATA_ROOT/deep-audit" OPENCODE_CONFIG_DIR="$CONFIG_ROOT/deep-audit" XDG_CONFIG_HOME="$CONFIG_ROOT/deep-audit/xdg-config" RUNTIME_ROOT="$CACHE_ROOT/runtime/deep-audit" DEEP_AUDIT_TARGET_ROOT="$target" DEEP_AUDIT_REAL_OPENCODE_BIN=/usr/bin/touch DEEP_AUDIT_SANDBOX_PROFILE="$profile" OPENCODE_TEAM_PYTHON="$PYTHON_BIN" "$PACKAGE_ROOT/teams/deep-audit/bin/read-only-opencode.sh" "$profile_probe" >/dev/null 2>&1; then
+    rm -rf "$root"
+    printf 'Sandbox blocked writes to the profile-owned report directory\n' >&2
+    return 1
+  fi
+  rm -f "$profile_probe"
+  if ! SANDBOX="$DATA_ROOT/deep-audit" OPENCODE_CONFIG_DIR="$CONFIG_ROOT/deep-audit" XDG_CONFIG_HOME="$CONFIG_ROOT/deep-audit/xdg-config" RUNTIME_ROOT="$CACHE_ROOT/runtime/deep-audit" DEEP_AUDIT_TARGET_ROOT="$target" DEEP_AUDIT_REAL_OPENCODE_BIN=/usr/bin/touch DEEP_AUDIT_SANDBOX_PROFILE="$profile" OPENCODE_TEAM_PYTHON="$PYTHON_BIN" "$PACKAGE_ROOT/teams/deep-audit/bin/read-only-opencode.sh" "$auth_probe" >/dev/null 2>&1; then
+    rm -rf "$root"
+    printf 'Sandbox blocked profile-local OAuth persistence\n' >&2
+    return 1
+  fi
+  rm -f "$auth_probe"
+  if ! SANDBOX="$DATA_ROOT/deep-audit" OPENCODE_CONFIG_DIR="$CONFIG_ROOT/deep-audit" XDG_CONFIG_HOME="$CONFIG_ROOT/deep-audit/xdg-config" RUNTIME_ROOT="$CACHE_ROOT/runtime/deep-audit" DEEP_AUDIT_TARGET_ROOT="$target" DEEP_AUDIT_REAL_OPENCODE_BIN=/usr/bin/touch DEEP_AUDIT_SANDBOX_PROFILE="$profile" OPENCODE_TEAM_PYTHON="$PYTHON_BIN" "$PACKAGE_ROOT/teams/deep-audit/bin/read-only-opencode.sh" "$config_probe" >/dev/null 2>&1; then
+    rm -rf "$root"
+    printf 'Sandbox blocked profile-local OpenCode configuration writes\n' >&2
+    return 1
+  fi
+  rm -f "$config_probe"
+  for secret_file in "$fake_home/.ssh/id_ed25519" "$fake_home/.docker/config.json" "$fake_home/.config/opencode/auth.json" "$fake_home/.config/gh/hosts.yml" "$fake_home/.local/share/opencode/auth.json"; do
+    if ! HOME="$fake_home" SANDBOX="$DATA_ROOT/deep-audit" XDG_CONFIG_HOME="$CONFIG_ROOT/deep-audit/xdg-config" RUNTIME_ROOT="$CACHE_ROOT/runtime/deep-audit" DEEP_AUDIT_TARGET_ROOT="$target" DEEP_AUDIT_REAL_OPENCODE_BIN=/bin/cat DEEP_AUDIT_SANDBOX_PROFILE="$profile" OPENCODE_TEAM_PYTHON="$PYTHON_BIN" "$PACKAGE_ROOT/teams/deep-audit/bin/read-only-opencode.sh" "$secret_file" >/dev/null 2>&1; then
+      continue
+    fi
+    rm -rf "$root"
+    printf 'Sandbox allowed reads from a sensitive home path: %s\n' "$secret_file" >&2
+    return 1
+  done
+  sibling_root="$DATA_ROOT/best"
+  if [ ! -d "$sibling_root" ]; then mkdir -m 700 "$sibling_root" || { rm -rf "$root"; return 1; }; sibling_created=1; fi
+  other_profile_probe="$sibling_root/.deep-audit-read-probe.$$"
+  printf '%s\n' 'other-profile probe' >"$other_profile_probe"
+  if HOME="$fake_home" SANDBOX="$DATA_ROOT/deep-audit" OPENCODE_CONFIG_DIR="$CONFIG_ROOT/deep-audit" XDG_CONFIG_HOME="$CONFIG_ROOT/deep-audit/xdg-config" RUNTIME_ROOT="$CACHE_ROOT/runtime/deep-audit" DEEP_AUDIT_TARGET_ROOT="$target" DEEP_AUDIT_REAL_OPENCODE_BIN=/bin/cat DEEP_AUDIT_SANDBOX_PROFILE="$profile" OPENCODE_TEAM_PYTHON="$PYTHON_BIN" "$PACKAGE_ROOT/teams/deep-audit/bin/read-only-opencode.sh" "$other_profile_probe" >/dev/null 2>&1; then
+    rm -f "$other_profile_probe"
+    [ "$sibling_created" -eq 0 ] || rmdir "$sibling_root" 2>/dev/null || true
+    rm -rf "$root"
+    printf 'Sandbox allowed reads from sibling OpenCode Team profile data\n' >&2
+    return 1
+  fi
+  rm -f "$other_profile_probe"
+  [ "$sibling_created" -eq 0 ] || rmdir "$sibling_root" 2>/dev/null || true
+  if SANDBOX="$DATA_ROOT/deep-audit" XDG_CONFIG_HOME="$CONFIG_ROOT/deep-audit/xdg-config" RUNTIME_ROOT="$CACHE_ROOT/runtime/deep-audit" DEEP_AUDIT_TARGET_ROOT="$target" DEEP_AUDIT_REAL_OPENCODE_BIN=/usr/bin/touch DEEP_AUDIT_SANDBOX_PROFILE="$profile" OPENCODE_TEAM_PYTHON="$PYTHON_BIN" "$PACKAGE_ROOT/teams/deep-audit/bin/read-only-opencode.sh" "$host_probe" >/dev/null 2>&1; then
+    rm -f "$host_probe"
+    rm -rf "$root"
+    printf 'Sandbox allowed an unapproved write inside the host home directory\n' >&2
+    return 1
+  fi
+  [ ! -e "$host_probe" ] || { rm -f "$host_probe"; rm -rf "$root"; printf 'Sandbox host-write probe left a file behind\n' >&2; return 1; }
+  rm -rf "$root"
+  printf '  %-18s OK (target writes denied; profile reports allowed; sensitive host paths denied)\n' "Read-only sandbox"
+}
+
+deep_audit_test_runner_ready() {
+  local images_file="$DEPENDENCY_ROOT/deep-audit/test-runners/images.json" marker="$DATA_ROOT/deep-audit/test-runner-validation.json" docker_bin
+  docker_bin="$(command -v docker 2>/dev/null || true)"
+  [ -n "$docker_bin" ] && [ -f "$images_file" ] && [ -f "$marker" ] || return 1
+  node "$PACKAGE_ROOT/teams/deep-audit/bin/test-runner-health.mjs" \
+    "$PACKAGE_ROOT" "$DATA_ROOT/deep-audit/plugins/test-runner-plugin.mjs" \
+    "$images_file" "$marker" "$docker_bin"
+}
+
+deep_audit_doctor() {
+  local failed=0 auth_file="$DATA_ROOT/deep-audit/data/opencode/auth.json" scanner_root="$DEPENDENCY_ROOT/deep-audit/scanners" binary resolved_config plugin
+  if managed_python_healthy; then
+    export PYTHON_BIN OPENCODE_TEAM_PYTHON
+  else
+    printf '  %-18s MISSING\n' "Deep Audit Python" >&2
+    return 1
+  fi
+  SERENA_BIN="${SERENA_BIN:-$DATA_ROOT/bin/serena}"
+  export SERENA_BIN
+  if [ ! -f "$CONFIG_ROOT/deep-audit/team-runtime.conf" ] || [ ! -f "$CONFIG_ROOT/deep-audit/opencode.jsonc" ]; then
+    printf '  %-18s NOT CONFIGURED (run opencode-team deep-audit-setup)\n' "deep-audit profile"
+    return 1
+  fi
+  validate_profile_config deep-audit || failed=1
+  verify_deep_audit_sandbox || failed=1
+  if [ -x "$SERENA_BIN" ] && serena_version_ok "$($SERENA_BIN --version 2>/dev/null || true)"; then
+    printf '  %-18s OK (%s)\n' "Deep Audit Serena" "$SERENA_VERSION"
+  else
+    printf '  %-18s MISSING\n' "Deep Audit Serena" >&2
+    failed=1
+  fi
+  verify_deep_audit_ecc || failed=1
+  if [ -f "$DATA_ROOT/deep-audit/plugins/report-plugin.mjs" ]; then
+    printf '  %-18s OK (profile-owned report writer)\n' "Deep Audit reports"
+  else
+    printf '  %-18s MISSING (run deep-audit-setup)\n' "Deep Audit reports" >&2
+    failed=1
+  fi
+  deep_audit_model_check || failed=1
+  # Files on disk prove installation only. Inspect the runtime-resolved profile for
+  # plugin registration and tool exposure; never infer readiness from filenames.
+  resolved_config="$(XDG_CONFIG_HOME="$CONFIG_ROOT/deep-audit/xdg-config" \
+    XDG_DATA_HOME="$DATA_ROOT/deep-audit/data" XDG_CACHE_HOME="$CACHE_ROOT/deep-audit" \
+    OPENCODE_CONFIG="$CONFIG_ROOT/deep-audit/opencode.jsonc" OPENCODE_CONFIG_DIR="$CONFIG_ROOT/deep-audit" \
+    OPENCODE_DISABLE_PROJECT_CONFIG=1 "$OPENCODE_BIN" debug config 2>/dev/null)" || resolved_config=""
+  if [ -z "$resolved_config" ]; then
+    printf '  %-18s UNPROVEN (runtime diagnostics unavailable; failing closed)\n' "Deep Audit tools" >&2
+    failed=1
+  else
+    for plugin in report-plugin.mjs scanner-plugin.mjs test-runner-plugin.mjs; do
+      if [ -f "$DATA_ROOT/deep-audit/plugins/$plugin" ] \
+        && printf '%s\n' "$resolved_config" | jq -e --arg plugin "$plugin" 'any(.plugin[]?; (tostring | contains($plugin)))' >/dev/null 2>&1; then
+        printf '  %-18s INSTALLED + CONFIGURED\n' "$plugin"
+      else
+        printf '  %-18s UNAVAILABLE (not installed and referenced by resolved config)\n' "$plugin" >&2
+        failed=1
+      fi
+    done
+    if OPENCODE_TEAM_DEEP_AUDIT_CONFIG="$CONFIG_ROOT/deep-audit/opencode.jsonc" \
+      OPENCODE_TEAM_DEEP_AUDIT_LAUNCHER="$PACKAGE_ROOT/teams/deep-audit/bin/read-only-opencode.sh" \
+      OPENCODE_TEAM_DEEP_AUDIT_SANDBOX="$DATA_ROOT/deep-audit" \
+      OPENCODE_TEAM_DEEP_AUDIT_CONFIG_DIR="$CONFIG_ROOT/deep-audit" \
+      OPENCODE_TEAM_DEEP_AUDIT_XDG_CONFIG="$CONFIG_ROOT/deep-audit/xdg-config" \
+      OPENCODE_TEAM_DEEP_AUDIT_DEPENDENCY_ROOT="$DEPENDENCY_ROOT" \
+      OPENCODE_TEAM_DEEP_AUDIT_SERENA_BIN="$SERENA_BIN" \
+      OPENCODE_TEAM_DEEP_AUDIT_REAL_BINARY="$OPENCODE_BIN" \
+      OPENCODE_TEAM_DEEP_AUDIT_PYTHON="$PYTHON_BIN" \
+      OPENCODE_TEAM_DEEP_AUDIT_TEST_RUNNER_IMAGES="$DEPENDENCY_ROOT/deep-audit/test-runners/images.json" \
+      OPENCODE_TEAM_DEEP_AUDIT_DOCKER_BIN="$(command -v docker 2>/dev/null || true)" \
+      node --test "$PACKAGE_ROOT/tests/deep-audit-plugin-registration.test.mjs"; then
+      printf '  %-18s VERIFIED (plugin tools invoked via audit-orchestrator; Serena MCP connected/read-only call executed; no model request)\n' "Runtime tool state"
+      printf '  %-18s CONFIGURED (model-mediated agent use is verified only during a real audit)\n' "Serena agent binding"
+    else
+      printf '  %-18s BLOCKED (real OpenCode tool/MCP preflight failed)\n' "Runtime tool state" >&2
+      failed=1
+    fi
+  fi
+  if [ -f "$auth_file" ]; then
+    printf '  %-18s OK (profile-local OAuth state)\n' "Deep Audit auth"
+  else
+    printf '  %-18s REQUIRED; launch profile and run /connect openai\n' "Deep Audit auth" >&2
+    failed=1
+  fi
+  for scanner in jscpd ast-grep semgrep gitleaks osv-scanner ruff vulture knip bandit pip-audit sqlfluff pytest; do
+    case "$scanner" in
+      jscpd) binary="$scanner_root/node/node_modules/.bin/jscpd" ;;
+      ast-grep) binary="$scanner_root/node/node_modules/.bin/ast-grep" ;;
+      knip) binary="$scanner_root/node/node_modules/.bin/knip" ;;
+      gitleaks|osv-scanner) binary="$scanner_root/bin/$scanner" ;;
+      *) binary="$scanner_root/python/bin/$scanner" ;;
+    esac
+    if [ -x "$binary" ]; then
+      printf '  %-18s AVAILABLE (%s)\n' "$scanner" "$binary"
+    else
+      printf '  %-18s UNAVAILABLE (profile-local scanner missing)\n' "$scanner"
+      failed=1
+    fi
+  done
+  if deep_audit_test_runner_ready \
+    && [ -f "$DATA_ROOT/deep-audit/plugins/test-runner-plugin.mjs" ]; then
+    printf '  %-18s OK (sandbox fixture E2E and pinned images verified)\n' "Isolated test runner"
+  else
+    printf '  %-18s BLOCKED (local Docker test images/plugin unavailable; no host execution)\n' "Isolated test runner" >&2
+    failed=1
+  fi
+  if [ -f "$DATA_ROOT/deep-audit/plugins/scanner-plugin.mjs" ] \
+    && grep -Fq 'Deep Audit concurrency guard:' "$DATA_ROOT/deep-audit/plugins/scanner-plugin.mjs" \
+    && grep -Fq 'output.args.run_in_background = false' "$DATA_ROOT/deep-audit/plugins/scanner-plugin.mjs"; then
+    printf '  %-18s OK (single foreground task; hard semaphore)\n' "Task concurrency cap"
+  else
+    printf '  %-18s NOT ENFORCED\n' "Task concurrency cap" >&2
+    failed=1
+  fi
+  if [ "$failed" -eq 0 ]; then
+    printf '  %-18s READY FOR AUTHENTICATED AUDIT\n' "deep-audit"
+  else
+    printf '  %-18s NOT READY\n' "deep-audit" >&2
+  fi
+  return "$failed"
+}
+
+setup_deep_audit_profile() {
+  setup_roots
+  load_opencode || { printf 'A supported OpenCode installation is required\n' >&2; return 1; }
+  ensure_profile_roots deep-audit
+  if ! managed_python_healthy; then ensure_python || return 1; fi
+  export PYTHON_BIN OPENCODE_TEAM_PYTHON PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
+  SERENA_BIN="${SERENA_BIN:-$DATA_ROOT/bin/serena}"
+  if [ ! -x "$SERENA_BIN" ]; then ensure_serena || return 1; fi
+  export SERENA_BIN
+  bash "$PACKAGE_ROOT/teams/deep-audit/setup-ecc.sh" "$DATA_ROOT/deep-audit/ecc" || return 1
+  bash "$PACKAGE_ROOT/teams/deep-audit/setup-scanners.sh" || return 1
+  if ! bash "$PACKAGE_ROOT/teams/deep-audit/setup-test-runners.sh"; then
+    printf '%s\n' 'Deep Audit isolated test runners are BLOCKED; no project code will execute outside verified containers.' >&2
+  fi
+  render_deep_audit_profile || return 1
+  deep_audit_model_check || return 1
+  rm -f "$DATA_ROOT/deep-audit/test-runner-validation.json"
+  if [ -f "$DEPENDENCY_ROOT/deep-audit/test-runners/images.json" ] \
+    && OPENCODE_TEAM_DEEP_AUDIT_TEST_PLUGIN="$DATA_ROOT/deep-audit/plugins/test-runner-plugin.mjs" \
+      OPENCODE_TEAM_DEEP_AUDIT_TEST_RUNNER_IMAGES="$DEPENDENCY_ROOT/deep-audit/test-runners/images.json" \
+      OPENCODE_TEAM_DEEP_AUDIT_TEST_DOCKER_BIN="$(command -v docker 2>/dev/null || true)" \
+      OPENCODE_TEAM_DEEP_AUDIT_TEST_RUNNER_MARKER="$DATA_ROOT/deep-audit/test-runner-validation.json" \
+      DEEP_AUDIT_SCANNER_ROOT="$DEPENDENCY_ROOT/deep-audit/scanners" \
+      node --test "$PACKAGE_ROOT/tests/deep-audit-test-runner.e2e.mjs"; then
+    if [ ! -f "$DATA_ROOT/deep-audit/test-runner-validation.json" ]; then
+      printf '%s\n' 'Deep Audit test-runner E2E validation did not produce its integrity marker; profile remains NOT READY.' >&2
+    fi
+  else
+    printf '%s\n' 'Deep Audit test-runner fixture E2E validation is BLOCKED; tests remain disabled and profile remains NOT READY.' >&2
+  fi
+  printf 'Deep Audit configured. Login separately inside this isolated profile with /connect openai.\n'
+}
+
+start_deep_audit() {
+  local target="$PWD" target_set=0 resume=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --resume|-s)
+        [ "$#" -ge 2 ] || { printf '%s\n' '--resume requires a session ID' >&2; return 2; }
+        resume="$2"
+        shift 2
+        ;;
+      --*)
+        printf 'Unknown deep-audit option: %s\n' "$1" >&2
+        return 2
+        ;;
+      *)
+        [ "$target_set" -eq 0 ] || { printf '%s\n' 'Only one target project directory may be supplied' >&2; return 2; }
+        target="$1"
+        target_set=1
+        shift
+        ;;
+    esac
+  done
+  [ -d "$target" ] || { printf 'Deep Audit target is not a directory: %s\n' "$target" >&2; return 2; }
+  target="$(cd -P -- "$target" 2>/dev/null && pwd -P)" || { printf 'Deep Audit target cannot be resolved: %s\n' "$target" >&2; return 2; }
+  case "$target" in
+    /|/System|/System/*|/Library|/Library/*|/Users|/Users/*/Library|/Users/*/Library/*)
+      printf 'Refusing system or private macOS paths as audit targets: %s\n' "$target" >&2
+      return 2
+      ;;
+  esac
+  setup_roots
+  managed_python_healthy || { printf 'Managed Python is required; run opencode-team setup\n' >&2; return 1; }
+  export PYTHON_BIN OPENCODE_TEAM_PYTHON
+  SERENA_BIN="${SERENA_BIN:-$DATA_ROOT/bin/serena}"
+  export SERENA_BIN
+  [ -f "$CONFIG_ROOT/deep-audit/team-runtime.conf" ] || { printf '%s\n' 'Deep Audit is not configured; run opencode-team deep-audit-setup' >&2; return 1; }
+  deep_audit_model_check || return 1
+  verify_deep_audit_ecc || return 1
+  verify_deep_audit_sandbox || return 1
+  if [ ! -f "$DATA_ROOT/deep-audit/data/opencode/auth.json" ]; then
+    printf '%s\n' 'Deep Audit uses profile-local OAuth. Start once to connect with /connect openai; the audit will not use a different model.' >&2
+  fi
+  (
+    cd "$target"
+    export DEEP_AUDIT_TARGET_ROOT="$target"
+    export DEEP_AUDIT_REPORT_ROOT="$DATA_ROOT/deep-audit/reports"
+    if [ -n "$resume" ]; then
+      start_team deep-audit --resume "$resume"
+    else
+      start_team deep-audit
+    fi
+  )
 }
 
 verify_best_ecc_assets() {
@@ -944,8 +1342,10 @@ verify_go_omo() {
 
 render_template() {
   local template="$1" destination="$2"
-  local temporary="${destination}.tmp.$$"
-  "$PYTHON_BIN" - "$template" "$temporary" <<'PY'
+  local temporary status
+  ensure_opencode_loaded || { printf 'Cannot render %s: a supported Homebrew OpenCode installation is required\n' "$template" >&2; return 1; }
+  temporary="$(mktemp "${destination}.tmp.XXXXXX")" || return 1
+  if "$PYTHON_BIN" - "$template" "$temporary" <<'PY'
 import os
 import pathlib
 import sys
@@ -960,19 +1360,40 @@ values = {
     "@STATE_ROOT@": os.environ["STATE_ROOT"],
     "@CACHE_ROOT@": os.environ["CACHE_ROOT"],
     "@RUNTIME_ROOT@": os.environ["RUNTIME_ROOT"],
+    "@DEPENDENCY_ROOT@": os.environ["DEPENDENCY_ROOT"],
     "@OMO_PLUGIN@": os.environ.get("OMO_PLUGIN", "oh-my-openagent"),
     "@SERENA_BIN@": os.environ["SERENA_BIN"],
     "@ECC_SOURCE@": os.path.join(os.environ["DATA_ROOT"], "best-ecc", "ecc"),
+    "@DEEP_AUDIT_ECC_SOURCE@": os.path.join(os.environ["DATA_ROOT"], "deep-audit", "ecc"),
+    "@DEEP_AUDIT_SERENA_HOME@": os.path.join(os.environ["DATA_ROOT"], "deep-audit", "serena"),
+    "@REPORT_ROOT@": os.path.join(os.environ["DATA_ROOT"], "deep-audit", "reports"),
+    "@OPENCODE_TOOL_MODULE@": pathlib.Path(os.path.join(os.environ["DEPENDENCY_ROOT"], "best", "node_modules", "@opencode-ai", "plugin", "dist", "tool.js")).as_uri(),
 }
 for marker, value in values.items():
     template = template.replace(marker, value)
 pathlib.Path(sys.argv[2]).write_text(template)
 PY
-  if [ -f "$destination" ] && cmp -s "$temporary" "$destination"; then
-    rm -f "$temporary"
+  then
+    :
   else
-    mv "$temporary" "$destination"
+    status=$?
+    rm -f "$temporary"
+    return "$status"
   fi
+  [ -f "$temporary" ] || return 1
+  if [ -f "$destination" ]; then
+    if cmp -s "$temporary" "$destination"; then
+      rm -f "$temporary"
+      return 0
+    else
+      status=$?
+      if [ "$status" -ne 1 ]; then
+        rm -f "$temporary"
+        return "$status"
+      fi
+    fi
+  fi
+  mv "$temporary" "$destination" || { status=$?; rm -f "$temporary"; return "$status"; }
 }
 
 stale_generated_package_paths() {
@@ -980,21 +1401,80 @@ stale_generated_package_paths() {
   OPENCODE_TEAM_CONFIG_ROOT="$CONFIG_ROOT" OPENCODE_TEAM_PACKAGE_ROOT="$PACKAGE_ROOT" "$PYTHON_BIN" <<'PY'
 import os
 import pathlib
+import json
 import re
+from urllib.parse import unquote, urlsplit
 
 config_root = pathlib.Path(os.environ["OPENCODE_TEAM_CONFIG_ROOT"])
 package_root = os.environ["OPENCODE_TEAM_PACKAGE_ROOT"]
-path_pattern = re.compile(r"/(?:[^\"'\s,)]*/)*(?:opencode-team|brew-opencode-team)/[^\"'\s,)]*")
+package_segment = re.compile(r"/(?:[^/]*/)*(?:opencode-team|brew-opencode-team)(?:/|$)")
+json_tokens = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.DOTALL)
+trailing_commas = re.compile(r'"(?:\\.|[^"\\])*"|,(?=\s*[}\]])', re.DOTALL)
+
+
+def paths_in_json(value, key=""):
+    # Permissions contain glob expressions, and prose is not a filesystem reference.
+    if any(word in key.lower() for word in ("permission", "prompt", "instruction", "description", "content", "text")):
+        return
+    if isinstance(value, dict):
+        for child_key, child_value in value.items():
+            yield from paths_in_json(child_value, child_key)
+    elif isinstance(value, list):
+        for child_value in value:
+            yield from paths_in_json(child_value, key)
+    elif isinstance(value, str):
+        yield value
+
+
+def jsonc_values(text):
+    text = json_tokens.sub(lambda match: match.group() if match.group().startswith('"') else "", text)
+    text = trailing_commas.sub(lambda match: "" if match.group().startswith(",") else match.group(), text)
+    return paths_in_json(json.loads(text))
+
+
+def filesystem_path(value):
+    value = value.strip()
+    if value.startswith("file://"):
+        url = urlsplit(value)
+        if url.netloc not in ("", "localhost"):
+            return None
+        value = unquote(url.path)
+    # A complete path value, not a substring of a prompt or a glob permission.
+    if not value.startswith("/") or any(char in value for char in "*?[]{}\n\r"):
+        return None
+    match = package_segment.search(value)
+    if not match:
+        return None
+    # Only package-owned artifact paths are generated references. An unrelated
+    # missing path beneath a directory named opencode-team is not stale config.
+    suffix = value[match.end():]
+    if not (suffix.startswith(("teams/", "core/", "shared/", "bin/")) or suffix == "VERSION"):
+        return None
+    return value
+
+
 for path in sorted(config_root.glob("*/**/*")):
     if not path.is_file() or path.name not in {"team-runtime.conf", "opencode.jsonc", "tui.json", "settings.json"}:
         continue
     text = path.read_text(errors="replace")
-    for candidate in path_pattern.findall(text):
-        candidate = candidate.rstrip(".;")
-        # ECC resources are provisioned separately by best-ecc-setup.
+    if path.name == "team-runtime.conf":
+        values = (line.partition("=")[2].strip().strip('"\'') for line in text.splitlines()
+                  if re.match(r"^[A-Za-z_][A-Za-z_0-9]*=", line))
+    else:
+        try:
+            values = list(jsonc_values(text))
+        except ValueError:
+            continue
+    for value in values:
+        candidate = filesystem_path(value)
+        if candidate is None:
+            continue
+        # ECC skill trees are provisioned separately by their profile setup commands.
         if "/best-ecc/ecc/" in candidate:
             continue
-        if candidate.startswith(package_root):
+        if "/deep-audit/ecc/" in candidate:
+            continue
+        if candidate == package_root or candidate.startswith(package_root + "/"):
             continue
         if not pathlib.Path(candidate).exists():
             print(f"{path}: {candidate}")
@@ -1003,6 +1483,7 @@ PY
 
 refresh_generated_configs() {
   local team dependency_team hook_source hook_name
+  load_opencode || { printf 'Cannot refresh stale package config: a supported OpenCode installation is required\n' >&2; return 1; }
   export PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
   SERENA_BIN="${SERENA_BIN:-$DATA_ROOT/bin/serena}"
   export SERENA_BIN
@@ -1053,6 +1534,7 @@ refresh_generated_configs() {
     fi
     chmod 600 "$CONFIG_ROOT/$team/team-runtime.conf" "$CONFIG_ROOT/$team/opencode.jsonc"
   done
+  render_deep_audit_profile || return 1
 }
 
 ensure_generated_config_current() {
@@ -1065,7 +1547,7 @@ ensure_generated_config_current() {
   export PYTHON_BIN OPENCODE_TEAM_PYTHON
   local stale config_missing=0 team
   stale="$(stale_generated_package_paths)"
-  for team in best best-ecc free go openai daily; do
+  for team in best best-ecc deep-audit free go openai daily; do
     [ -f "$CONFIG_ROOT/$team/team-runtime.conf" ] || continue
     grep -q '^OPENCODE_TEAM_PYTHON=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
     grep -q '^RUNTIME_ROOT=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
@@ -1075,6 +1557,9 @@ ensure_generated_config_current() {
     config_missing=1
   fi
   if [ -f "$CONFIG_ROOT/best-ecc/team-runtime.conf" ] && [ -f "$PACKAGE_ROOT/teams/best-ecc/omo.jsonc.template" ] && [ ! -f "$DATA_ROOT/best-ecc/.omo/omo.jsonc" ]; then
+    config_missing=1
+  fi
+  if [ -f "$CONFIG_ROOT/deep-audit/team-runtime.conf" ] && [ ! -f "$CONFIG_ROOT/deep-audit/xdg-config/opencode/tui.json" ]; then
     config_missing=1
   fi
   if [ -n "$stale" ] || [ "$config_missing" -eq 1 ]; then
@@ -1093,6 +1578,7 @@ install_time_machine_exclusions() {
   for team in best best-ecc free go openai daily; do
     mkdir -p "$DATA_ROOT/$team/playwright/output"
   done
+  mkdir -p "$DATA_ROOT/deep-audit/playwright/output"
   local result
   if result="$(node "$PACKAGE_ROOT/core/lib/runtime-lifecycle.mjs" time-machine-exclude --apply 2>&1)"; then
     printf '  %-18s OK (runtime/dependencies/Playwright outputs)\n' "Time Machine"
@@ -1166,7 +1652,11 @@ setup() {
   printf '  cache root        %s\n' "$CACHE_ROOT"
   printf '  runtime root      %s\n' "$RUNTIME_ROOT"
   printf '  dependency root   %s\n' "$DEPENDENCY_ROOT"
-  install_time_machine_exclusions
+  if [ "${OPENCODE_TEAM_TEST_SKIP_TIME_MACHINE:-0}" = "1" ]; then
+    printf '  %-18s SKIPPED (isolated profile test)\n' "Time Machine"
+  else
+    install_time_machine_exclusions
+  fi
   ensure_python || return 1
   ensure_serena || return 1
   ensure_codex || return 1
@@ -1222,6 +1712,13 @@ setup() {
   else
     bash "$PACKAGE_ROOT/teams/best-ecc/setup-ecc.sh" "$DATA_ROOT/best-ecc" || return 1
     printf '  %-18s OK (pinned skills and hooks installed)\n' "best-ecc assets"
+  fi
+  if [ "${OPENCODE_TEAM_TEST_SKIP_ECC_SETUP:-0}" = "1" ]; then
+    ensure_profile_roots deep-audit
+    render_deep_audit_profile || return 1
+    printf '  %-18s SKIPPED (isolated setup test; pinned ECC assets not provisioned)\n' "deep-audit assets"
+  else
+    setup_deep_audit_profile || return 1
   fi
   native_runtime="$(resolve_native_runtime)" || return 1
   prepare_best_native "$native_runtime" || return 1
@@ -1302,13 +1799,14 @@ start_team() {
   local team="$1"
   shift
   case "$team" in
-    best|best-ecc|free|go|openai|daily) ;;
+    best|best-ecc|deep-audit|free|go|openai|daily) ;;
     *)
-      printf 'Unknown team: %s (expected best, best-ecc, free, go, openai, or daily)\n' "$team" >&2
+      printf 'Unknown team: %s (expected best, best-ecc, deep-audit, free, go, openai, or daily)\n' "$team" >&2
       return 1
       ;;
   esac
   setup_roots
+  load_opencode || { printf 'A supported Homebrew OpenCode installation is required to start\n' >&2; return 1; }
   ensure_profile_roots "$team"
   ensure_generated_config_current || return 1
   local config_file="$CONFIG_ROOT/$team/team-runtime.conf"
@@ -1360,6 +1858,21 @@ case "${1:-}" in
     shift
     setup_roots
     exec env OPENAI_TEAM_STATE_ROOT="$DATA_ROOT/daily/state/team" node "$PACKAGE_ROOT/teams/daily/bin/daily-report.mjs" "$@"
+    ;;
+  deep-audit-report)
+    shift
+    setup_roots
+    exec env DEEP_AUDIT_REPORT_ROOT="$DATA_ROOT/deep-audit/reports" node "$PACKAGE_ROOT/teams/deep-audit/bin/report.mjs" "$@"
+    ;;
+  deep-audit-doctor)
+    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+    setup_roots
+    load_opencode || exit 1
+    deep_audit_doctor
+    ;;
+  deep-audit-setup)
+    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+    setup_deep_audit_profile
     ;;
   daily-benchmark)
     shift
@@ -1429,6 +1942,8 @@ case "${1:-}" in
       start_best_native "$@"
     elif [ "$team" = best-ecc ]; then
       start_best_ecc "$@"
+    elif [ "$team" = deep-audit ]; then
+      start_deep_audit "$@"
     else
       start_team "$team" "$@"
     fi
@@ -1444,6 +1959,14 @@ case "${1:-}" in
   best-ecc-setup)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
     setup_best_ecc
+    ;;
+  deep-audit)
+    shift
+    start_deep_audit "$@"
+    ;;
+  deep-audit-setup)
+    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
+    setup_deep_audit_profile
     ;;
   free|go|openai|daily)
     team="$1"

@@ -1,0 +1,137 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": [
+    "file://@DATA_ROOT@/deep-audit/plugins/report-plugin.mjs",
+    "file://@DATA_ROOT@/deep-audit/plugins/scanner-plugin.mjs",
+    "file://@DATA_ROOT@/deep-audit/plugins/test-runner-plugin.mjs"
+  ],
+  "model": "openai/gpt-6-astra",
+  "small_model": "openai/gpt-6.1-sol",
+  "enabled_providers": ["openai"],
+  "provider": {"openai": {"options": {"timeout": 600000, "chunkTimeout": 60000}}},
+  "default_agent": "audit-orchestrator",
+  "subagent_depth": 1,
+  "skills": {"paths": ["@DEEP_AUDIT_ECC_SOURCE@/skills"]},
+  "permission": {
+    "*": "deny",
+    "read": "allow", "glob": "allow", "grep": "allow", "list": "allow",
+    "lsp_*": "allow", "webfetch": "allow", "question": "allow",
+    "task": "allow", "deep_audit_save_report": "allow", "deep_audit_scan": "allow",
+    "deep_audit_test_discover": "allow", "deep_audit_test_run": "allow",
+    "external_directory": {
+      "*": "deny",
+      "@PACKAGE_ROOT@/teams/deep-audit/**": "allow",
+      "@DEEP_AUDIT_ECC_SOURCE@/skills/**": "allow",
+      "@DATA_ROOT@/deep-audit/plugins/**": "allow",
+      "@DEPENDENCY_ROOT@/python/**": "allow",
+      "@DEPENDENCY_ROOT@/bin/serena": "allow",
+      "@DEPENDENCY_ROOT@/deep-audit/scanners/**": "allow"
+      ,"@REPORT_ROOT@/*/**": "allow"
+      ,"@REPORT_ROOT@/test-runs/**": "allow"
+      ,"@REPORT_ROOT@/scanner-results/**": "allow"
+      ,"@DEEP_AUDIT_SERENA_HOME@/logs/**": "allow"
+    },
+    "serena_*": "allow",
+    "serena_replace_*": "deny", "serena_insert_*": "deny",
+    "serena_rename_*": "deny", "serena_delete_*": "deny",
+    "serena_write_*": "deny", "serena_edit_*": "deny",
+    "serena_safe_delete_*": "deny", "serena_open_dashboard": "deny",
+    "serena_onboarding": "deny", "serena_create_memory": "deny",
+    "bash": "deny", "interactive_bash": "deny", "edit": "deny",
+    "write": "deny", "apply_patch": "deny", "delete": "deny",
+    "rename": "deny", "skill": "allow", "skill_mcp": "deny"
+  },
+  "tools": {
+    "bash": false, "interactive_bash": false, "edit": false, "write": false,
+    "apply_patch": false, "delete": false, "rename": false,
+    "call_omo_agent": false, "skill_mcp": false,
+    "deep_audit_save_report": true, "deep_audit_scan": true,
+    "deep_audit_test_discover": true, "deep_audit_test_run": true,
+    "serena_find_declaration": true, "serena_find_implementations": true,
+    "serena_find_referencing_symbols": true, "serena_find_symbol": true,
+    "serena_get_diagnostics_for_file": true, "serena_get_diagnostics_for_symbol": true,
+    "serena_get_symbols_overview": true, "serena_initial_instructions": true,
+    "serena_list_memories": true, "serena_read_memory": true, "serena_search_for_pattern": true
+  },
+  "agent": {
+    "audit-orchestrator": {
+      "mode": "primary", "model": "openai/gpt-6-astra", "variant": "xhigh",
+      "description": "Read-only, evidence-led audit coordinator; delegates bounded analysis and independent review.",
+      "tools": {"read": true, "glob": true, "grep": true, "list": true, "lsp_*": true, "webfetch": true, "skill": true, "task": true, "deep_audit_scan": true, "deep_audit_test_discover": true, "deep_audit_test_run": true, "deep_audit_save_report": true, "serena_find_declaration": true, "serena_find_implementations": true, "serena_find_referencing_symbols": true, "serena_find_symbol": true, "serena_get_diagnostics_for_file": true, "serena_get_diagnostics_for_symbol": true, "serena_get_symbols_overview": true, "serena_initial_instructions": true, "serena_list_memories": true, "serena_read_memory": true, "serena_search_for_pattern": true, "bash": false, "interactive_bash": false, "edit": false, "write": false, "apply_patch": false, "delete": false, "rename": false},
+      "prompt": "{file:@PACKAGE_ROOT@/teams/deep-audit/audit-policy.md}\n{file:@PACKAGE_ROOT@/teams/deep-audit/report-schema.md}\nCoordinate all nine phases in the order required by audit-policy.md. Use audit-inventory first, then delegate each specialist phase one at a time in foreground; the runtime enforces a single active task and forbids background/recursive delegation. Ask audit-reviewer to challenge the assembled findings after the evidence and draft are complete. Discover test suites with deep_audit_test_discover and execute each safely available suite with deep_audit_test_run, including declared integration/E2E scripts only when they are safe inside the networkless container. Record every unsupported suite, unavailable dependency/service, and unexecuted test as NOT_EXECUTED with its reason. Test code runs only inside the pinned local Docker images with network disabled, never on the original checkout. Identify failures, root causes, database backend limitations, and actionable remediation priorities without editing source. Do not claim a phase was performed merely because assigned. Only report evidence-backed findings and honest coverage gaps. Return JSON matching the contract, then save it with deep_audit_save_report. If the configured model or a required tool is unavailable, stop and disclose it; never silently downgrade."
+    },
+    "audit-inventory": {
+      "mode": "subagent", "model": "openai/gpt-6-luna",
+      "description": "Read-only repository inventory and metadata analyst.",
+      "tools": {"read": true, "glob": true, "grep": true, "list": true, "lsp_*": true, "webfetch": true, "serena_find_declaration": true, "serena_find_implementations": true, "serena_find_referencing_symbols": true, "serena_find_symbol": true, "serena_get_diagnostics_for_file": true, "serena_get_diagnostics_for_symbol": true, "serena_get_symbols_overview": true, "serena_initial_instructions": true, "serena_list_memories": true, "serena_read_memory": true, "serena_search_for_pattern": true, "bash": false, "interactive_bash": false, "edit": false, "write": false, "apply_patch": false, "delete": false, "rename": false},
+      "prompt": "Target is read-only: no shell, writes, package installs in the audited project, remote mutation, or further delegation. Do not bypass denied paths. Serena may install a language server only under the profile-owned SERENA_HOME with its profile-local npm cache; if that fails, report a semantic-coverage gap and continue file-based inspection.\nInventory only relevant manifests, entry points, directories and tool availability with Serena and focused read/glob/grep. Return a concise inventory and scope risks. No shell, edits, installs or delegation.",
+      "permission": {"task": "deny"}
+    },
+    "audit-architecture": {
+      "mode": "subagent", "model": "openai/gpt-6-astra", "variant": "xhigh",
+      "description": "Read-only architecture and data-flow analyst.",
+      "tools": {"read": true, "glob": true, "grep": true, "list": true, "lsp_*": true, "webfetch": true, "serena_find_declaration": true, "serena_find_implementations": true, "serena_find_referencing_symbols": true, "serena_find_symbol": true, "serena_get_diagnostics_for_file": true, "serena_get_diagnostics_for_symbol": true, "serena_get_symbols_overview": true, "serena_initial_instructions": true, "serena_list_memories": true, "serena_read_memory": true, "serena_search_for_pattern": true, "bash": false, "interactive_bash": false, "edit": false, "write": false, "apply_patch": false, "delete": false, "rename": false},
+      "prompt": "Target is read-only: no shell, writes, package installs in the audited project, remote mutation, or further delegation. Do not bypass denied paths. Serena may install a language server only under the profile-owned SERENA_HOME with its profile-local npm cache; if that fails, report a semantic-coverage gap and continue file-based inspection.\nTrace entry points, call sites, trust boundaries and error paths with Serena. Return scoped observations with file/line evidence, uncertainty and suggested checks. No delegation or edits.",
+      "permission": {"task": "deny"}
+    },
+    "audit-correctness": {
+      "mode": "subagent", "model": "openai/gpt-6-astra", "variant": "xhigh",
+      "description": "Read-only correctness and root-cause analyst.",
+      "tools": {"read": true, "glob": true, "grep": true, "list": true, "lsp_*": true, "webfetch": true, "serena_find_declaration": true, "serena_find_implementations": true, "serena_find_referencing_symbols": true, "serena_find_symbol": true, "serena_get_diagnostics_for_file": true, "serena_get_diagnostics_for_symbol": true, "serena_get_symbols_overview": true, "serena_initial_instructions": true, "serena_list_memories": true, "serena_read_memory": true, "serena_search_for_pattern": true, "bash": false, "interactive_bash": false, "edit": false, "write": false, "apply_patch": false, "delete": false, "rename": false},
+      "prompt": "Target is read-only: no shell, writes, package installs in the audited project, remote mutation, or further delegation. Do not bypass denied paths. Serena may install a language server only under the profile-owned SERENA_HOME with its profile-local npm cache; if that fails, report a semantic-coverage gap and continue file-based inspection.\nTrace logic, state, concurrency, error handling and contract boundaries. Propose a deterministic reproduction where possible, but do not run tests or modify files. Cite exact source evidence and distinguish confirmed from probable issues.",
+      "permission": {"task": "deny"}
+    },
+    "audit-security": {
+      "mode": "subagent", "model": "openai/gpt-6-astra", "variant": "xhigh",
+      "description": "Read-only security and privacy specialist.",
+      "tools": {"read": true, "glob": true, "grep": true, "list": true, "lsp_*": true, "webfetch": true, "serena_find_declaration": true, "serena_find_implementations": true, "serena_find_referencing_symbols": true, "serena_find_symbol": true, "serena_get_diagnostics_for_file": true, "serena_get_diagnostics_for_symbol": true, "serena_get_symbols_overview": true, "serena_initial_instructions": true, "serena_list_memories": true, "serena_read_memory": true, "serena_search_for_pattern": true, "deep_audit_scan": true, "bash": false, "interactive_bash": false, "edit": false, "write": false, "apply_patch": false, "delete": false, "rename": false},
+      "prompt": "Target is read-only: no shell, writes, package installs in the audited project, remote mutation, or further delegation. Do not bypass denied paths. Serena may install a language server only under the profile-owned SERENA_HOME with its profile-local npm cache; if that fails, report a semantic-coverage gap and continue file-based inspection.\nLoad the pinned ECC security-review skill only if it applies, while honoring the stricter deep-audit scanner policy. Inspect security-sensitive symbols, authorization boundaries, input handling and data exposure. Cite paths/lines; redact secrets. Separate proven vulnerabilities from speculative risks. No delegation or edits.",
+      "permission": {"task": "deny"}
+    },
+    "audit-dependencies": {
+      "mode": "subagent", "model": "openai/gpt-6.1-sol", "variant": "high",
+      "description": "Read-only dependency and supply-chain specialist.",
+      "tools": {"read": true, "glob": true, "grep": true, "list": true, "lsp_*": true, "webfetch": true, "serena_find_declaration": true, "serena_find_implementations": true, "serena_find_referencing_symbols": true, "serena_find_symbol": true, "serena_get_diagnostics_for_file": true, "serena_get_diagnostics_for_symbol": true, "serena_get_symbols_overview": true, "serena_initial_instructions": true, "serena_list_memories": true, "serena_read_memory": true, "serena_search_for_pattern": true, "deep_audit_scan": true, "bash": false, "interactive_bash": false, "edit": false, "write": false, "apply_patch": false, "delete": false, "rename": false},
+      "prompt": "Target is read-only: no shell, writes, package installs in the audited project, remote mutation, or further delegation. Do not bypass denied paths. Serena may install a language server only under the profile-owned SERENA_HOME with its profile-local npm cache; if that fails, report a semantic-coverage gap and continue file-based inspection.\nInspect existing lockfiles, manifests, integrity pins and CI workflows. Use deep_audit_scan with osv-scanner only on discovered existing manifests when safe; never run package managers or install dependencies. Report advisory lookup scope and limitations. Do not invent vulnerability claims. Return cited observations. No delegation or edits.",
+      "permission": {"task": "deny"}
+    },
+    "audit-tests": {
+      "mode": "subagent", "model": "openai/gpt-6.1-sol", "variant": "high",
+      "description": "Read-only test and verification coverage analyst.",
+      "tools": {"read": true, "glob": true, "grep": true, "list": true, "lsp_*": true, "webfetch": true, "serena_find_declaration": true, "serena_find_implementations": true, "serena_find_referencing_symbols": true, "serena_find_symbol": true, "serena_get_diagnostics_for_file": true, "serena_get_diagnostics_for_symbol": true, "serena_get_symbols_overview": true, "serena_initial_instructions": true, "serena_list_memories": true, "serena_read_memory": true, "serena_search_for_pattern": true, "deep_audit_test_discover": true, "deep_audit_test_run": true, "bash": false, "interactive_bash": false, "edit": false, "write": false, "apply_patch": false, "delete": false, "rename": false},
+      "prompt": "Target is read-only: no shell, writes, package installs in the audited project, remote mutation, or further delegation. Do not bypass denied paths. Serena may install a language server only under the profile-owned SERENA_HOME with its profile-local npm cache; if that fails, report a semantic-coverage gap and continue file-based inspection.\nInspect tests and CI, then call deep_audit_test_discover and deep_audit_test_run for every safely available suite. Project code may run only in the pinned network-disabled Docker snapshot runner. Record each actual command, exit code, coverage provider and unavailable/external suite as NOT_EXECUTED with its reason; explicitly disclose SQLite-only Django execution. Never invoke tests on the original checkout, shell out, install dependencies or mutate the project. No delegation or edits.",
+      "permission": {"task": "deny"}
+    },
+    "audit-performance": {
+      "mode": "subagent", "model": "openai/gpt-6.1-sol", "variant": "high",
+      "description": "Read-only performance and query analyst.",
+      "tools": {"read": true, "glob": true, "grep": true, "list": true, "lsp_*": true, "webfetch": true, "serena_find_declaration": true, "serena_find_implementations": true, "serena_find_referencing_symbols": true, "serena_find_symbol": true, "serena_get_diagnostics_for_file": true, "serena_get_diagnostics_for_symbol": true, "serena_get_symbols_overview": true, "serena_initial_instructions": true, "serena_list_memories": true, "serena_read_memory": true, "serena_search_for_pattern": true, "bash": false, "interactive_bash": false, "edit": false, "write": false, "apply_patch": false, "delete": false, "rename": false},
+      "prompt": "Target is read-only: no shell, writes, package installs in the audited project, remote mutation, or further delegation. Do not bypass denied paths. Serena may install a language server only under the profile-owned SERENA_HOME with its profile-local npm cache; if that fails, report a semantic-coverage gap and continue file-based inspection.\nInspect algorithms, query construction, N+1 risks, I/O and caching. Do not claim measured performance without executing a permitted benchmark; tests and shell execution are prohibited. Cite evidence and mark hypotheses clearly.",
+      "permission": {"task": "deny"}
+    },
+    "audit-simplicity": {
+      "mode": "subagent", "model": "openai/gpt-6-astra", "variant": "xhigh",
+      "description": "Read-only DRY, simplicity, dead-code and overengineering analyst.",
+      "tools": {"read": true, "glob": true, "grep": true, "list": true, "lsp_*": true, "webfetch": true, "serena_find_declaration": true, "serena_find_implementations": true, "serena_find_referencing_symbols": true, "serena_find_symbol": true, "serena_get_diagnostics_for_file": true, "serena_get_diagnostics_for_symbol": true, "serena_get_symbols_overview": true, "serena_initial_instructions": true, "serena_list_memories": true, "serena_read_memory": true, "serena_search_for_pattern": true, "bash": false, "interactive_bash": false, "edit": false, "write": false, "apply_patch": false, "delete": false, "rename": false},
+      "prompt": "Target is read-only: no shell, writes, package installs in the audited project, remote mutation, or further delegation. Do not bypass denied paths. Serena may install a language server only under the profile-owned SERENA_HOME with its profile-local npm cache; if that fails, report a semantic-coverage gap and continue file-based inspection.\nFind meaningful duplication, dead code, unnecessary abstractions and overengineering. Do not merge distinct responsibilities. Cite evidence, impact, and a behavior-preserving simplification.",
+      "permission": {"task": "deny"}
+    },
+    "audit-reviewer": {
+      "mode": "subagent", "model": "openai/gpt-6-astra", "variant": "max",
+      "description": "Independent read-only audit evidence reviewer.",
+      "tools": {"read": true, "glob": true, "grep": true, "list": true, "lsp_*": true, "webfetch": true, "serena_find_declaration": true, "serena_find_implementations": true, "serena_find_referencing_symbols": true, "serena_find_symbol": true, "serena_get_diagnostics_for_file": true, "serena_get_diagnostics_for_symbol": true, "serena_get_symbols_overview": true, "serena_initial_instructions": true, "serena_list_memories": true, "serena_read_memory": true, "serena_search_for_pattern": true, "bash": false, "interactive_bash": false, "edit": false, "write": false, "apply_patch": false, "delete": false, "rename": false},
+      "prompt": "Target is read-only: no shell, writes, package installs in the audited project, remote mutation, or further delegation. Do not bypass denied paths. Serena may install a language server only under the profile-owned SERENA_HOME with its profile-local npm cache; if that fails, report a semantic-coverage gap and continue file-based inspection.\nReview the coordinator's draft for evidence quality, missed paths, unsupported severity, secrets, and schema compliance; read report-schema.md only if needed for a schema question. Return corrections and coverage gaps only. No delegation or edits.",
+      "permission": {"task": "deny"}
+    }
+  },
+  "mcp": {
+    "serena": {
+      "type": "local",
+      "command": ["@SERENA_BIN@", "start-mcp-server", "--context", "ide", "--project-from-cwd", "--open-web-dashboard", "false"],
+      "enabled": true
+    }
+  },
+  "formatter": false,
+  "autoupdate": false,
+  "share": "disabled"
+}

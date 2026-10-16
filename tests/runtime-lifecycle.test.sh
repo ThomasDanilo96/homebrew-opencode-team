@@ -9,11 +9,13 @@ fi
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/opencode-team-lifecycle.XXXXXX")"
 cleanup() {
   kill ${active_pid:-} ${open_pid:-} ${concurrent_pids:-} 2>/dev/null || true
+  if [ -n "${tm_fixture_home:-}" ]; then rm -rf "$tm_fixture_home"; fi
   rm -rf "$TEST_ROOT"
 }
 trap cleanup EXIT INT TERM
 
-export OPENCODE_TEAM_HOME="$TEST_ROOT/home"
+mkdir -p "$TEST_ROOT/home"
+export OPENCODE_TEAM_HOME="$(cd -P "$TEST_ROOT/home" && pwd)"
 export OPENCODE_TEAM_DEPENDENCY_ROOT="$TEST_ROOT/shared-dependencies"
 export OPENCODE_TEAM_TEST_FREE_BYTES=1
 export OPENCODE_TEAM_MIN_FREE_DISK_BYTES=1000
@@ -121,7 +123,7 @@ node "$ROOT/core/lib/runtime-manifest.mjs" "$manifest_dir" publish
 jq -e '.parent_pid == 4242 and .launcher_pid != .parent_pid' "$manifest_dir/manifest.json" >/dev/null
 
 "$ROOT/bin/opencode-team" runtime-gc >"$TEST_ROOT/gc-dry-run.out"
-rg -q 'GC DELETE best/runs/aaaaaaaa reason=proven_inactive' "$TEST_ROOT/gc-dry-run.out"
+rg -q 'GC DELETE best/runs/aaaaaaaa reason=proven_inactive' "$TEST_ROOT/gc-dry-run.out" || { cat "$TEST_ROOT/gc-dry-run.out" >&2; exit 1; }
 rg -q 'GC DELETE best/runs/11111111 reason=proven_inactive' "$TEST_ROOT/gc-dry-run.out"
 if [ "$LSOF_OPEN_AVAILABLE" = 1 ]; then
   rg -q 'GC KEEP best/runs/bbbbbbbb reason=open_file' "$TEST_ROOT/gc-dry-run.out"
@@ -241,7 +243,35 @@ jq -e '.[0].open_state == "clear" and .[0].open_refs == [] and .[0].open_count =
 jq -e '.[0].open_state == "error" and .[0].classification == "legacy-uncertain"' "$TEST_ROOT/lsof-failure.json" >/dev/null
 
 "$ROOT/bin/opencode-team" time-machine-exclude >"$TEST_ROOT/tm.json"
-jq -e 'all(.[]; .mode == "dry-run" and .child_covered == true)' "$TEST_ROOT/tm.json" >/dev/null
+jq -e 'all(.[]; (.mode == "dry-run" and .child_covered == true) or (.mode == "system-temp-not-backed-up" and .time_machine_domain == "system_temp_not_backed_up"))' "$TEST_ROOT/tm.json" >/dev/null
+
+tm_fixture="$TEST_ROOT/time-machine-fixture"
+tm_fixture_home="$(mktemp -d "/tmp/opencode-team-time-machine-home.XXXXXX")"
+mkdir -p "$tm_fixture_home/Library/Containers/com.docker.docker/Data/vms" "$tm_fixture/tmp/cache/runtime" "$tm_fixture/tmp/dependencies" "$tm_fixture/bin"
+cat >"$tm_fixture/bin/tmutil" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+state="${TMUTIL_FIXTURE_STATE:?}"
+case "${1:-}" in
+  addexclusion)
+    printf '0\n' >"$state"
+    ;;
+  isexcluded)
+    count="$(<"$state")"
+    count="$((count + 1))"
+    printf '%s\n' "$count" >"$state"
+    if [ "$count" -lt 3 ]; then printf '[Not Excluded] %s\n' "${2:-}"; else printf '[Excluded] %s\n' "${2:-}"; fi
+    ;;
+  *) exit 64 ;;
+esac
+EOF
+chmod +x "$tm_fixture/bin/tmutil"
+printf '0\n' >"$tm_fixture/state"
+HOME="$tm_fixture_home" TMPDIR="$tm_fixture/tmp" PATH="$tm_fixture/bin:$PATH" TMUTIL_FIXTURE_STATE="$tm_fixture/state" \
+  CONFIG_ROOT="$tm_fixture/tmp/config" DATA_ROOT="$tm_fixture/tmp/data" STATE_ROOT="$tm_fixture/tmp/state" \
+  CACHE_ROOT="$tm_fixture/tmp/cache" RUNTIME_ROOT="$tm_fixture/tmp/cache/runtime" DEPENDENCY_ROOT="$tm_fixture/tmp/dependencies" \
+  node "$ROOT/core/lib/runtime-lifecycle.mjs" time-machine-exclude --apply >"$tm_fixture/result.json"
+jq -e 'any(.[]; .mode == "apply" and .root_excluded == true and .child_covered == true) and all(.[]; .status == 0)' "$tm_fixture/result.json" >/dev/null
 
 residue_count="$(find "$runtime_root" -type d -name aaaaaaaa -print | wc -l | tr -d ' ')"
 test "$residue_count" = 0

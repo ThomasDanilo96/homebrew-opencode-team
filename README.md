@@ -32,6 +32,15 @@ installs the pinned, curated ECC skills and hooks. Then launch
 repair or re-check those assets; `best` keeps its own configuration and remains
 independent.
 
+The in-development `deep-audit` profile is isolated from the coding teams and
+uses a target-scoped macOS write-deny sandbox. Prepare it with
+`opencode-team deep-audit-setup`, inspect prerequisites with
+`opencode-team deep-audit-doctor`, then run `opencode-team deep-audit [TARGET]`.
+The audit reports are stored under the Deep Audit data root, not in `TARGET`.
+OAuth must be connected inside this isolated profile with `/connect openai`;
+refresh tokens are not copied between teams. The profile is **not READY** until
+its doctor confirms required scanners and profile-local authentication.
+
 OAuth credentials are intentionally not copied between OpenCode profiles,
 because rotating refresh tokens become invalid when multiple isolated copies
 are used. On first use, connect each provider inside the target profile with

@@ -1,0 +1,14 @@
+# Deep Audit keeps Serena configuration, logs, indexes and project metadata in
+# its own profile rather than the user's global Serena home or the target tree.
+# The runtime hook registers the canonical target and creates its project.yml
+# and project.local.yml in that external folder before Serena starts.
+language_backend: LSP
+projects:
+  []
+project_serena_folder_location: "@DEEP_AUDIT_SERENA_HOME@/projects/$projectFolderName/.serena"
+trusted_project_path_patterns:
+  []
+ls_specific_settings:
+  typescript:
+    typescript_version: "5.9.3"
+    typescript_language_server_version: "5.1.3"

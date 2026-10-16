@@ -9,7 +9,7 @@ fi
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/opencode-team-setup.XXXXXX")"
 TEAM_HOME="$TEST_ROOT/home-a"
 SECOND_TEAM_HOME="$TEST_ROOT/home-b"
-DEP_ROOT="${OPENCODE_TEAM_TEST_DEPENDENCY_ROOT:-${TMPDIR:-/tmp}/opencode-team-shared-dependencies-${USER:-$(id -u)}}"
+DEP_ROOT="${OPENCODE_TEAM_TEST_DEPENDENCY_ROOT:-$TEST_ROOT/shared-dependencies}"
 trap 'rm -rf "$TEST_ROOT"' EXIT
 
 shared_bytes() {
@@ -68,13 +68,14 @@ for template in "$ROOT"/teams/*/tui.json.template; do
   tui_file="$TEAM_HOME/config/$team/xdg-config/opencode/tui.json"
   TUI_FILES+=("$tui_file")
 done
-for team in best best-ecc free go openai daily; do
+for team in best best-ecc deep-audit free go openai daily; do
   test -f "$TEAM_HOME/config/$team/team-runtime.conf"
   test -f "$TEAM_HOME/config/$team/opencode.jsonc"
   node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$TEAM_HOME/config/$team/opencode.jsonc"
 done
 test -f "$TEAM_HOME/config/best-ecc/claude-config/settings.json"
 test -f "$TEAM_HOME/data/best-ecc/ecc/.opencode/plugins/ecc-hooks.ts"
+test -f "$TEAM_HOME/data/deep-audit/ecc/skills/security-review/SKILL.md"
 for tui_file in "${TUI_FILES[@]}"; do
   test -f "$tui_file"
   node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$tui_file"
@@ -99,13 +100,35 @@ if find "$SECOND_TEAM_HOME" -path '*/node_modules/oh-my-openagent' -print -quit 
   printf '%s\n' 'second isolated home duplicated OMO dependency tree' >&2
   exit 1
 fi
+expected_plugin_cache="$SECOND_TEAM_HOME/config/deep-audit/node_modules"
+expected_xdg_plugin_cache="$SECOND_TEAM_HOME/config/deep-audit/xdg-config/opencode/node_modules"
+expected_ts_server_modules="$SECOND_TEAM_HOME/data/deep-audit/serena/language_servers/ts-lsp/node_modules"
+test -f "$expected_plugin_cache/@opencode-ai/plugin/package.json"
+test -f "$expected_xdg_plugin_cache/@opencode-ai/plugin/package.json"
+node - "$expected_ts_server_modules" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const root = process.argv[2];
+for (const [name, version] of [["typescript", "5.9.3"], ["typescript-language-server", "5.1.3"]]) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, name, "package.json"), "utf8"));
+  if (manifest.version !== version) throw new Error(`${name} version mismatch: ${manifest.version}`);
+}
+if (!fs.existsSync(path.join(root, ".bin", "typescript-language-server"))) throw new Error("TypeScript language-server executable missing");
+NODE
+while IFS= read -r node_modules_dir; do
+  case "$node_modules_dir" in
+    "$expected_plugin_cache"|"$expected_xdg_plugin_cache"|"$expected_ts_server_modules") ;;
+    *) printf 'unexpected profile-local node_modules tree: %s\n' "$node_modules_dir" >&2; exit 1 ;;
+  esac
+done < <(find "$SECOND_TEAM_HOME" -type d -name node_modules -prune -print)
 shared_dependency_bytes="$(du -sk "$DEP_ROOT" | awk '{print $1 * 1024}')"
-second_home_dependency_bytes="$(find "$SECOND_TEAM_HOME" -path '*/node_modules' -prune -exec du -sk {} + 2>/dev/null | awk '{sum += $1 * 1024} END {print sum + 0}')"
+second_home_plugin_cache_bytes="$(du -sk "$expected_plugin_cache" "$expected_xdg_plugin_cache" | awk '{sum += $1 * 1024} END {print sum + 0}')"
 first_setup_dependency_bytes="$((first_shared_bytes - shared_before_bytes))"
 second_setup_dependency_bytes="$((second_after_bytes - second_before_bytes))"
-printf 'shared_dependency_bytes=%s\nfirst_setup_dependency_bytes=%s\nsecond_setup_dependency_bytes=%s\nsecond_home_node_modules_bytes=%s\n' "$shared_dependency_bytes" "$first_setup_dependency_bytes" "$second_setup_dependency_bytes" "$second_home_dependency_bytes" >"$TEST_ROOT/dependency-sharing-evidence.txt"
+printf 'shared_dependency_bytes=%s\nfirst_setup_dependency_bytes=%s\nsecond_setup_dependency_bytes=%s\nsecond_home_profile_plugin_cache_bytes=%s\n' "$shared_dependency_bytes" "$first_setup_dependency_bytes" "$second_setup_dependency_bytes" "$second_home_plugin_cache_bytes" >"$TEST_ROOT/dependency-sharing-evidence.txt"
 test "$shared_dependency_bytes" -gt 0
-test "$second_home_dependency_bytes" -eq 0
+test "$first_setup_dependency_bytes" -gt 0
+test "$second_home_plugin_cache_bytes" -gt 0
 test "$second_setup_dependency_bytes" -le 0
 
 OLD_ROOT="$TEST_ROOT/version-a/brew-opencode-team/libexec"
@@ -113,7 +136,7 @@ node - "$TEAM_HOME/config" "$ROOT" "$OLD_ROOT" <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
 const [configRoot, currentRoot, oldRoot] = process.argv.slice(2);
-for (const team of ["best", "best-ecc", "free", "go", "openai", "daily"]) {
+for (const team of ["best", "best-ecc", "deep-audit", "free", "go", "openai", "daily"]) {
   for (const file of ["team-runtime.conf", "opencode.jsonc", "tui.json", "settings.json"]) {
     const matches = [];
     const visit = (directory) => {
@@ -136,7 +159,7 @@ for (const team of ["best", "best-ecc", "free", "go", "openai", "daily"]) {
 }
 NODE
 
-for team in best best-ecc free go openai daily; do
+for team in best best-ecc deep-audit free go openai daily; do
   rm -rf "$TEAM_HOME/cache/runtime/$team" "$TEAM_HOME/data/$team/data"
 done
 
@@ -146,14 +169,14 @@ if ! OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "
 fi
 ! rg -q '/Cellar/opencode-team/[0-9]' "$TEAM_HOME/config"
 ! rg -q "$OLD_ROOT" "$TEAM_HOME/config"
-for team in best best-ecc free go openai daily; do
+for team in best best-ecc deep-audit free go openai daily; do
   test -d "$TEAM_HOME/cache/runtime/$team"
   test -d "$TEAM_HOME/data/$team/data"
   bash -c 'source "$1/core/lib/config.sh"; parse_team_config "$2"' bash "$ROOT" "$TEAM_HOME/config/$team/team-runtime.conf"
 done
 
 rm -rf "$TEAM_HOME/cache/runtime/best"
-TEAM_RUNTIME_HEADLESS=1 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" best-opencode >"$TEST_ROOT/upgrade-start.out" 2>&1 &
+TEAM_RUNTIME_HEADLESS=1 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" best >"$TEST_ROOT/upgrade-start.out" 2>&1 &
 upgrade_pid=$!
 upgrade_ready=0
 upgrade_run_rel=""

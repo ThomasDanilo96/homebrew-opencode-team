@@ -32,7 +32,9 @@ class OpencodeTeam < Formula
   end
 
   test do
-    assert_match "OpenCode Team 0.1.64", shell_output("#{bin}/opencode-team version")
+    expected_version = version.to_s
+    assert_equal expected_version, (libexec/"VERSION").read.strip
+    assert_match "OpenCode Team #{expected_version}", shell_output("#{bin}/opencode-team version")
     help = shell_output("#{bin}/opencode-team --help")
     assert_match "BEST profile", help
     assert_match "free", help
@@ -43,10 +45,24 @@ class OpencodeTeam < Formula
     assert_predicate libexec/"core/lib/runtime-reaper.sh", :file?
     assert_predicate libexec/"shared/maintenance/version-check.mjs", :file?
     assert_predicate libexec/"completions/_opencode-team", :file?
+    if (libexec/"teams/deep-audit").directory?
+      assert_predicate libexec/"teams/deep-audit/report-plugin.mjs.template", :file?
+      assert_predicate libexec/"teams/deep-audit/scanner-plugin.mjs.template", :file?
+      assert_predicate libexec/"teams/deep-audit/test-runner-plugin.mjs.template", :file?
+      assert_predicate libexec/"teams/deep-audit/rules/semgrep.yml", :file?
+      assert_predicate libexec/"teams/deep-audit/rules/ast-grep.yml", :file?
+      assert_predicate libexec/"tests/deep-audit-cli.test.mjs", :file?
+      assert_predicate libexec/"tests/deep-audit-test-runner.e2e.mjs", :file?
+      assert_predicate libexec/"teams/deep-audit/bin/read-only-opencode.sh", :executable?
+      # These setup scripts are invoked explicitly through bash by the launcher.
+      assert_predicate libexec/"teams/deep-audit/setup-scanners.sh", :file?
+      assert_predicate libexec/"teams/deep-audit/setup-test-runners.sh", :file?
+    end
     assert_predicate zsh_completion/"_opencode-team", :file?
     system "zsh", "-n", zsh_completion/"_opencode-team"
     ENV["HOME"] = (testpath/"user-home").to_s
     (testpath/"user-home").mkpath
+    ENV["OPENCODE_TEAM_TEST_SKIP_TIME_MACHINE"] = "1"
     shared = testpath/"shared-dependencies"
     first = testpath/"home-a"
     second = testpath/"home-b"
@@ -55,6 +71,8 @@ class OpencodeTeam < Formula
     system bin/"opencode-team", "setup"
     assert_predicate first/"config/best-ecc/claude-config/settings.json", :file?
     assert_predicate first/"data/best-ecc/ecc/.opencode/plugins/ecc-hooks.ts", :file?
+    assert_predicate first/"config/deep-audit/team-runtime.conf", :file?
+    assert_predicate first/"data/deep-audit/ecc/skills/security-review/SKILL.md", :file?
     system bin/"opencode-team", "best-ecc-setup"
     assert_predicate first/"data/best-ecc/ecc/.opencode/plugins/ecc-hooks.ts", :file?
     assert_predicate first/"state/maintenance/launchagents/it.danilodantoni.opencode-team.version-check.plist", :file?

@@ -135,11 +135,14 @@ rg -q 'Setup complete\. No runtime was started\.' "$TEST_ROOT/success.out"
 test -x "$success_home/user-home/Applications/terminal-notifier.app/Contents/MacOS/terminal-notifier"
 rg -q -- '-a .*terminal-notifier.app' "$success_bin/path/open.log"
 rg -q 'macOS notifications[[:space:]]+OK \(registered; notification permission requested\)' "$TEST_ROOT/success.out"
-for team in best best-ecc free go openai daily; do
+for team in best best-ecc deep-audit free go openai daily; do
   test -f "$success_home/config/$team/team-runtime.conf"
   test -f "$success_home/config/$team/opencode.jsonc"
 done
 test -f "$success_home/config/best-ecc/claude-config/settings.json"
+test -f "$success_home/config/deep-audit/team-runtime.conf"
+test -f "$success_home/config/deep-audit/opencode.jsonc"
+test ! -e "$success_home/data/deep-audit/ecc/.git"
 test -f "$legacy_auth_source"
 test ! -e "$success_home/data/best/data/opencode/auth.json"
 test ! -e "$success_home/data/best-ecc/data/opencode/auth.json"

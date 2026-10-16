@@ -1,0 +1,541 @@
+import { tool } from "@OPENCODE_TOOL_MODULE@";
+import { constants } from "node:fs";
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readlink, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
+import os from "node:os";
+import path from "node:path";
+
+const LIMITS = Object.freeze({ files: 100_000, bytes: 2 * 1024 ** 3, output: 4_000_000, timeout: 300_000 });
+const SECRET_NAMES = /^(?:\.env(?:\..*)?|\.npmrc|\.pypirc|\.netrc|credentials?(?:\..*)?|secrets?(?:\..*)?|id_(?:rsa|dsa|ecdsa|ed25519).*)$/i;
+const SECRET_SUFFIX = /\.(?:pem|key|p12|pfx|keystore)$/i;
+const SKIP_DIRS = new Set([".git", ".svn", ".hg", ".ssh", ".aws", ".azure", ".config", ".gnupg"]);
+const DISCOVERY_SKIP_DIRS = new Set([...SKIP_DIRS, "node_modules", "vendor", ".venv", "venv", "__pycache__", ".pytest_cache", "dist", "build", ".next", "coverage"]);
+const redact = (value) => String(value ?? "")
+  .replace(/(authorization\s*:\s*bearer\s+)[^\s\n]+/gi, "$1<redacted>")
+  .replace(/\b(bearer\s+)[^\s\n]+/gi, "$1<redacted>")
+  .replace(/\b((?:GH|GITHUB|AWS|AZURE|OPENAI)_TOKEN|API[_ -]?KEY|PASSWORD|COOKIE|SECRET)\s*[:=]\s*([^\s\n]+)/gi, "$1=<redacted>")
+  .replace(/-----BEGIN [^-]*PRIVATE KEY-----[\s\S]*?-----END [^-]*PRIVATE KEY-----/gi, "<redacted private key>");
+
+function inside(parent, child) {
+  const relative = path.relative(parent, child);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function trustedImageManifest() {
+  const file = process.env.DEEP_AUDIT_TEST_RUNNER_IMAGES;
+  if (!file) throw new Error("Docker runner image manifest is not configured");
+  return readFile(file, "utf8").then((text) => JSON.parse(text));
+}
+
+async function dockerExecutable() {
+  const configured = process.env.DEEP_AUDIT_DOCKER_BIN;
+  if (!configured || !path.isAbsolute(configured) || path.basename(configured) !== "docker") throw new Error("local Docker CLI path is not configured");
+  const executable = await realpath(configured);
+  if (!["/usr/local/bin/", "/opt/homebrew/bin/", "/Applications/Docker.app/Contents/Resources/bin/"].some((prefix) => executable.startsWith(prefix))) throw new Error("Docker CLI is outside the supported trusted installation paths");
+  return executable;
+}
+
+async function inspectTarget(context) {
+  if (!process.env.DEEP_AUDIT_TARGET_ROOT) throw new Error("Deep Audit target is not configured");
+  const target = await realpath(process.env.DEEP_AUDIT_TARGET_ROOT);
+  if (path.resolve(context.directory) !== target) throw new Error("test target differs from the active read-only project");
+  const reports = await realpath(process.env.DEEP_AUDIT_REPORT_ROOT);
+  if (inside(target, reports) || inside(reports, target)) throw new Error("test evidence and project target must be disjoint");
+  return { target, reports };
+}
+
+function classify(relative) {
+  return /(^|[\\/])(e2e|integration|acceptance|system|browser|playwright|cypress)([\\/._-]|$)/i.test(relative) ? "integration" : "unit";
+}
+
+function resolveSettingsModule(manageSource) {
+  const patterns = [
+    /os\.environ\.setdefault\(\s*["']DJANGO_SETTINGS_MODULE["']\s*,\s*["']([A-Za-z0-9_.]+)["']\s*\)/,
+    /os\.environ\[\s*["']DJANGO_SETTINGS_MODULE["']\s*\]\s*=\s*["']([A-Za-z0-9_.]+)["']/,
+  ];
+  for (const pattern of patterns) {
+    const match = manageSource.match(pattern);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+async function walk(root, relative = "", excludedSymlinks = []) {
+  const found = [];
+  for (const entry of await readdir(path.join(root, relative), { withFileTypes: true })) {
+    const childRelative = path.join(relative, entry.name);
+    if (entry.isDirectory()) {
+      if (DISCOVERY_SKIP_DIRS.has(entry.name)) continue;
+      found.push(...await walk(root, childRelative, excludedSymlinks));
+    } else if (entry.isFile()) found.push(childRelative);
+    else if (entry.isSymbolicLink()) excludedSymlinks.push({ path: childRelative.split(path.sep).join("/"), reason: "test discovery does not follow symbolic links" });
+  }
+  return found;
+}
+
+async function targetFileExists(root, relative) {
+  try {
+    const candidate = path.join(root, relative);
+    const info = await lstat(candidate);
+    return info.isFile() && inside(root, await realpath(candidate));
+  } catch { return false; }
+}
+
+async function discover(target) {
+  const excludedSymlinks = [];
+  const files = await walk(target, "", excludedSymlinks);
+  const normalized = files.map((file) => file.split(path.sep).join("/"));
+  const suites = [];
+  const packageFiles = normalized.filter((file) => file === "package.json");
+  for (const packageFile of packageFiles) {
+    try {
+      const pkg = JSON.parse(await readFile(path.join(target, packageFile), "utf8"));
+      if (typeof pkg.scripts?.test === "string" && !/(^|\s)(?:curl|wget|docker|podman|ssh|scp)\b/i.test(pkg.scripts.test)) {
+        const packageDirectory = path.dirname(packageFile);
+        const suffix = packageDirectory === "." ? "" : `-${packageDirectory.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+        suites.push({ id: `npm-test${suffix}`, runner: "npm test", script: "test", script_source: pkg.scripts.test, package_directory: packageDirectory, category: "unit", evidence: [packageFile], available: true, reason: "package.json defines a test script; execution is networkless and container-confined" });
+      }
+      if (typeof pkg.scripts?.["test:unit"] === "string") {
+        const packageDirectory = path.dirname(packageFile);
+        const suffix = packageDirectory === "." ? "" : `-${packageDirectory.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+        suites.push({ id: `npm-test-unit${suffix}`, runner: "npm run test:unit", script: "test:unit", script_source: pkg.scripts["test:unit"], package_directory: packageDirectory, category: "unit", evidence: [packageFile], available: true, reason: "explicit unit-test script" });
+      }
+      for (const key of Object.keys(pkg.scripts ?? {})) {
+        if (/^test:[A-Za-z0-9_-]+$/i.test(key) && key !== "test:unit") {
+          const packageDirectory = path.dirname(packageFile);
+          const suffix = packageDirectory === "." ? "" : `-${packageDirectory.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+          suites.push({ id: `npm-${key.replace(/:/g, "-")}${suffix}`, runner: `npm run ${key}`, script: key, script_source: pkg.scripts[key], package_directory: packageDirectory, category: /e2e|integration|system/i.test(key) ? "integration" : "unit", evidence: [packageFile], available: true, reason: "explicit package test script; confined to network-disabled container" });
+        }
+      }
+    } catch { /* malformed manifests remain coverage gaps */ }
+  }
+
+  const pytestTests = normalized.filter((file) => /(^|\/)(?:test_[^/]+\.py|[^/]+_test\.py)$/.test(file));
+  const pythonTests = normalized.filter((file) => /(^|\/)(?:test[^/]*\.py|tests\.py)$/.test(file) || /(^|\/)tests?\/.*\.py$/.test(file));
+  const javascriptTests = normalized.filter((file) => /(^|\/)(?:test[^/]*|[^/]+[._-](?:test|spec))\.(?:[cm]?js|jsx?|tsx?)$/i.test(file) || /(^|\/)(__tests__)\/.*\.(?:[cm]?js|jsx?|tsx?)$/i.test(file));
+  const pytestConfigured = normalized.some((file) => ["pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"].includes(path.basename(file)));
+  if (pytestTests.length || pytestConfigured) {
+    const safe = pytestTests.filter((file) => classify(file) === "unit");
+    const skipped = pytestTests.filter((file) => classify(file) !== "unit");
+    suites.push({ id: "pytest", runner: "pytest", category: "unit", evidence: pytestTests, available: safe.length > 0, reason: safe.length ? `${safe.length} pytest source(s); integration/E2E paths are excluded` : "no safely classified pytest sources found", skipped });
+  }
+
+  const manage = normalized.find((file) => file === "manage.py");
+  if (manage) {
+    const module = resolveSettingsModule(await readFile(path.join(target, manage), "utf8"));
+    const djangoTests = pythonTests.filter((file) => classify(file) === "unit");
+    const skipped = pythonTests.filter((file) => classify(file) !== "unit");
+    const available = Boolean(module && djangoTests.length && skipped.length === 0);
+    suites.push({ id: "django-test", runner: "Django test runner (SQLite-only override)", category: "unit", evidence: [manage, ...djangoTests], available, reason: available ? "settings module is statically identified; runtime settings are overridden to disposable SQLite" : skipped.length ? "integration/E2E Django modules cannot be safely selected independently" : "could not prove a conventional settings module and unit-test suite", settings_module: module, skipped });
+  }
+
+  const phpTests = normalized.filter((file) => /(^|\/)(?:phpunit\.xml(?:\.dist)?|tests?\/.*Test\.php|.*Test\.php)$/.test(file));
+  if (phpTests.length) {
+    const safe = phpTests.filter((file) => classify(file) === "unit");
+    suites.push({ id: "phpunit", runner: "PHPUnit 13.4.2 in pinned container", category: "unit", evidence: phpTests, available: Boolean(safe.length), reason: safe.length ? "PHPUnit and classified project tests found; no package install is performed" : "no safely classified PHPUnit tests found", skipped: phpTests.filter((file) => classify(file) !== "unit") });
+  }
+
+  const composerFile = normalized.find((file) => file === "composer.json");
+  let laravelDetected = false;
+  if (composerFile && normalized.includes("artisan")) {
+    try {
+      const composer = JSON.parse(await readFile(path.join(target, composerFile), "utf8"));
+      const laravel = composer.require?.["laravel/framework"] || composer["require-dev"]?.["laravel/framework"];
+      if (laravel) {
+        laravelDetected = true;
+        suites.push({ id: "laravel-test", runner: "Laravel Artisan test", category: "integration", evidence: [composerFile, "artisan", ...normalized.filter((file) => /^tests?\//.test(file))], available: await targetFileExists(target, "vendor/autoload.php") && normalized.some((file) => /^tests?\/.*Test\.php$/.test(file)), reason: "Laravel dependencies must already exist in the project snapshot; network and external services are disabled" });
+      }
+    } catch { /* malformed composer manifests are not executable */ }
+  }
+  if (laravelDetected) {
+    const phpunitSuite = suites.find((suite) => suite.id === "phpunit");
+    if (phpunitSuite) {
+      phpunitSuite.available = false;
+      phpunitSuite.reason = "Laravel projects use the dedicated Artisan test runner to avoid duplicate discovery";
+    }
+  }
+
+  const unsupportedFrameworks = [];
+  if (normalized.includes("go.mod")) unsupportedFrameworks.push({ framework: "Go test", status: "NOT_EXECUTED", reason: "no pinned Go runner image is configured" });
+  if (normalized.includes("Cargo.toml")) unsupportedFrameworks.push({ framework: "Rust Cargo", status: "NOT_EXECUTED", reason: "no pinned Rust runner image is configured" });
+  if (normalized.includes("pom.xml") || normalized.some((file) => /(^|\/)mvnw$/.test(file))) unsupportedFrameworks.push({ framework: "Maven", status: "NOT_EXECUTED", reason: "no pinned Java runner image or dependency cache is configured" });
+  if (normalized.some((file) => /(^|\/)gradlew$/.test(file)) || normalized.some((file) => /^build\.gradle(?:\.kts)?$/.test(path.basename(file)))) unsupportedFrameworks.push({ framework: "Gradle", status: "NOT_EXECUTED", reason: "no pinned Java runner image or dependency cache is configured" });
+  if (packageFiles.length && !packageFiles.some((file) => path.dirname(file) === ".")) unsupportedFrameworks.push({ framework: "JavaScript workspace package manager", status: "NOT_EXECUTED", reason: "nested workspace/package-manager layouts require an explicit per-package test script" });
+
+  const npm = suites.filter((suite) => suite.id.startsWith("npm-"));
+  for (const suite of npm) {
+    const packageFile = path.join(target, suite.evidence[0]);
+    const pkg = JSON.parse(await readFile(packageFile, "utf8"));
+    const scriptName = suite.script;
+    const script = pkg.scripts?.[scriptName] ?? "";
+    if (/(^|\s)(?:curl|wget|docker|podman|ssh|scp)\b/i.test(script)) {
+      suite.available = false;
+      suite.reason = "test script directly invokes a network/service orchestration utility";
+    }
+  }
+
+  const testFiles = new Set([...pythonTests, ...phpTests.filter((file) => file.toLowerCase().endsWith(".php")), ...javascriptTests]);
+  return {
+    discovered_at: new Date().toISOString(),
+    suites,
+    unsupported_frameworks: unsupportedFrameworks,
+    excluded_symlinks: excludedSymlinks,
+    coverage: {
+      test_files: testFiles.size,
+      test_file_paths: [...testFiles].sort(),
+      suite_counts: { discovered: suites.length, available: suites.filter((suite) => suite.available).length, unavailable: suites.filter((suite) => !suite.available).length },
+      test_cases: { discovered: null, executed: null, passed: null, failed: null, skipped: null, status: "not executed during discovery" },
+      package_manifests: packageFiles.length,
+      excluded_secret_patterns: [".env*", ".npmrc", "*.pem", "*.key", "credentials*", "secrets*", "SSH/AWS/Azure config"],
+    },
+  };
+}
+
+function parseTestCounts(suite, output, status) {
+  const unknown = { discovered: null, executed: null, passed: null, failed: null, skipped: null, cancelled: null, source: "unavailable" };
+  if (status !== "passed" && status !== "failed") return unknown;
+  const summaryLine = (name) => output.match(new RegExp(`^# ${name} (\\d+)$`, "m"))?.[1];
+  if (suite.id.startsWith("npm-test") && /^node\s+--test(?:\s|$)/.test(suite.script_source ?? "")) {
+    const total = summaryLine("tests");
+    const passed = summaryLine("pass");
+    const failed = summaryLine("fail");
+    const skipped = summaryLine("skipped");
+    const cancelled = summaryLine("cancelled");
+    const todo = summaryLine("todo");
+    if ([total, passed, failed, skipped, cancelled, todo].every((value) => value !== undefined)) {
+      const numbers = [total, passed, failed, skipped, cancelled, todo].map(Number);
+      return {
+        discovered: numbers[0],
+        executed: numbers[1] + numbers[2] + numbers[4],
+        passed: numbers[1],
+        failed: numbers[2],
+        skipped: numbers[3] + numbers[5],
+        cancelled: numbers[4],
+        source: "Node TAP summary",
+      };
+    }
+  }
+  if (suite.id === "pytest") {
+    const summary = output.split(/\r?\n/).find((line) => /\bin\s+[\d.]+s\s*$/.test(line));
+    if (summary) {
+      const counts = new Map([...summary.matchAll(/(\d+) (passed|failed|error|errors|skipped|xfailed|xpassed|deselected)/g)].map((match) => [match[2], Number(match[1])]));
+      const passed = counts.get("passed") ?? 0;
+      const failed = (counts.get("failed") ?? 0) + (counts.get("error") ?? 0) + (counts.get("errors") ?? 0);
+      const skipped = (counts.get("skipped") ?? 0) + (counts.get("xfailed") ?? 0) + (counts.get("xpassed") ?? 0);
+      const discovered = passed + failed + skipped + (counts.get("deselected") ?? 0);
+      return { discovered, executed: passed + failed, passed, failed, skipped, cancelled: 0, source: "pytest summary" };
+    }
+  }
+  if (suite.id === "django-test") {
+    const total = Number(output.match(/Ran (\d+) tests?/i)?.[1]);
+    const summary = output.match(/FAILED \(([^)]*)\)/i)?.[1] ?? "";
+    if (Number.isFinite(total)) {
+      const failures = Number(summary.match(/failures=(\d+)/i)?.[1] ?? 0);
+      const errors = Number(summary.match(/errors=(\d+)/i)?.[1] ?? 0);
+      const skipped = Number(summary.match(/skipped=(\d+)/i)?.[1] ?? 0);
+      const failed = failures + errors;
+      return { discovered: total, executed: total - skipped, passed: Math.max(0, total - failed - skipped), failed, skipped, cancelled: 0, source: "Django test-runner summary" };
+    }
+  }
+  if (suite.id === "phpunit") {
+    const summary = output.match(/Tests:\s*(\d+)(?:,\s*Assertions:\s*\d+)?((?:,\s*[A-Za-z]+:\s*\d+)*)/i);
+    if (summary) {
+      const counts = new Map([...summary[2].matchAll(/([A-Za-z]+):\s*(\d+)/g)].map((match) => [match[1].toLowerCase(), Number(match[2])]));
+      const failed = (counts.get("failures") ?? 0) + (counts.get("errors") ?? 0);
+      const skipped = (counts.get("skipped") ?? 0) + (counts.get("incomplete") ?? 0) + (counts.get("risky") ?? 0);
+      const total = Number(summary[1]);
+      return { discovered: total, executed: total - skipped, passed: Math.max(0, total - failed - skipped), failed, skipped, cancelled: 0, source: "PHPUnit summary" };
+    }
+  }
+  return unknown;
+}
+
+async function snapshot(target, destination) {
+  let count = 0;
+  let bytes = 0;
+  const excluded = [];
+  const hash = createHash("sha256");
+  async function copyDirectory(source, dest, relative = "", expectedDirectory = null) {
+    const sourceInfo = await lstat(source);
+    const canonicalDirectory = await realpath(source);
+    if (!sourceInfo.isDirectory() || !inside(target, canonicalDirectory)
+      || (expectedDirectory && (sourceInfo.dev !== expectedDirectory.dev || sourceInfo.ino !== expectedDirectory.ino))) {
+      throw new Error(`directory escaped or changed during snapshot: ${relative || "."}`);
+    }
+    await mkdir(dest, { recursive: true, mode: 0o700 });
+    for (const entry of await readdir(source, { withFileTypes: true })) {
+      const rel = path.join(relative, entry.name);
+      if (SKIP_DIRS.has(entry.name) || SECRET_NAMES.test(entry.name) || SECRET_SUFFIX.test(entry.name)) {
+        excluded.push({ path: rel.split(path.sep).join("/"), reason: "secret, credential, or VCS material excluded" });
+        continue;
+      }
+      const sourcePath = path.join(source, entry.name);
+      const targetPath = path.join(dest, entry.name);
+      const before = await lstat(sourcePath);
+      if (before.isDirectory()) {
+        await copyDirectory(sourcePath, targetPath, rel, before);
+      } else if (before.isSymbolicLink()) {
+        const link = await readlink(sourcePath).catch(() => null);
+        const linkTarget = await realpath(sourcePath).catch(() => null);
+        if (linkTarget && inside(target, linkTarget) && link !== null) {
+          await symlink(path.relative(path.dirname(sourcePath), linkTarget), targetPath);
+        } else excluded.push({ path: rel.split(path.sep).join("/"), reason: "symlink escapes project or is unreadable" });
+      } else if (before.isFile()) {
+        count += 1;
+        bytes += before.size;
+        if (count > LIMITS.files || bytes > LIMITS.bytes) throw new Error("target exceeds the bounded snapshot file/count budget");
+        const canonical = await realpath(sourcePath);
+        if (!inside(target, canonical)) throw new Error(`source path escaped target during snapshot: ${rel}`);
+        const handle = await open(sourcePath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+        try {
+          const current = await handle.stat();
+          if (current.dev !== before.dev || current.ino !== before.ino || !current.isFile()) throw new Error(`source changed during snapshot: ${rel}`);
+          const content = await handle.readFile();
+          await writeFile(targetPath, content, { mode: before.mode & 0o111 ? 0o777 : 0o666, flag: "wx" });
+          hash.update(rel).update("\0").update(content).update("\0");
+        } finally { await handle.close(); }
+      } else excluded.push({ path: rel.split(path.sep).join("/"), reason: "special filesystem object not copied" });
+    }
+    await chmod(dest, 0o777);
+  }
+  await copyDirectory(target, destination);
+  return { files: count, bytes, sha256: hash.digest("hex"), excluded };
+}
+
+async function scanSnapshotForSecrets(snapshotRoot, outputPath) {
+  if (!process.env.DEEP_AUDIT_SCANNER_ROOT) throw new Error("profile-local secret scanner root is not configured");
+  const scannerRoot = await realpath(process.env.DEEP_AUDIT_SCANNER_ROOT);
+  const executable = await realpath(path.join(scannerRoot, "bin", "gitleaks"));
+  if (!inside(scannerRoot, executable)) throw new Error("pinned secret scanner escaped its profile root");
+  const result = await runProcess(executable, ["detect", "--no-git", "--source", snapshotRoot, "--report-format", "json", "--report-path", outputPath, "--redact", "--exit-code", "0"], {
+    env: { PATH: path.join(scannerRoot, "bin"), GITLEAKS_ENABLE_COMMENTS: "false", NO_COLOR: "1" },
+    timeout: 60_000,
+    outputLimit: 1_000_000,
+  });
+  if (result.code !== 0 || result.timedOut) return { status: "scanner_failed", count: null, output: redact(result.stderr || result.stdout) };
+  await chmod(outputPath, 0o600).catch(() => {});
+  const findings = await readFile(outputPath, "utf8").then((text) => JSON.parse(text)).catch(() => []);
+  return { status: findings.length ? "findings" : "clean", count: findings.length, report: outputPath };
+}
+
+function commandFor(suite, snapshotRoot, images) {
+  if (suite.id.startsWith("npm-test")) {
+    if (!/^test(?::[A-Za-z0-9_-]+)?$/i.test(suite.script ?? "")) throw new Error("unsafe npm test script identifier");
+    const argv = suite.script === "test" ? ["npm", "test"] : ["npm", "run", suite.script];
+    const nativeCoverage = /^node\s+--test(?:\s|$)/.test(suite.script_source ?? "");
+    if (nativeCoverage) argv.push("--", "--experimental-test-coverage");
+    return { image: images.node, argv, cwd: suite.package_directory, paths: suite.evidence, coverage: nativeCoverage ? "node-test-coverage" : null };
+  }
+  if (suite.id.startsWith("npm-")) {
+    if (!/^test:[A-Za-z0-9_-]+$/i.test(suite.script ?? "")) throw new Error("unsafe npm test script identifier");
+    const argv = ["npm", "run", suite.script];
+    const nativeCoverage = /^node\s+--test(?:\s|$)/.test(suite.script_source ?? "");
+    if (nativeCoverage) argv.push("--", "--experimental-test-coverage");
+    return { image: images.node, argv, cwd: suite.package_directory, paths: suite.evidence, coverage: nativeCoverage ? "node-test-coverage" : null };
+  }
+  if (suite.id === "pytest") {
+    const files = suite.evidence.filter((file) => classify(file) === "unit").map((file) => `/workspace/${file}`);
+    return { image: images.python, argv: ["python", "-m", "pytest", "-v", "--cov", "--cov-report=term-missing", ...files], paths: suite.evidence, coverage: "pytest-cov" };
+  }
+  if (suite.id === "django-test") {
+    const module = suite.settings_module;
+    if (!/^[A-Za-z0-9_.]+$/.test(module ?? "")) throw new Error("unsafe or missing Django settings module");
+    const names = module.split(".");
+    const shim = `import importlib\n_original = importlib.import_module(${JSON.stringify(module)})\nfor _name in dir(_original):\n    if not _name.startswith('_'): globals()[_name] = getattr(_original, _name)\nDATABASES = {name: {'ENGINE': 'django.db.backends.sqlite3', 'NAME': '/tmp/deep-audit-' + name + '.sqlite3', 'TEST': {'NAME': '/tmp/deep-audit-test-' + name + '.sqlite3'}} for name in getattr(_original, 'DATABASES', {'default': {}})}\n`;
+    const runner = `import coverage, runpy, sys\n_cov = coverage.Coverage(source=['/workspace'], branch=True)\n_cov.start()\nsys.argv = ['manage.py', 'test']\n_status = 0\ntry:\n    runpy.run_path('/workspace/manage.py', run_name='__main__')\nexcept SystemExit as _exit:\n    _status = int(_exit.code or 0)\nfinally:\n    _cov.stop()\n    try: _cov.report(show_missing=True)\n    except Exception as _error: print(f'coverage report unavailable: {_error}', file=sys.stderr)\nsys.exit(_status)\n`;
+    return { image: images.python, argv: ["python", ".deep_audit_django_runner.py"], paths: suite.evidence, environment: { DJANGO_SETTINGS_MODULE: "deep_audit_test_settings", PYTHONPATH: "/workspace" }, shim: { path: path.join(snapshotRoot, "deep_audit_test_settings.py"), content: shim }, runner: { path: path.join(snapshotRoot, ".deep_audit_django_runner.py"), content: runner }, settings_module: names.join("."), coverage: "coverage.py", database: { configured_backend: "SQLite", configuration: "all Django database aliases are overridden to disposable SQLite files under /tmp", backend_specific_verification: [{ backend: "PostgreSQL", status: "NOT_EXECUTED", reason: "No PostgreSQL server or PostgreSQL engine semantics are available in the isolated runner." }, { backend: "MySQL", status: "NOT_EXECUTED", reason: "No MySQL server or MySQL engine semantics are available in the isolated runner." }], unsupported_semantics: ["backend-specific SQL and types", "concurrent transactions", "transaction isolation", "locking", "backend-specific constraints and indexes"] } };
+  }
+  if (suite.id === "phpunit") {
+    const files = suite.evidence.filter((file) => /Test\.php$/.test(file) && classify(file) === "unit").map((file) => `/workspace/${file}`);
+    return { image: images.php, argv: ["php", "/usr/local/bin/phpunit", "--no-coverage", "--testdox", ...files], paths: files.map((file) => file.slice("/workspace/".length)) };
+  }
+  if (suite.id === "laravel-test") return { image: images.php, argv: ["php", "artisan", "test", "--no-ansi"], paths: suite.evidence };
+  throw new Error(`unsupported test suite: ${suite.id}`);
+}
+
+async function verifyDocker(images) {
+  const docker = await dockerExecutable();
+  const env = { PATH: "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin" };
+  const info = await runProcess(docker, ["info", "--format", "{{.OSType}}|{{.Architecture}}|{{.OperatingSystem}}|{{json .SecurityOptions}}"], { env, timeout: 10_000, outputLimit: 16_000 });
+  if (info.code !== 0) throw new Error("local Linux Docker Engine is unavailable; refusing host execution");
+  const [osType, architecture, operatingSystem, securityOptions] = info.stdout.trim().split("|");
+  if (osType !== "linux" || !["aarch64", "arm64", "x86_64", "amd64"].includes(architecture)) throw new Error("unsupported Docker host platform; refusing host execution");
+  if (process.platform === "darwin" ? operatingSystem !== "Docker Desktop" : !/(rootless|userns)/i.test(securityOptions ?? "")) throw new Error("Docker host must be Docker Desktop VM or a rootless/userns-remapped Linux daemon");
+  const context = await runProcess(docker, ["context", "inspect", "--format", "{{.Endpoints.docker.Host}}"], { env, timeout: 10_000, outputLimit: 16_000 });
+  if (context.code !== 0 || !/^unix:\/\//.test(context.stdout.trim())) throw new Error("Deep Audit requires a local Unix-socket Docker context; remote daemons are refused");
+  for (const [name, item] of Object.entries(images)) {
+    const inspected = await runProcess(docker, ["image", "inspect", "--format", "{{.Id}}", item.reference], { env, timeout: 10_000, outputLimit: 16_000 });
+    if (inspected.code !== 0 || inspected.stdout.trim() !== item.image_id) throw new Error(`pinned ${name} test image is unavailable or changed`);
+  }
+}
+
+function runProcess(executable, args, { env, timeout, outputLimit }) {
+  return new Promise((resolve) => {
+    const child = spawn(executable, args, { shell: false, detached: true, env, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = "";
+    let stderr = "";
+    let timedOut = false;
+    let outputLimitExceeded = false;
+    let forceKillTimer;
+    const terminateGroup = () => {
+      try { process.kill(-child.pid, "SIGTERM"); } catch {}
+      forceKillTimer = setTimeout(() => { try { process.kill(-child.pid, "SIGKILL"); } catch {} }, 1500);
+      forceKillTimer.unref();
+    };
+    const collect = (which) => (chunk) => {
+      const value = chunk.toString();
+      const previous = which === "stdout" ? stdout : stderr;
+      const next = previous + value;
+      if (next.length > outputLimit) {
+        if (!outputLimitExceeded) terminateGroup();
+        outputLimitExceeded = true;
+      }
+      if (which === "stdout") stdout = next.slice(0, outputLimit);
+      else stderr = next.slice(0, outputLimit);
+    };
+    child.stdout.on("data", collect("stdout"));
+    child.stderr.on("data", collect("stderr"));
+    const timer = setTimeout(() => {
+      timedOut = true;
+      terminateGroup();
+    }, timeout);
+    const cleanupTimers = () => { clearTimeout(timer); if (forceKillTimer) clearTimeout(forceKillTimer); };
+    child.once("error", (error) => { cleanupTimers(); resolve({ code: -1, signal: null, timedOut, outputLimitExceeded, stdout, stderr: `${stderr}\n${error.message}` }); });
+    child.once("close", (code, signal) => { cleanupTimers(); resolve({ code: code ?? -1, signal, timedOut, outputLimitExceeded, stdout, stderr }); });
+  });
+}
+
+async function runSuite(suite, target, reports, session, images, docker) {
+  const runId = `${Date.now()}-${randomUUID()}`;
+  const runRoot = await mkdtemp(path.join(os.tmpdir(), "opencode-team-deep-audit-"));
+  const snapshotRoot = path.join(runRoot, "workspace");
+  const resultDir = path.join(reports, "test-runs", session);
+  await mkdir(resultDir, { recursive: true, mode: 0o700 });
+  const evidencePath = path.join(resultDir, `${suite.id}-${runId}.json`);
+  let copy = null;
+  let cmd = null;
+  let processResult = null;
+  let status = "blocked";
+  let coverage = { executed: [], not_executed: suite.skipped ?? [] };
+  let secretScan = null;
+  let containerCommand = null;
+  let dockerName = "";
+  let timeoutMs = LIMITS.timeout;
+  const startedAt = new Date().toISOString();
+  try {
+    copy = await snapshot(target, snapshotRoot);
+    const secretReport = path.join(resultDir, `${suite.id}-${runId}.gitleaks.json`);
+    secretScan = await scanSnapshotForSecrets(snapshotRoot, secretReport);
+    if (secretScan.status !== "clean") {
+      status = secretScan.status === "findings" ? "blocked_secrets" : "blocked_secret_scan";
+      processResult = { code: null, signal: null, timedOut: false, stdout: "", stderr: "Project test code was not executed because secret scanning did not prove a clean snapshot." };
+      throw Object.assign(new Error(processResult.stderr), { alreadyRecorded: true });
+    }
+    cmd = commandFor(suite, snapshotRoot, images);
+    if (cmd.shim) await writeFile(cmd.shim.path, cmd.shim.content, { mode: 0o444, flag: "wx" });
+    if (cmd.runner) await writeFile(cmd.runner.path, cmd.runner.content, { mode: 0o444, flag: "wx" });
+    const runnerUid = 65532;
+    dockerName = `deep-audit-${runId.replace(/[^A-Za-z0-9_.-]/g, "-")}`;
+    const dockerArgs = [
+      "run", "--rm", "--pull=never", "--network=none", "--read-only", "--cap-drop=ALL",
+      "--security-opt=no-new-privileges:true", "--pids-limit=96", "--memory=2147483648", "--cpus=2",
+      "--label", "org.opencode-team.deep-audit-test=true",
+      "--ulimit=nofile=256:256", "--ulimit=nproc=96:96", "--user", `${runnerUid}:${runnerUid}`,
+      "--tmpfs", "/tmp:rw,nosuid,nodev,size=512m,mode=1777",
+      "--tmpfs", `/home/audit:rw,noexec,nosuid,nodev,size=64m,uid=${runnerUid},gid=${runnerUid},mode=0700`,
+      "--tmpfs", "/workspace:rw,nosuid,nodev,size=2048m,mode=1777",
+      "--name", dockerName, "--workdir", "/",
+      "--volume", `${snapshotRoot}:/snapshot:ro`,
+      "--env", "CI=1", "--env", "HOME=/home/audit", "--env", "TMPDIR=/tmp",
+      "--env", "PYTHONNOUSERSITE=1", "--env", "PIP_NO_INDEX=1", "--env", "PIP_DISABLE_PIP_VERSION_CHECK=1",
+      "--env", "npm_config_offline=true", "--env", "npm_config_audit=false", "--env", "DATABASE_URL=sqlite:////tmp/deep-audit-test.sqlite3",
+      "--env", "DB_CONNECTION=sqlite", "--env", "DB_DATABASE=/tmp/deep-audit-test.sqlite3", "--env", "APP_ENV=testing",
+    ];
+    for (const [key, value] of Object.entries(cmd.environment ?? {})) dockerArgs.push("--env", `${key}=${value}`);
+    const suiteCwd = cmd.cwd && cmd.cwd !== "." ? `/workspace/${cmd.cwd}` : "/workspace";
+    dockerArgs.push("--entrypoint", "/bin/sh", cmd.image.reference, "-c", "cp -R /snapshot/. /workspace/ && cd \"$1\" && shift && exec \"$@\"", "deep-audit-entry", suiteCwd, ...cmd.argv);
+    containerCommand = { executable: docker, argv: dockerArgs.map((value) => redact(value)) };
+    const env = { PATH: "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin", DOCKER_CLI_HINTS: "false" };
+    const requestedTimeout = Number.parseInt(process.env.DEEP_AUDIT_TEST_TIMEOUT_MS ?? "", 10);
+    timeoutMs = Number.isFinite(requestedTimeout) && requestedTimeout >= 1000 ? Math.min(requestedTimeout, LIMITS.timeout) : LIMITS.timeout;
+    processResult = await runProcess(docker, dockerArgs, { env, timeout: timeoutMs, outputLimit: LIMITS.output });
+    if (processResult.timedOut || processResult.outputLimitExceeded) {
+      await runProcess(docker, ["kill", dockerName], { env, timeout: 5_000, outputLimit: 16_000 });
+      await runProcess(docker, ["rm", "-f", dockerName], { env, timeout: 5_000, outputLimit: 16_000 });
+    }
+    status = processResult.timedOut ? "timed_out" : processResult.outputLimitExceeded ? "output_limited" : processResult.code === 0 ? "passed" : "failed";
+    coverage = { executed: cmd.paths ?? [], not_executed: suite.skipped ?? [], status: cmd.coverage ? "collected" : "unavailable", provider: cmd.coverage ?? null, limitation: cmd.coverage ? null : "PHPUnit coverage driver is not installed in the isolated image", ...(cmd.database ? { database: cmd.database } : {}) };
+    const output = `${processResult.stdout}\n${processResult.stderr}`;
+    const unavailableDependency = /(?:ModuleNotFoundError|No module named|Cannot find module|Class [^\n]+ not found|ECONNREFUSED|ENETUNREACH|EAI_AGAIN|connection refused|could not connect|couldn't connect|database .*unavailable|no such file or directory|command not found)/i.exec(output);
+    if (status === "failed" && unavailableDependency) {
+      status = "blocked_dependencies";
+      coverage.not_executed = [...coverage.not_executed, `Remaining suite coverage blocked by unavailable dependency/service: ${unavailableDependency[0]}`];
+    }
+  } catch (error) {
+    if (!error?.alreadyRecorded) {
+      processResult = { code: null, signal: null, timedOut: false, stdout: "", stderr: redact(error.message) };
+      status = "blocked";
+    }
+  }
+  if (dockerName) await runProcess(docker, ["rm", "-f", dockerName], { env: { PATH: "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin" }, timeout: 5_000, outputLimit: 16_000 });
+  const result = {
+    schema_version: 1,
+    suite: suite.id,
+    framework: suite.runner,
+    status,
+    category: suite.category,
+    argv: cmd?.argv ?? [],
+    container_command: containerCommand,
+    container_image: cmd?.image?.reference ?? null,
+    isolation: { backend: "Docker Engine", local_socket_only: true, network: "none", root_filesystem: "read-only", host_mounts: ["disposable snapshot mounted read-only; container workspace is bounded tmpfs"], capabilities: "all dropped", no_new_privileges: true, uid: 65532, memory_bytes: 2147483648, workspace_bytes: LIMITS.bytes, cpus: 2, pids: 96, timeout_ms: timeoutMs, output_limit_bytes: LIMITS.output, secrets: "host environment not inherited; credential files excluded from snapshot", databases: "network denied; Django aliases overridden to ephemeral SQLite; PostgreSQL/MySQL-specific behavior is NOT_EXECUTED; common test DB env points into /tmp" },
+    snapshot: copy && { files: copy.files, bytes: copy.bytes, sha256: copy.sha256, excluded: copy.excluded },
+    secret_scan: secretScan,
+    coverage,
+    test_counts: parseTestCounts(suite, `${processResult?.stdout ?? ""}\n${processResult?.stderr ?? ""}`, status),
+    exit_code: processResult?.code ?? null,
+    signal: processResult?.signal ?? null,
+    timed_out: processResult?.timedOut ?? false,
+    output_truncated: processResult?.outputLimitExceeded ?? false,
+    stdout: redact(processResult?.stdout ?? ""),
+    stderr: redact(processResult?.stderr ?? ""),
+    started_at: startedAt,
+    completed_at: new Date().toISOString(),
+  };
+  try {
+    await writeFile(evidencePath, `${JSON.stringify(result, null, 2)}\n`, { mode: 0o600, flag: "wx" });
+  } finally {
+    await rm(runRoot, { recursive: true, force: true });
+  }
+  return { title: `${suite.id}: ${status}`, output: `Evidence: ${evidencePath}\n${JSON.stringify(result, null, 2)}` };
+}
+
+export default async () => ({
+  tool: {
+    deep_audit_test_discover: tool({
+      description: "Read-only discovery of unit/integration/E2E suites; reports what is safe, unsupported, or blocked. Never executes project code.",
+      args: {},
+      async execute(_args, context) {
+        const { target } = await inspectTarget(context);
+        const result = await discover(target);
+        return { title: `Discovered ${result.suites.length} test suite(s)`, output: JSON.stringify(result, null, 2) };
+      },
+    }),
+    deep_audit_test_run: tool({
+      description: "Run one detected allowlisted test suite exclusively in a disposable Docker container (network none, read-only container root, strict resource limits, no inherited host secrets).",
+      args: { suite_id: tool.schema.string() },
+      async execute(args, context) {
+        const { target, reports } = await inspectTarget(context);
+        const manifest = await trustedImageManifest();
+        const images = Object.fromEntries(Object.entries(manifest).filter(([name]) => ["node", "python", "php"].includes(name)).map(([name, item]) => [name, { reference: item.image_id, image_id: item.image_id }]));
+        await verifyDocker(images);
+        const found = await discover(target);
+        const suite = found.suites.find((candidate) => candidate.id === args.suite_id);
+        if (!suite) throw new Error(`test suite was not discovered: ${args.suite_id}`);
+        if (!suite.available) return { title: `${suite.id}: NOT_EXECUTED`, output: JSON.stringify({ suite, status: "not_executed", reason: suite.reason }, null, 2) };
+        const session = String(context.sessionID ?? "audit").replace(/[^A-Za-z0-9_-]/g, "_");
+        return runSuite(suite, target, reports, session, images, await dockerExecutable());
+      },
+    }),
+  },
+});

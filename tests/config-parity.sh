@@ -8,15 +8,18 @@ node - "$OPENCODE_TEAM_HOME" "$ROOT" "${OPENCODE_TEAM_DEPENDENCY_ROOT:-$OPENCODE
 const fs = require("node:fs");
 const { spawnSync } = require("node:child_process");
 const path = require("node:path");
+const { fileURLToPath } = require("node:url");
 
-const [home, root, dependencyRoot] = process.argv.slice(2);
+const [requestedHome, root, dependencyRoot] = process.argv.slice(2);
+const home = fs.realpathSync(requestedHome);
 const read = (team) => JSON.parse(fs.readFileSync(path.join(home, "config", team, "opencode.jsonc"), "utf8"));
 const assert = (condition, message) => { if (!condition) throw new Error(message); };
 const same = (actual, expected, label) => assert(JSON.stringify(actual) === JSON.stringify(expected), `${label} mismatch: actual=${JSON.stringify(actual)} expected=${JSON.stringify(expected)}`);
+const pluginPath = (plugin) => plugin.startsWith("file://") ? fileURLToPath(plugin) : plugin;
 const tuiTeams = fs.readdirSync(path.join(root, "teams"), { withFileTypes: true })
   .filter((entry) => entry.isDirectory())
   .map((entry) => entry.name)
-  .filter((team) => fs.existsSync(path.join(root, "teams", team, "tui.json.template")));
+  .filter((team) => team !== "deep-audit" && fs.existsSync(path.join(root, "teams", team, "tui.json.template")));
 
 const best = read("best");
 const bestOmo = JSON.parse(fs.readFileSync(path.join(home, "config", "best", "xdg-config", "opencode", "oh-my-openagent.jsonc"), "utf8"));
@@ -322,6 +325,106 @@ const bestEccTasks = bestEccOmo.profiles["best-ecc"]["[opencode]"].background_ta
 same(bestEccTasks.defaultConcurrency, 8, "BEST-ECC bounded concurrent task ceiling");
 same(bestEccTasks.providerConcurrency, { openai: 4, "opencode-go": 4 }, "BEST-ECC provider concurrency");
 same(bestEccTasks.maxDepth, 2, "BEST-ECC task graph depth");
+
+const deepAudit = read("deep-audit");
+same(deepAudit.model, "openai/gpt-6-astra", "Deep Audit Astra coordinator model");
+same(deepAudit.default_agent, "audit-orchestrator", "Deep Audit coordinator agent");
+same(deepAudit.agent["audit-orchestrator"].variant, "xhigh", "Deep Audit coordinator reasoning");
+same(deepAudit.agent["audit-reviewer"].variant, "max", "Deep Audit final reviewer reasoning");
+same(deepAudit.agent["audit-performance"].model, "openai/gpt-6.1-sol", "Deep Audit Sol performance analyst");
+same(deepAudit.enabled_providers, ["openai"], "Deep Audit strict provider allowlist");
+same(deepAudit.permission["*"], "deny", "Deep Audit default-deny policy");
+same(deepAudit.permission.bash, "deny", "Deep Audit shell denial");
+same(deepAudit.permission.edit, "deny", "Deep Audit project edit denial");
+same(deepAudit.permission.write, "deny", "Deep Audit project write denial");
+assert(deepAudit.plugin.some((plugin) => path.resolve(pluginPath(plugin)) === path.join(home, "data", "deep-audit", "plugins", "report-plugin.mjs")), "Deep Audit isolated report plugin missing");
+assert(deepAudit.plugin.some((plugin) => path.resolve(pluginPath(plugin)) === path.join(home, "data", "deep-audit", "plugins", "test-runner-plugin.mjs")), "Deep Audit sandboxed test runner plugin missing");
+assert(deepAudit.skills.paths.includes(path.join(home, "data", "deep-audit", "ecc", "skills")), "Deep Audit ECC skill checkout is not isolated");
+same(deepAudit.permission.external_directory[`${dependencyRoot}/deep-audit/scanners/**`], "allow", "Deep Audit scanner dependency access");
+same(deepAudit.permission.external_directory[`${path.join(home, "data", "deep-audit", "reports", "test-runs")}/**`], "allow", "Deep Audit test evidence read access");
+same(deepAudit.permission.external_directory[`${path.join(home, "data", "deep-audit", "reports", "scanner-results")}/**`], "allow", "Deep Audit scanner evidence read access");
+same(deepAudit.permission.external_directory[`${path.join(home, "data", "deep-audit", "reports") }/*/**`], "allow", "Deep Audit report bundle reviewer read access");
+same(deepAudit.permission.external_directory[`${path.join(home, "data", "deep-audit", "serena", "logs")}/**`], "allow", "Deep Audit Serena log read access");
+const reviewerEvidence = path.join(home, "data", "deep-audit", "reports", "test-runs", "config-parity-reviewer-evidence.json");
+fs.mkdirSync(path.dirname(reviewerEvidence), { recursive: true, mode: 0o700 });
+fs.writeFileSync(reviewerEvidence, JSON.stringify({ evidence: "read-only reviewer access probe" }), { mode: 0o600 });
+const reviewerRead = spawnSync("opencode", ["debug", "agent", "audit-reviewer", "--tool", "read", "--params", JSON.stringify({ filePath: reviewerEvidence })], {
+  cwd: root,
+  env: {
+    ...process.env,
+    OPENCODE_CONFIG: path.join(home, "config", "deep-audit", "opencode.jsonc"),
+    OPENCODE_CONFIG_DIR: path.join(home, "config", "deep-audit"),
+    OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(home, "config", "deep-audit", "xdg-config"),
+    XDG_DATA_HOME: path.join(home, "data", "deep-audit", "data"),
+    XDG_CACHE_HOME: path.join(home, "cache", "deep-audit"),
+    XDG_STATE_HOME: path.join(home, "state", "deep-audit"),
+  },
+  encoding: "utf8",
+});
+assert(reviewerRead.status === 0, `audit-reviewer could not read authorized test evidence: ${reviewerRead.stderr}`);
+assert(reviewerRead.stdout.includes("read-only reviewer access probe"), "reviewer read did not return the authorized evidence content");
+const serenaLog = path.join(home, "data", "deep-audit", "serena", "logs", "config-parity", "mcp.log");
+fs.mkdirSync(path.dirname(serenaLog), { recursive: true, mode: 0o700 });
+fs.writeFileSync(serenaLog, "Serena semantic verification transcript\n", { mode: 0o600 });
+const reviewerLogRead = spawnSync("opencode", ["debug", "agent", "audit-reviewer", "--tool", "read", "--params", JSON.stringify({ filePath: serenaLog })], {
+  cwd: root,
+  env: {
+    ...process.env,
+    OPENCODE_CONFIG: path.join(home, "config", "deep-audit", "opencode.jsonc"),
+    OPENCODE_CONFIG_DIR: path.join(home, "config", "deep-audit"),
+    OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(home, "config", "deep-audit", "xdg-config"),
+    XDG_DATA_HOME: path.join(home, "data", "deep-audit", "data"),
+    XDG_CACHE_HOME: path.join(home, "cache", "deep-audit"),
+    XDG_STATE_HOME: path.join(home, "state", "deep-audit"),
+  },
+  encoding: "utf8",
+});
+assert(reviewerLogRead.status === 0, `audit-reviewer could not read authorized Serena log: ${reviewerLogRead.stderr}`);
+assert(reviewerLogRead.stdout.includes("Serena semantic verification transcript"), "reviewer read did not return the Serena log content");
+const reviewerReport = path.join(home, "data", "deep-audit", "reports", "config-parity-report-probe", "00_EXECUTIVE_SUMMARY.md");
+fs.mkdirSync(path.dirname(reviewerReport), { recursive: true, mode: 0o700 });
+fs.writeFileSync(reviewerReport, "Independent reviewer report-bundle access probe\n", { mode: 0o600 });
+const reviewerReportRead = spawnSync("opencode", ["debug", "agent", "audit-reviewer", "--tool", "read", "--params", JSON.stringify({ filePath: reviewerReport })], {
+  cwd: root,
+  env: {
+    ...process.env,
+    OPENCODE_CONFIG: path.join(home, "config", "deep-audit", "opencode.jsonc"),
+    OPENCODE_CONFIG_DIR: path.join(home, "config", "deep-audit"),
+    OPENCODE_DISABLE_PROJECT_CONFIG: "1",
+    HOME: home,
+    XDG_CONFIG_HOME: path.join(home, "config", "deep-audit", "xdg-config"),
+    XDG_DATA_HOME: path.join(home, "data", "deep-audit", "data"),
+    XDG_CACHE_HOME: path.join(home, "cache", "deep-audit"),
+    XDG_STATE_HOME: path.join(home, "state", "deep-audit"),
+  },
+  encoding: "utf8",
+});
+assert(reviewerReportRead.status === 0, `audit-reviewer could not read authorized report bundle: ${reviewerReportRead.stderr}`);
+assert(reviewerReportRead.stdout.includes("Independent reviewer report-bundle access probe"), "reviewer read did not return report bundle content");
+assert(!JSON.stringify(deepAudit).includes("@DEPENDENCY_ROOT@"), "Deep Audit dependency path placeholder was not rendered");
+const deepAuditRuntime = fs.readFileSync(path.join(home, "config", "deep-audit", "team-runtime.conf"), "utf8");
+assert(/^OMO_PROFILE=deep-audit$/m.test(deepAuditRuntime), "Deep Audit OMO-profile runtime label missing");
+assert(/^RUNTIME_ENV_HOOK=/m.test(deepAuditRuntime), "Deep Audit runtime environment hook missing");
+same(deepAudit.permission.deep_audit_test_discover, "allow", "Deep Audit test discovery permission");
+same(deepAudit.permission.deep_audit_test_run, "allow", "Deep Audit sandboxed test execution permission");
+same(deepAudit.tools.deep_audit_test_discover, true, "Deep Audit test discovery tool");
+same(deepAudit.tools.deep_audit_test_run, true, "Deep Audit sandboxed test execution tool");
+const deepAuditReadSerenaTools = ["serena_find_declaration", "serena_find_implementations", "serena_find_referencing_symbols", "serena_find_symbol", "serena_get_diagnostics_for_file", "serena_get_diagnostics_for_symbol", "serena_get_symbols_overview", "serena_initial_instructions", "serena_list_memories", "serena_read_memory", "serena_search_for_pattern"];
+assert(deepAuditReadSerenaTools.every((tool) => deepAudit.agent["audit-orchestrator"].tools?.[tool] === true), "Deep Audit orchestrator is missing read-only Serena tool exposure");
+assert(["serena_replace_content", "serena_write_memory", "serena_delete_memory", "serena_execute_shell_command"].every((tool) => deepAudit.agent["audit-orchestrator"].tools?.[tool] !== true), "Deep Audit orchestrator must not enable mutating Serena tools");
+same(Object.keys(deepAudit.mcp), ["serena"], "Deep Audit keeps Serena as its only MCP server");
+assert(fs.existsSync(path.join(home, "data", "deep-audit", "serena", "serena_config.yml")), "Deep Audit Serena state/config is not profile-local");
+const deepAuditSerena = fs.readFileSync(path.join(home, "data", "deep-audit", "serena", "serena_config.yml"), "utf8");
+assert(deepAuditSerena.includes(process.env.DEEP_AUDIT_TARGET_ROOT || "@DEEP_AUDIT_TARGET_ROOT@") || !deepAuditSerena.includes("projects: []"), "Deep Audit Serena must initialize against the active project");
+assert(!fs.existsSync(path.join(home, "data", "deep-audit", ".omo", "omo.jsonc")), "Deep Audit unexpectedly depends on OmO");
+const deepAuditScannerPlugin = fs.readFileSync(path.join(home, "data", "deep-audit", "plugins", "scanner-plugin.mjs"), "utf8");
+assert(deepAuditScannerPlugin.includes("Deep Audit concurrency guard:") && deepAuditScannerPlugin.includes("output.args.run_in_background = false"), "Deep Audit foreground task semaphore is missing");
+const deepAuditTui = JSON.parse(fs.readFileSync(path.join(home, "config", "deep-audit", "xdg-config", "opencode", "tui.json"), "utf8"));
+same(deepAuditTui, {}, "Deep Audit does not load a clipboard/project plugin");
 
 for (const team of ["best", "best-ecc", "free", "go", "openai", "daily"]) {
   const config = read(team);

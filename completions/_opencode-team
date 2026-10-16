@@ -5,6 +5,7 @@ _opencode_team__profiles() {
   profiles=(
     'best:General OpenCode Team profile'
     'best-ecc:Isolated BEST + ECC profile'
+    'deep-audit:Read-only Deep Audit Premium profile'
     'free:BEST routing with OpenCode Zen free models'
     'best-opencode:Alias for best'
     'best-native:Native OMO profile'
@@ -49,6 +50,10 @@ _opencode-team() {
         'best:Start the BEST profile'
         'best-ecc:Start the isolated BEST + ECC profile'
         'best-ecc-setup:Install the pinned ECC skill and agent subset'
+        'deep-audit:Run the read-only Deep Audit profile'
+        'deep-audit-setup:Provision the isolated Deep Audit profile'
+        'deep-audit-doctor:Check Deep Audit models, sandbox, scanners and auth'
+        'deep-audit-report:List or inspect saved Deep Audit reports'
         'free:Start the FREE OpenCode Zen profile'
         'best-opencode:Alias for best'
         'best-native:Start the native OMO profile'
@@ -86,6 +91,18 @@ _opencode-team() {
           ;;
         best|best-ecc|free|go|openai|daily|best-opencode)
           _opencode_team__runtime_options
+          ;;
+        deep-audit)
+          _arguments \
+            '(-h --help)'{-h,--help}'[Show help]' \
+            '(-s --resume)'{-s,--resume}'[Resume an existing session]:session ID:' \
+            '1:target project:_directories'
+          ;;
+        deep-audit-setup|deep-audit-doctor)
+          _arguments '(-h --help)'{-h,--help}'[Show help]'
+          ;;
+        deep-audit-report)
+          _arguments '1:report action:(list latest show)' '2:audit ID:'
           ;;
         best-ecc-setup)
           _arguments '(-h --help)'{-h,--help}'[Show help]'

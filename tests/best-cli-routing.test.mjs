@@ -13,11 +13,19 @@ test("BEST OpenCode profile is the default and best-opencode alias", () => {
 test("BEST-ECC starts as a distinct isolated team and has an explicit resource setup command", () => {
   assert.match(cli, /opencode-team best-ecc \[--resume SESSION\]/);
   assert.match(cli, /opencode-team best-ecc-setup/);
-  assert.match(cli, /best-ecc\|free\|go\|openai\|daily/);
+  assert.match(cli, /best-ecc\|deep-audit\|free\|go\|openai\|daily/);
   assert.match(cli, /best-ecc\)\s+shift\s+start_best_ecc "\$@"/);
   assert.match(cli, /best-ecc-setup\)\s+[\s\S]*?setup_best_ecc/);
   assert.match(cli, /start_best_ecc\(\) \{\s+setup_roots\s+verify_best_ecc_assets/);
   assert.match(cli, /verify_best_ecc_assets\(\)/);
+});
+
+test("Deep Audit is registered as a separate target-aware profile without OmO delegation", () => {
+  assert.match(cli, /deep-audit\)\s+shift\s+start_deep_audit/);
+  assert.match(cli, /deep-audit-setup\)\s+[\s\S]*?setup_deep_audit_profile/);
+  assert.match(cli, /deep-audit-doctor\)/);
+  assert.match(cli, /deep-audit-report\)/);
+  assert.match(cli, /DEEP_AUDIT_TARGET_ROOT="\$target"/);
 });
 
 test("BEST Native remains available as a separate command", () => {

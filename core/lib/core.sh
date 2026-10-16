@@ -172,7 +172,7 @@ set_runtime_status() {
 
 resume_profile() {
   case "$TEAM_NAME" in
-    best|best-ecc|go|openai) printf '%s\n' "$TEAM_NAME" ;;
+    best|best-ecc|deep-audit|go|openai) printf '%s\n' "$TEAM_NAME" ;;
     opencode-openai-daily) printf '%s\n' daily ;;
     *) return 1 ;;
   esac
@@ -188,6 +188,7 @@ print_resume_command() {
 # --- Cleanup (certified GO order) ---
 cleanup_run() {
   local exit_code="${1:-$?}"
+  local failure_reason=""
   [ "$CLEANED" -eq 1 ] && return
   CLEANED=1
 
@@ -255,7 +256,9 @@ cleanup_run() {
       rm -rf "$RUN_STATE_DIR"
     fi
   elif [ -d "$RUN_STATE_DIR" ]; then
-    set_runtime_status failed "" "Runtime exited with status $exit_code" || true
+    failure_reason="$(cat "$RUN_STATE_DIR/failure_reason" 2>/dev/null || true)"
+    [ -n "$failure_reason" ] || failure_reason="Runtime exited with status $exit_code"
+    set_runtime_status failed "" "$failure_reason" || true
     log "Preserving failed run state at $RUN_STATE_DIR"
   fi
   [ "$exit_code" -eq 0 ] && print_resume_command
@@ -428,7 +431,7 @@ PY
 resolve_resume_dir() {
   local session_id="$1"
   local exppath
-  exppath=$(mktemp)
+  exppath=$(mktemp) || return 1
   HOME="$SANDBOX" \
     XDG_CONFIG_HOME="$SANDBOX/config" \
     XDG_DATA_HOME="$SANDBOX/data" \
@@ -440,18 +443,27 @@ resolve_resume_dir() {
     OPENCODE_DISABLE_CLAUDE_CODE=1 \
     CLAUDE_CONFIG_DIR="${CLAUDE_CONFIG_DIR_OVERRIDE:-}" \
     OMO_PROFILE="$OMO_PROFILE" \
-    opencode export "$session_id" > "$exppath" 2>/dev/null
+    "$OPENCODE_BIN" export "$session_id" > "$exppath" 2>/dev/null || {
+      local export_status=$?
+      rm -f "$exppath"
+      return "$export_status"
+    }
 
-  SESSION_DIRECTORY=$("$OPENCODE_TEAM_PYTHON" -c "
+  if ! SESSION_DIRECTORY=$("$OPENCODE_TEAM_PYTHON" -c "
 import json, sys
 try:
-    with open('$exppath') as f:
+    with open(sys.argv[1]) as f:
         data = json.load(f)
     info = data.get('info', {})
     d = info.get('directory', '')
     print(d)
-except: pass
-" 2>/dev/null)
+except (OSError, ValueError, TypeError, AttributeError):
+    sys.exit(1)
+" "$exppath" 2>/dev/null)
+  then
+    rm -f "$exppath"
+    return 1
+  fi
   rm -f "$exppath"
 
   if [ -n "$SESSION_DIRECTORY" ] && [ ! -d "$SESSION_DIRECTORY" ]; then
@@ -783,6 +795,17 @@ main() {
     log "Historical directory: ${SESSION_DIRECTORY:-~}"
   else
     SESSION_DIRECTORY="$PWD"
+  fi
+
+  if [ "${TEAM_NAME:-}" = "deep-audit" ]; then
+    local requested_target resolved_target resolved_session
+    requested_target="${DEEP_AUDIT_TARGET_ROOT:-}"
+    [ -n "$requested_target" ] && [ -d "$requested_target" ] || die "Deep Audit target directory is required"
+    resolved_target="$(cd -P -- "$requested_target" 2>/dev/null && pwd -P)" || die "Deep Audit target directory cannot be resolved"
+    resolved_session="$(cd -P -- "$SESSION_DIRECTORY" 2>/dev/null && pwd -P)" || die "Deep Audit session project directory cannot be resolved"
+    [ "$resolved_target" = "$resolved_session" ] || die "Deep Audit resume target does not match the session's original project directory"
+    DEEP_AUDIT_TARGET_ROOT="$resolved_target"
+    export DEEP_AUDIT_TARGET_ROOT
   fi
 
   # Write state files (NO premature server.pid)

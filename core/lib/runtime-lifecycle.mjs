@@ -13,7 +13,7 @@ const stateRoot = resolve(process.env.STATE_ROOT || join(homedir(), ".local", "s
 const cacheRoot = resolve(process.env.CACHE_ROOT || join(homedir(), ".cache", "opencode-team"));
 const runtimeRoot = resolve(process.env.RUNTIME_ROOT || join(cacheRoot, "runtime"));
 const dependencyRoot = resolve(process.env.DEPENDENCY_ROOT || join(dataRoot, "dependencies"));
-const teams = ["best", "best-ecc", "free", "go", "openai", "daily"];
+const teams = ["best", "best-ecc", "deep-audit", "free", "go", "openai", "daily"];
 const roles = ["launcher", "server", "bridge", "attach", "watchdog", "reaper"];
 const legacyFamily = /^(?:opencode-team-|opencode-daily-|openai-daily-|daily-(?:real|postcommit)-|opencode-daily-cert[.-]|\.opencode-team-daily-|omo-(?:hook-repro|ignore|inspect-npm|pack-name)(?:[-.].*)?$|openai-admit-concurrency-|opencode-(?:auth|best|cutover|maintenance|model|server)-)/i;
 
@@ -549,6 +549,15 @@ const classifyLegacy = () => {
 
 const excludeTimeMachine = (apply, check = false) => {
   const tmutil = (args) => spawnSync("tmutil", args, { encoding: "utf8", timeout: Number(process.env.OPENCODE_TEAM_TMUTIL_TIMEOUT_MS || 5000) });
+  const isExcluded = (path) => {
+    const delay = new Int32Array(new SharedArrayBuffer(4));
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const result = tmutil(["isexcluded", path]);
+      if (result.status === 0 && /^\s*\[Excluded\]/i.test(result.stdout || "")) return true;
+      if (attempt < 19) Atomics.wait(delay, 0, 0, 250);
+    }
+    return false;
+  };
   const systemTempPath = (root) => {
     const path = resolve(root);
     return path.startsWith("/private/var/folders/") || path.startsWith("/var/folders/");
@@ -582,10 +591,8 @@ const excludeTimeMachine = (apply, check = false) => {
           writeFileSync(probe, "probe\n", { mode: 0o600 });
           createdProbe = true;
         }
-        const rootCheck = tmutil(["isexcluded", root]);
-        const childCheck = tmutil(["isexcluded", probe]);
-        rootExcluded = rootCheck.status === 0 && /excluded/i.test(rootCheck.stdout || "");
-        childCovered = childCheck.status === 0 && /excluded/i.test(childCheck.stdout || "");
+        rootExcluded = isExcluded(root);
+        childCovered = rootExcluded && isExcluded(probe);
       } finally {
         if (createdProbe) rmSync(probe, { force: true });
       }
