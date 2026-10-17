@@ -40,7 +40,7 @@ grep -Fq 'brew install --verbose ThomasDanilo96/opencode-team/opencode-team' "$w
 grep -Fq 'runs-on: macos-26' "$workflow"
 grep -Fq 'opencode models openai' "$workflow"
 grep -Fq 'opencode-team deep-audit-doctor' "$workflow"
-grep -Fq 'Runtime tool state[[:space:]]\+VERIFIED' "$workflow"
+grep -Fq 'Runtime tool state[[:space:]]+VERIFIED' "$workflow"
 grep -Fq 'tests/deep-audit-sandbox.test.sh' "$workflow"
 grep -Fq 'tests/deep-audit-scanner.test.mjs' "$workflow"
 grep -Fq 'tests/deep-audit-runtime-smoke.sh' "$workflow"
