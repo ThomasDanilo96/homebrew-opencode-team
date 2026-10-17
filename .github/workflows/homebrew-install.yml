@@ -245,7 +245,7 @@ jobs:
     if: needs.release_state.outputs.published == 'true' && !((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.official_archive_sha256 != '') || (github.event_name == 'workflow_dispatch' && inputs.publish_stable_release))
     # The current node@22 bottle is available on Tahoe; macos-14 would build V8 from source.
     runs-on: macos-26
-    timeout-minutes: 100
+    timeout-minutes: 90
     steps:
       - name: Checkout development code
         uses: actions/checkout@v4
@@ -255,16 +255,13 @@ jobs:
         run: |
           brew update
           # Fail before installing the formula if any direct dependency lacks a runner bottle.
-          for dependency in git jq node@22 ripgrep terminal-notifier tmux uv opencode; do
+          for dependency in git jq node@22 ripgrep terminal-notifier tmux uv opencode gitleaks; do
             brew fetch --force-bottle "$dependency"
           done
+          brew install --force-bottle gitleaks
           opencode_version="$(brew info --json=v2 opencode | jq -r '.formulae[0].versions.stable')"
           test -n "$opencode_version"
           ruby -e 'abort "OpenCode #{ARGV[0]} is below required minimum 1.18.30" if Gem::Version.new(ARGV[0]) < Gem::Version.new("1.18.30")' "$opencode_version"
-
-      - name: Provision Docker Desktop for isolated runtime tests
-        timeout-minutes: 20
-        run: bash .github/scripts/start-docker-desktop.sh
 
       - name: Tap and trust formula
         timeout-minutes: 10
@@ -316,273 +313,18 @@ jobs:
           test -x "$package_root/bin/opencode-team"
           test "$(opencode-team version)" = "OpenCode Team $expected_version"
 
-      - name: Clean-room setup and doctor
-        timeout-minutes: 40
+      - name: Installed package configuration and Seatbelt smoke
+        timeout-minutes: 10
         run: |
-          # Keep this disposable clean-room home for the runtime smoke step;
-          # running setup again there would redo all profile provisioning.
-          test_home="$RUNNER_TEMP/opencode-team-clean-install-home"
-          mkdir -p "$test_home"
-            shared_dependencies="$RUNNER_TEMP/opencode-team-clean-install-dependencies"
-            OPENCODE_TEAM_TEST_SKIP_TIME_MACHINE=1 OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup
-            ecc_models="$(XDG_CONFIG_HOME="$test_home/config/best-ecc/xdg-config" XDG_DATA_HOME="$test_home/data/best-ecc/data" OPENCODE_CONFIG="$test_home/config/best-ecc/opencode.jsonc" OPENCODE_CONFIG_DIR="$test_home/config/best-ecc" OPENCODE_DISABLE_PROJECT_CONFIG=1 opencode models openai)"
-           printf '%s\n' "$ecc_models" | rg -q '^openai/gpt-6-luna$'
-           go_models="$(XDG_CONFIG_HOME="$test_home/config/best-ecc/xdg-config" XDG_DATA_HOME="$test_home/data/best-ecc/data" OPENCODE_CONFIG="$test_home/config/best-ecc/opencode.jsonc" OPENCODE_CONFIG_DIR="$test_home/config/best-ecc" OPENCODE_DISABLE_PROJECT_CONFIG=1 opencode models opencode-go)"
-           printf '%s\n' "$go_models" | rg -q '^opencode-go/qwen3\.7-plus$'
-           audit_models="$(XDG_CONFIG_HOME="$test_home/config/deep-audit/xdg-config" XDG_DATA_HOME="$test_home/data/deep-audit/data" OPENCODE_CONFIG="$test_home/config/deep-audit/opencode.jsonc" OPENCODE_CONFIG_DIR="$test_home/config/deep-audit" OPENCODE_DISABLE_PROJECT_CONFIG=1 opencode models openai)"
-           printf '%s\n' "$audit_models" | rg -q '^openai/gpt-6-astra$'
-           printf '%s\n' "$audit_models" | rg -q '^openai/gpt-6.1-sol$'
-           OPENCODE_TEAM_DEEP_AUDIT_REPORT_PLUGIN="$test_home/data/deep-audit/plugins/report-plugin.mjs" node tests/deep-audit-report.test.mjs
-           OPENCODE_TEAM_DEEP_AUDIT_SCANNER_PLUGIN="$test_home/data/deep-audit/plugins/scanner-plugin.mjs" OPENCODE_TEAM_DEEP_AUDIT_SCANNER_ROOT="$shared_dependencies/deep-audit/scanners" OPENCODE_TEAM_DEEP_AUDIT_RULES_ROOT="$package_root/teams/deep-audit/rules" node tests/deep-audit-scanner.test.mjs
-           audit_python="$(awk -F= '$1 == "OPENCODE_TEAM_PYTHON" { print substr($0, index($0, "=") + 1) }' "$test_home/config/deep-audit/team-runtime.conf")"
-           OPENCODE_TEAM_PYTHON="$audit_python" bash tests/deep-audit-sandbox.test.sh
-            if OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team deep-audit-doctor >"$test_home/deep-audit-doctor.out" 2>&1; then
-              echo "Deep Audit doctor should remain NOT READY without profile OAuth/scanner dependencies in clean CI" >&2
-              exit 1
-            fi
-            rg -q 'Runtime tool state[[:space:]]+VERIFIED .*Serena MCP connected/read-only call executed; no model request' "$test_home/deep-audit-doctor.out"
-            rg -q 'Deep Audit models[[:space:]]+OK' "$test_home/deep-audit-doctor.out"
-           rg -q 'Read-only sandbox[[:space:]]+OK' "$test_home/deep-audit-doctor.out"
-           rg -q 'Deep Audit auth[[:space:]]+REQUIRED' "$test_home/deep-audit-doctor.out"
-           for scanner in jscpd ast-grep semgrep gitleaks osv-scanner ruff vulture knip bandit pip-audit sqlfluff pytest; do
-             rg -q "${scanner}[[:space:]]+AVAILABLE" "$test_home/deep-audit-doctor.out"
-           done
-           opencode --version
-          opencode_prefix="$(brew --prefix opencode)"
-          test -x "$opencode_prefix/bin/opencode"
-
-          managed_python="$(awk -F= '$1 == "OPENCODE_TEAM_PYTHON" { print substr($0, index($0, "=") + 1) }' "$test_home/config/best/team-runtime.conf")"
-          test -x "$managed_python"
-          case "$managed_python" in
-            "$shared_dependencies/python/"*) ;;
-            *) echo "managed Python escaped dependency root: $managed_python" >&2; exit 1 ;;
-          esac
-          MANAGED_PYTHON_ROOT="$shared_dependencies/python" "$managed_python" - <<'PY'
-          import pathlib
-          import plistlib
-          import sqlite3
-          import sys
-          import xml.parsers.expat
-
-          root = pathlib.Path(__import__("os").environ["MANAGED_PYTHON_ROOT"]).resolve()
-          paths = [sys.executable, sys.prefix, sys.base_prefix, getattr(sys, "_base_executable", None)]
-          assert sys.version_info[:2] == (3, 13), sys.version
-          for value in paths:
-              assert value is not None
-              assert pathlib.Path(value).resolve().is_relative_to(root), (value, root)
-          plistlib.dumps({"managed": True})
-          sqlite3.connect(":memory:").close()
-          xml.parsers.expat.ParserCreate()
-          PY
-
-          test -x "$shared_dependencies/bin/serena"
-           for team in best best-ecc deep-audit go openai daily; do
-            test -f "$test_home/config/$team/team-runtime.conf"
-            test -f "$test_home/config/$team/opencode.jsonc"
-          done
-
           package_root="$(brew --prefix opencode-team)/libexec"
-          for required_file in \
-            "$package_root/shared/response-copy/package.json" \
-            "$package_root/shared/response-copy/runtime-source.js" \
-            "$package_root/shared/response-copy/safe-parts.js" \
-            "$package_root/shared/response-copy/exporter.js" \
-            "$package_root/shared/response-copy/formatter.js" \
-            "$package_root/shared/response-copy/response-copy-plugin.js" \
-             "$package_root/teams/best/tui.json.template" \
-             "$package_root/teams/best/oh-my-openagent.jsonc.template" \
-             "$package_root/teams/best/omo.jsonc.template" \
-             "$package_root/teams/best/best-native-router.mjs" \
-             "$package_root/teams/best/best-router-contract.mjs" \
-             "$package_root/teams/best-ecc/opencode.jsonc.template" \
-             "$package_root/teams/best-ecc/omo.jsonc.template" \
-             "$package_root/teams/best-ecc/setup-ecc.sh" \
-              "$package_root/teams/best-ecc/claude-config/settings.json.template" \
-               "$package_root/teams/deep-audit/opencode.jsonc.template" \
-               "$package_root/teams/deep-audit/team-runtime.conf.template" \
-               "$package_root/teams/deep-audit/runtime-env.sh" \
-               "$package_root/teams/deep-audit/setup-ecc.sh" \
-              "$package_root/teams/deep-audit/report-plugin.mjs.template" \
-               "$package_root/teams/deep-audit/scanner-plugin.mjs.template" \
-               "$package_root/teams/deep-audit/test-runner-plugin.mjs.template" \
-               "$package_root/teams/deep-audit/test-runner-integrity.mjs" \
-               "$package_root/teams/deep-audit/setup-test-runners.sh" \
-               "$package_root/teams/deep-audit/test-runners/images.lock.json" \
-               "$package_root/teams/deep-audit/test-runners/python.Dockerfile" \
-               "$package_root/teams/deep-audit/test-runners/php.Dockerfile" \
-               "$package_root/teams/deep-audit/test-runners/python-requirements.txt" \
-               "$package_root/teams/deep-audit/bin/test-runner-health.mjs" \
-              "$package_root/teams/deep-audit/setup-scanners.sh" \
-              "$package_root/teams/deep-audit/scanners/package.json" \
-              "$package_root/teams/deep-audit/scanners/package-lock.json" \
-              "$package_root/teams/deep-audit/scanners/pyproject.toml" \
-              "$package_root/teams/deep-audit/scanners/uv.lock" \
-              "$package_root/teams/deep-audit/rules/semgrep.yml" \
-              "$package_root/teams/deep-audit/rules/ast-grep.yml" \
-               "$package_root/teams/deep-audit/report-schema.md" \
-              "$package_root/teams/deep-audit/bin/read-only-opencode.sh" \
-              "$package_root/teams/deep-audit/bin/report.mjs" \
-              "$package_root/tests/deep-audit-cli.test.mjs" \
-              "$package_root/tests/deep-audit-report.test.mjs" \
-              "$package_root/tests/deep-audit-scanner.test.mjs" \
-              "$package_root/tests/deep-audit-sandbox.test.sh" \
-               "$package_root/tests/deep-audit-runtime-smoke.sh" \
-               "$package_root/tests/deep-audit-test-runner.e2e.mjs" \
-             "$package_root/teams/best-ecc/ecc.lock" \
-             "$package_root/tests/best-native-router.test.mjs" \
-             "$package_root/tests/best-ecc-config.test.mjs" \
-             "$package_root/tests/best-omo-v5-patch.test.mjs" \
-             "$package_root/teams/go/tui.json.template" \
-            "$package_root/teams/openai/tui.json.template" \
-            "$package_root/core/lib/runtime-manifest.mjs" \
-            "$package_root/core/lib/runtime-lifecycle.mjs" \
-            "$package_root/core/lib/runtime-reaper.sh"; do
-            test -f "$required_file"
-          done
-           test -f "$test_home/state/maintenance/launchagents/it.danilodantoni.opencode-team.runtime-gc.plist"
-           node --test "$package_root/shared/response-copy/tests/"*.test.mjs
-             OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" bash "$GITHUB_WORKSPACE/tests/config-parity.sh"
-           OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team doctor
-            OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_TEST_DEPENDENCY_ROOT="$shared_dependencies" bash "$GITHUB_WORKSPACE/tests/setup-smoke.sh"
-          bash "$package_root/tests/runtime-readiness.test.sh"
-          if rg -n '/Users/|\.opencode-team-staging|go-final-ux-v1|best-shared-v1' "$test_home/config" "$test_home/state" "$test_home/cache/runtime"; then
-            exit 1
-          fi
-          bash "$package_root/teams/best/verify-omo.sh" "$shared_dependencies/best/node_modules/oh-my-openagent/dist/index.js"
-          bash "$package_root/teams/go/verify-omo.sh" "$shared_dependencies/go/node_modules/oh-my-openagent/dist/index.js"
+          CI=true OPENCODE_TEAM_PACKAGE_ROOT="$package_root" bash "$package_root/tests/setup-smoke.sh"
+          gitleaks dir "$package_root"
 
       - name: Formula test and audit
         timeout-minutes: 10
         run: |
           brew test ThomasDanilo96/opencode-team/opencode-team
           brew audit --strict --formula ThomasDanilo96/opencode-team/opencode-team
-
-      - name: Installed maintenance regression
-        timeout-minutes: 15
-        run: |
-          node_prefix="$(brew --prefix node@22)"
-          export PATH="$node_prefix/bin:$PATH"
-          package_root="$(brew --prefix opencode-team)/libexec"
-          expected_version="$(tr -d '[:space:]' < VERSION)"
-          test "$(opencode-team version)" = "OpenCode Team $expected_version"
-          test -f "$package_root/shared/maintenance/run-maintenance.sh"
-          test -f "$package_root/shared/maintenance/opencode-cleanup.py"
-          test -f "$package_root/shared/maintenance/openai-state-retention.mjs"
-          test -f "$package_root/tests/maintenance-smoke.sh"
-           OPENCODE_TEAM_CLI=opencode-team \
-             bash "$GITHUB_WORKSPACE/tests/maintenance-smoke.sh"
-
-      - name: Disposable runtime smoke
-        timeout-minutes: 15
-        run: |
-          test_home="$RUNNER_TEMP/opencode-team-clean-install-home"
-          test -f "$test_home/config/best/team-runtime.conf" || { echo 'Runtime smoke / setup: clean-room setup output is missing' >&2; exit 1; }
-          trap 'rm -rf "$test_home"' EXIT
-           shared_dependencies="$RUNNER_TEMP/opencode-team-clean-install-dependencies"
-             tmux_socket="opencode-team-ci-$$"
-          export TMUX_TMPDIR=/tmp
-          for team in best best-ecc deep-audit go openai daily; do
-            run_dir="$(mktemp -d)"
-            log="$run_dir/runtime.log"
-            session="opencode-team-ci-$team-$$"
-            launch_team="$team"
-            if [ "$team" = best ]; then launch_team=best-opencode; fi
-            tmux -L "$tmux_socket" new-session -d -s "$session" \
-              "cd '$run_dir' && HOME='$test_home' OPENCODE_TEAM_HOME='$test_home' OPENCODE_TEAM_DEPENDENCY_ROOT='$shared_dependencies' opencode-team '$launch_team' >'$log' 2>&1"
-            ready=0
-            for _ in $(seq 1 45); do
-              readiness="$(HOME="$test_home" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team runtime-readiness 2>/dev/null || true)"
-              if printf '%s' "$readiness" | jq -e '(.ready == true) and any(.runs[]; .state == "ACTIVE" and (.parent_session_id | length > 0) and .identity.launcher == "alive" and .identity.server == "alive")' >/dev/null 2>&1; then ready=1; break; fi
-              if ! tmux -L "$tmux_socket" has-session -t "$session" 2>/dev/null; then break; fi
-              sleep 1
-            done
-            if [ "$ready" -ne 1 ]; then
-              echo "Runtime smoke did not become ready for $team; last readiness: $readiness" >&2
-              cat "$log" >&2
-              exit 1
-            fi
-            run_state_dir="$(find "$test_home/cache/runtime/$team/runs" -mindepth 1 -maxdepth 1 -type d -print -quit)"
-            if [ -z "$run_state_dir" ]; then
-              echo "Runtime smoke for $team reached READY without a run-state directory" >&2
-              tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
-              exit 1
-            fi
-            for _ in $(seq 1 15); do
-              if [ -s "$run_state_dir/attach.pid" ] && [ -f "$run_state_dir/attach.identity" ]; then break; fi
-              sleep 1
-            done
-            if [ ! -s "$run_state_dir/attach.pid" ] || [ ! -f "$run_state_dir/attach.identity" ]; then
-              echo "Runtime smoke could not find the $team attach process" >&2
-              tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
-              exit 1
-            fi
-            run_id="$(cat "$run_state_dir/run_id")"
-            attach_pid="$(cat "$run_state_dir/attach.pid")"
-            attach_identity="$run_state_dir/attach.identity"
-            if [ -z "$run_id" ] || [ -z "$attach_pid" ] || [ ! -f "$attach_identity" ]; then
-              echo "Runtime smoke cannot verify the $team attach identity" >&2
-              tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
-              exit 1
-            fi
-            identity_pid="$(awk -F= '$1 == "pid" { print $2 }' "$attach_identity")"
-            identity_run_id="$(awk -F= '$1 == "run_id" { print $2 }' "$attach_identity")"
-            identity_start_epoch="$(awk -F= '$1 == "start_epoch" { print $2 }' "$attach_identity")"
-            identity_role="$(awk -F= '$1 == "role" { print $2 }' "$attach_identity")"
-            attach_start="$(LC_ALL=C ps -p "$attach_pid" -o lstart= 2>/dev/null || true)"
-            attach_start_epoch="$(LC_ALL=C date -j -f "%a %b %d %T %Y" "$attach_start" "+%s" 2>/dev/null || true)"
-            if [ "$identity_pid" != "$attach_pid" ] || [ "$identity_run_id" != "$run_id" ] || [ "$identity_start_epoch" != "$attach_start_epoch" ] || [ "$identity_role" != "attach" ]; then
-              echo "Runtime smoke refused to signal an unverified $team attach process" >&2
-              tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
-              exit 1
-            fi
-            if ! kill -TERM "$attach_pid"; then
-              echo "Runtime smoke could not signal the verified $team attach process $attach_pid" >&2
-              tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
-              exit 1
-            fi
-            runtime_stopped=0
-            for _ in $(seq 1 30); do
-              if [ ! -d "$run_state_dir" ]; then runtime_stopped=1; break; fi
-              sleep 1
-            done
-            if [ "$runtime_stopped" -ne 1 ]; then
-              echo "Runtime smoke did not cleanly stop $team attach process $attach_pid" >&2
-              cat "$log" >&2
-            fi
-            tmux -L "$tmux_socket" kill-session -t "$session" 2>/dev/null || true
-            for _ in $(seq 1 15); do
-              if ! ps -axo pid=,command= | rg "$test_home" | rg -v 'rg ' >/dev/null; then break; fi
-              sleep 1
-            done
-            remaining_processes="$(ps -axo pid=,command= | rg "$test_home" | rg -v 'rg ' || true)"
-            if [ -n "$remaining_processes" ]; then
-              echo "Runtime smoke left processes for $team:" >&2
-              printf '%s\n' "$remaining_processes" >&2
-              exit 1
-            fi
-            remaining_runs="$(find "$test_home/cache/runtime/$team/runs" -mindepth 1 -maxdepth 1 -type d -print 2>/dev/null || true)"
-            if [ -n "$remaining_runs" ]; then
-              echo "Runtime smoke left run state for $team:" >&2
-              printf '%s\n' "$remaining_runs" >&2
-              echo "Runtime log for $team:" >&2
-              cat "$log" >&2
-              while IFS= read -r run_state_dir; do
-                [ -n "$run_state_dir" ] || continue
-                echo "Runtime state files for $team ($run_state_dir):" >&2
-                for state_file in state status failure_reason; do
-                  if [ -f "$run_state_dir/$state_file" ]; then
-                    printf '%s: ' "$state_file" >&2
-                    tr '\n' ' ' < "$run_state_dir/$state_file" >&2
-                    printf '\n' >&2
-                  fi
-                done
-                node "$package_root/core/lib/runtime-manifest.mjs" "$run_state_dir" status >&2 || true
-              done <<< "$remaining_runs"
-              exit 1
-            fi
-           if [ "$runtime_stopped" -ne 1 ]; then exit 1; fi
-           rm -rf "$run_dir"
-          done
 
   publish-stable-release:
     needs: [source-validation, release_state]

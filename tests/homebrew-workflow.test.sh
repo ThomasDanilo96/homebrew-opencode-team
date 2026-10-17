@@ -99,8 +99,10 @@ if "gh run list" not in official or "prepublication-staging" not in official or 
     raise SystemExit("Phase B must prove Phase A succeeded for the exact tagged candidate commit")
 
 clean_install = text.split("  clean-install:\n", 1)[1].split("  publish-stable-release:\n", 1)[0]
-if clean_install.count("start-docker-desktop.sh") != 1 or "Provision Docker Desktop for isolated runtime tests" not in clean_install:
-    raise SystemExit("Docker Desktop provisioning must stay a single named runtime-test gate")
+if "start-docker-desktop.sh" in clean_install or "brew install --cask docker" in clean_install or "opencode-team setup" in clean_install or "deep-audit-runtime-smoke.sh" in clean_install:
+    raise SystemExit("stable Homebrew clean-install must not repeat Docker/profile provisioning")
+if 'tests/setup-smoke.sh' not in clean_install or 'gitleaks dir "$package_root"' not in clean_install:
+    raise SystemExit("stable Homebrew clean-install must run packaged non-Docker smoke and Gitleaks")
 if "inputs.publish_stable_release" not in clean_install:
     raise SystemExit("release publication dispatch must reuse, not repeat, the verified stable clean-install")
 
