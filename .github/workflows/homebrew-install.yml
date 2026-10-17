@@ -101,7 +101,6 @@ jobs:
           test -n "$opencode_version"
           ruby -e 'abort "OpenCode #{ARGV[0]} is below required minimum 1.18.30" if Gem::Version.new(ARGV[0]) < Gem::Version.new("1.18.30")' "$opencode_version"
           brew install --force-bottle opencode gitleaks
-          docker info --format '{{.OSType}} {{.Architecture}}'
 
       - name: Build candidate source artifact and ephemeral formula
         run: |
@@ -199,7 +198,6 @@ jobs:
             exit 1
           fi
           printf 'Verified official archive SHA-256: %s\n' "$actual_sha256"
-          docker info --format '{{.OSType}} {{.Architecture}}'
 
       - name: Verify the published archive with a temporary formula
         env:
