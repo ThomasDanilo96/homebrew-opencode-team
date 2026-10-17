@@ -2,8 +2,19 @@ name: Homebrew Install
 
 on:
   push:
-    branches: [master]
+    branches: [master, "prerelease/**"]
+    tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      official_archive_sha256:
+        description: SHA-256 measured from the published vVERSION source archive after the authorized tag exists
+        required: false
+        type: string
+      publish_stable_release:
+        description: Create the GitHub Release only after the stable tap clean-install passes
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   source-validation:
@@ -20,6 +31,8 @@ jobs:
           actionlint .github/workflows/homebrew-install.yml
           bash tests/homebrew-workflow.test.sh
           ruby -c Formula/opencode-team.rb
+          ruby -c .github/scripts/render-staging-formula.rb
+          node --test tests/opencode-team-launcher-regression.test.mjs
           node --test tests/best-ecc-config.test.mjs tests/best-cli-routing.test.mjs
           node --test tests/deep-audit-cli.test.mjs
           node --test tests/deep-audit-report.test.mjs
@@ -35,6 +48,7 @@ jobs:
           node --test tests/best-native-router.test.mjs
 
   release_state:
+    needs: source-validation
     runs-on: ubuntu-latest
     outputs:
       published: ${{ steps.release_state.outputs.published }}
@@ -48,27 +62,178 @@ jobs:
           expected_version="$(tr -d '[:space:]' < VERSION)"
           [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           tag="v$expected_version"
-          if tag_result="$(git ls-remote --exit-code origin "refs/tags/$tag" 2>&1)"; then
-            if [[ -z "$tag_result" ]]; then
-              echo "::error::git ls-remote succeeded without resolving target tag $tag"
+          if ! tag_result="$(git ls-remote origin "refs/tags/$tag" 2>&1)"; then
+            printf 'Unable to check publication state for %s:\n%s\n' "$tag" "$tag_result" >&2
+            exit 1
+          fi
+          if [[ -z "$tag_result" ]]; then
+            echo "published=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::Target tag $tag is not published yet; skipping tap installation until a later workflow dispatch."
+          else
+            resolved_ref="$(printf '%s\n' "$tag_result" | awk 'NR == 1 { print $2 }')"
+            if [[ "$resolved_ref" != "refs/tags/$tag" ]]; then
+              printf 'Unexpected ref while checking %s: %s\n' "$tag" "$tag_result" >&2
               exit 1
             fi
             echo "published=true" >> "$GITHUB_OUTPUT"
             echo "Target tag $tag is published; running clean-room tap installation."
-          else
-            tag_status=$?
-            if [ "$tag_status" -eq 2 ] && [[ -z "$tag_result" ]]; then
-              echo "published=false" >> "$GITHUB_OUTPUT"
-              echo "::notice::Target tag $tag is not published yet; skipping tap installation until a later push."
-            else
-              printf '%s\n' "$tag_result" >&2
-              exit "$tag_status"
-            fi
           fi
+
+  prepublication-staging:
+    needs: [source-validation, release_state]
+    if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/prerelease/') && needs.release_state.outputs.published == 'false'
+    # This runner is disposable. The staging keg/formula never touches the stable tap.
+    runs-on: macos-26
+    timeout-minutes: 60
+    steps:
+      - name: Checkout candidate source
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Refresh Homebrew metadata and preflight bottles
+        run: |
+          brew update
+          for dependency in git jq node@22 ripgrep terminal-notifier tmux uv opencode gitleaks; do
+            brew fetch --force-bottle "$dependency"
+          done
+          opencode_version="$(brew info --json=v2 opencode | jq -r '.formulae[0].versions.stable')"
+          test -n "$opencode_version"
+          ruby -e 'abort "OpenCode #{ARGV[0]} is below required minimum 1.18.30" if Gem::Version.new(ARGV[0]) < Gem::Version.new("1.18.30")' "$opencode_version"
+          brew install --force-bottle opencode gitleaks
+          docker info --format '{{.OSType}} {{.Architecture}}'
+
+      - name: Build candidate source artifact and ephemeral formula
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          candidate_branch="prerelease/v$version"
+          test "$GITHUB_REF_NAME" = "$candidate_branch"
+          candidate_sha="$(git rev-parse HEAD)"
+          test "$candidate_sha" = "$GITHUB_SHA"
+          archive="$RUNNER_TEMP/opencode-team-$version-staging.tar.gz"
+          brew tap-new --no-git opencode-team/staging
+          formula="$(brew --repo opencode-team/staging)/Formula/opencode-team-staging.rb"
+          git archive --format=tar.gz --prefix="opencode-team-$version/" "$candidate_sha" >"$archive"
+          # This digest belongs only to the disposable staging artifact and is never copied
+          # into Formula/opencode-team.rb or used as a release checksum.
+          staging_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          ruby .github/scripts/render-staging-formula.rb \
+            Formula/opencode-team.rb "$formula" OpencodeTeamStaging "$version" \
+            "file://$archive" "$staging_sha256"
+          ruby -c "$formula"
+          printf 'staging_artifact=%s\nstaging_formula=%s\nstaging_sha256=%s\n' \
+            "$archive" "$formula" "$staging_sha256" >>"$GITHUB_OUTPUT"
+
+      - name: Install and test isolated staging formula
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+        run: |
+          formula="opencode-team/staging/opencode-team-staging"
+          version="$(tr -d '[:space:]' < VERSION)"
+          brew install --verbose "$formula"
+          brew test --verbose --force "$formula"
+          test "$(command -v opencode-team)" = "$(brew --prefix)/bin/opencode-team"
+          test "$(cd "$RUNNER_TEMP" && opencode-team version)" = "OpenCode Team $version"
+          package_root="$(brew --prefix opencode-team/staging/opencode-team-staging)/libexec"
+          test -x "$package_root/bin/opencode-team"
+          test -x "$package_root/teams/deep-audit/bin/read-only-opencode.sh"
+          test -f "$package_root/teams/deep-audit/setup-scanners.sh"
+          test -f "$package_root/teams/deep-audit/setup-test-runners.sh"
+          node --test "$package_root/tests/opencode-team-launcher-regression.test.mjs"
+          gitleaks dir "$package_root"
+          CI=true OPENCODE_TEAM_TEST_SKIP_TIME_MACHINE=1 \
+            OPENCODE_TEAM_PACKAGE_ROOT="$package_root" bash "$package_root/tests/setup-smoke.sh"
+
+  official-archive-validation:
+    needs: [source-validation, release_state]
+    if: needs.release_state.outputs.published == 'true' && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.official_archive_sha256 != ''))
+    runs-on: macos-26
+    timeout-minutes: 60
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout release procedure
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Preflight inputs, bottles, and official archive checksum
+        env:
+          EXPECTED_ARCHIVE_SHA256: ${{ inputs.official_archive_sha256 }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -n "$EXPECTED_ARCHIVE_SHA256" ]; then
+            [[ "$EXPECTED_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
+          fi
+          brew update
+          for dependency in git jq node@22 ripgrep terminal-notifier tmux uv opencode gitleaks; do
+            brew fetch --force-bottle "$dependency"
+          done
+          opencode_version="$(brew info --json=v2 opencode | jq -r '.formulae[0].versions.stable')"
+          test -n "$opencode_version"
+          ruby -e 'abort "OpenCode #{ARGV[0]} is below required minimum 1.18.30" if Gem::Version.new(ARGV[0]) < Gem::Version.new("1.18.30")' "$opencode_version"
+          brew install --force-bottle opencode gitleaks
+          version="$(tr -d '[:space:]' < VERSION)"
+          candidate_branch="prerelease/v$version"
+          tag_commit="$(git rev-parse HEAD)"
+          test "$tag_commit" = "$GITHUB_SHA"
+          phase_a_runs="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "Homebrew Install" --branch "$candidate_branch" --limit 100 --json databaseId,headSha,event,conclusion)"
+          phase_a_run_id="$(printf '%s' "$phase_a_runs" | jq -r --arg sha "$tag_commit" '[.[] | select(.headSha == $sha and .event == "workflow_dispatch" and .conclusion == "success")][0].databaseId // empty')"
+          if [ -z "$phase_a_run_id" ]; then
+            printf 'No successful Phase A run found for candidate commit %s on %s\n' "$tag_commit" "$candidate_branch" >&2
+            exit 1
+          fi
+          phase_a_job="$(gh run view "$phase_a_run_id" --repo "$GITHUB_REPOSITORY" --json jobs --jq '.jobs[] | select(.name == "prepublication-staging") | .conclusion')"
+          if [ "$phase_a_job" != success ]; then
+            printf 'Phase A staging job for %s did not pass (result: %s)\n' "$tag_commit" "${phase_a_job:-missing}" >&2
+            exit 1
+          fi
+          archive="$RUNNER_TEMP/opencode-team-$version-official.tar.gz"
+          archive_url="https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v$version.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 "$archive_url" -o "$archive"
+          actual_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          if [ -n "$EXPECTED_ARCHIVE_SHA256" ] && [ "$actual_sha256" != "$EXPECTED_ARCHIVE_SHA256" ]; then
+            printf 'Official archive SHA-256 mismatch: expected %s, got %s\n' "$EXPECTED_ARCHIVE_SHA256" "$actual_sha256" >&2
+            exit 1
+          fi
+          printf 'Verified official archive SHA-256: %s\n' "$actual_sha256"
+          docker info --format '{{.OSType}} {{.Architecture}}'
+
+      - name: Verify the published archive with a temporary formula
+        env:
+          HOMEBREW_NO_INSTALL_CLEANUP: "1"
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          EXPECTED_ARCHIVE_SHA256: ${{ inputs.official_archive_sha256 }}
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          archive_url="https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v$version.tar.gz"
+          archive="$RUNNER_TEMP/opencode-team-$version-official.tar.gz"
+          actual_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          if [ -n "$EXPECTED_ARCHIVE_SHA256" ] && [ "$actual_sha256" != "$EXPECTED_ARCHIVE_SHA256" ]; then
+            printf 'Official archive SHA-256 mismatch: expected %s, got %s\n' "$EXPECTED_ARCHIVE_SHA256" "$actual_sha256" >&2
+            exit 1
+          fi
+          brew tap-new --no-git opencode-team/staging
+          formula="$(brew --repo opencode-team/staging)/Formula/opencode-team-official.rb"
+          ruby .github/scripts/render-staging-formula.rb \
+            Formula/opencode-team.rb "$formula" OpencodeTeamOfficial "$version" \
+            "$archive_url" "$actual_sha256"
+          ruby -c "$formula"
+          brew install --verbose opencode-team/staging/opencode-team-official
+          brew test --verbose --force opencode-team/staging/opencode-team-official
+          package_root="$(brew --prefix opencode-team/staging/opencode-team-official)/libexec"
+          test "$(command -v opencode-team)" = "$(brew --prefix)/bin/opencode-team"
+          test "$(cd "$RUNNER_TEMP" && opencode-team version)" = "OpenCode Team $version"
+          node --test "$package_root/tests/opencode-team-launcher-regression.test.mjs"
+          gitleaks dir "$package_root"
+          CI=true OPENCODE_TEAM_TEST_SKIP_TIME_MACHINE=1 \
+            OPENCODE_TEAM_PACKAGE_ROOT="$package_root" bash "$package_root/tests/setup-smoke.sh"
 
   clean-install:
     needs: release_state
-    if: needs.release_state.outputs.published == 'true'
+    if: needs.release_state.outputs.published == 'true' && !((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.official_archive_sha256 != ''))
     # The current node@22 bottle is available on Tahoe; macos-14 would build V8 from source.
     runs-on: macos-26
     timeout-minutes: 60
@@ -76,13 +241,40 @@ jobs:
       - name: Checkout development code
         uses: actions/checkout@v4
 
-      - name: Refresh Homebrew metadata
-        run: brew update
+      - name: Refresh Homebrew metadata and preflight dependencies
+        run: |
+          brew update
+          # Fail before installing the formula if any direct dependency lacks a runner bottle.
+          for dependency in git jq node@22 ripgrep terminal-notifier tmux uv opencode; do
+            brew fetch --force-bottle "$dependency"
+          done
+          opencode_version="$(brew info --json=v2 opencode | jq -r '.formulae[0].versions.stable')"
+          test -n "$opencode_version"
+          ruby -e 'abort "OpenCode #{ARGV[0]} is below required minimum 1.18.30" if Gem::Version.new(ARGV[0]) < Gem::Version.new("1.18.30")' "$opencode_version"
 
       - name: Tap and trust formula
         run: |
           brew tap ThomasDanilo96/opencode-team
           brew trust --formula ThomasDanilo96/opencode-team/opencode-team
+
+      - name: Verify formula selects the published release archive
+        run: |
+          expected_version="$(tr -d '[:space:]' < VERSION)"
+          expected_url="https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v${expected_version}.tar.gz"
+          formula_url="$(brew info --json=v2 ThomasDanilo96/opencode-team/opencode-team | jq -r '.formulae[0].urls.stable.url')"
+          formula_sha256="$(brew info --json=v2 ThomasDanilo96/opencode-team/opencode-team | jq -r '.formulae[0].urls.stable.checksum')"
+          source_sha256="$(ruby -e 'puts File.read("Formula/opencode-team.rb")[/^  sha256 "([0-9a-f]{64})"$/, 1]')"
+          if [ "$formula_url" != "$expected_url" ]; then
+            printf 'Formula archive mismatch: expected %s, got %s\n' "$expected_url" "$formula_url" >&2
+            exit 1
+          fi
+          if [ -z "$source_sha256" ] || [ "$formula_sha256" != "$source_sha256" ]; then
+            printf 'Tap formula checksum mismatch: source %s, tap %s\n' "$source_sha256" "$formula_sha256" >&2
+            exit 1
+          fi
+          # Fetch the same source archive selected by the tap formula; Homebrew verifies
+          # its declared SHA-256 during installation.
+          brew fetch --force ThomasDanilo96/opencode-team/opencode-team
 
       - name: Install from tap
         run: HOMEBREW_NO_INSTALL_CLEANUP=1 HOMEBREW_NO_AUTO_UPDATE=1 brew install --verbose ThomasDanilo96/opencode-team/opencode-team
@@ -93,6 +285,7 @@ jobs:
           uname -m
           brew --prefix
           expected_version="$(tr -d '[:space:]' < VERSION)"
+          test "$(command -v opencode-team)" = "$(brew --prefix)/bin/opencode-team"
           test "$(opencode-team version)" = "OpenCode Team $expected_version"
           node --version
           git --version
@@ -105,15 +298,16 @@ jobs:
           test -x "$package_root/bin/opencode-team"
           test "$(opencode-team version)" = "OpenCode Team $expected_version"
 
+      - name: Verify launcher in installed release archive
+        run: node --test "$(brew --prefix opencode-team)/libexec/tests/opencode-team-launcher-regression.test.mjs"
+
       - name: Clean-room setup and doctor
         run: |
           test_home="$(mktemp -d)"
           trap 'rm -rf "$test_home"' EXIT
-           shared_dependencies="$test_home/shared-dependencies"
-           OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup
-           OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team best-ecc-setup
-           OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team deep-audit-setup
-           ecc_models="$(XDG_CONFIG_HOME="$test_home/config/best-ecc/xdg-config" XDG_DATA_HOME="$test_home/data/best-ecc/data" OPENCODE_CONFIG="$test_home/config/best-ecc/opencode.jsonc" OPENCODE_CONFIG_DIR="$test_home/config/best-ecc" OPENCODE_DISABLE_PROJECT_CONFIG=1 opencode models openai)"
+            shared_dependencies="$RUNNER_TEMP/opencode-team-clean-install-dependencies"
+            OPENCODE_TEAM_TEST_SKIP_TIME_MACHINE=1 OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup
+            ecc_models="$(XDG_CONFIG_HOME="$test_home/config/best-ecc/xdg-config" XDG_DATA_HOME="$test_home/data/best-ecc/data" OPENCODE_CONFIG="$test_home/config/best-ecc/opencode.jsonc" OPENCODE_CONFIG_DIR="$test_home/config/best-ecc" OPENCODE_DISABLE_PROJECT_CONFIG=1 opencode models openai)"
            printf '%s\n' "$ecc_models" | rg -q '^openai/gpt-6-luna$'
            go_models="$(XDG_CONFIG_HOME="$test_home/config/best-ecc/xdg-config" XDG_DATA_HOME="$test_home/data/best-ecc/data" OPENCODE_CONFIG="$test_home/config/best-ecc/opencode.jsonc" OPENCODE_CONFIG_DIR="$test_home/config/best-ecc" OPENCODE_DISABLE_PROJECT_CONFIG=1 opencode models opencode-go)"
            printf '%s\n' "$go_models" | rg -q '^opencode-go/qwen3\.7-plus$'
@@ -124,11 +318,12 @@ jobs:
            OPENCODE_TEAM_DEEP_AUDIT_SCANNER_PLUGIN="$test_home/data/deep-audit/plugins/scanner-plugin.mjs" OPENCODE_TEAM_DEEP_AUDIT_SCANNER_ROOT="$shared_dependencies/deep-audit/scanners" OPENCODE_TEAM_DEEP_AUDIT_RULES_ROOT="$package_root/teams/deep-audit/rules" node tests/deep-audit-scanner.test.mjs
            audit_python="$(awk -F= '$1 == "OPENCODE_TEAM_PYTHON" { print substr($0, index($0, "=") + 1) }' "$test_home/config/deep-audit/team-runtime.conf")"
            OPENCODE_TEAM_PYTHON="$audit_python" bash tests/deep-audit-sandbox.test.sh
-           if OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team deep-audit-doctor >"$test_home/deep-audit-doctor.out" 2>&1; then
-             echo "Deep Audit doctor should remain NOT READY without profile OAuth/scanner dependencies in clean CI" >&2
-             exit 1
-           fi
-           rg -q 'Deep Audit models[[:space:]]+OK' "$test_home/deep-audit-doctor.out"
+            if OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team deep-audit-doctor >"$test_home/deep-audit-doctor.out" 2>&1; then
+              echo "Deep Audit doctor should remain NOT READY without profile OAuth/scanner dependencies in clean CI" >&2
+              exit 1
+            fi
+            rg -q 'Runtime tool state[[:space:]]+VERIFIED .*Serena MCP connected/read-only call executed; no model request' "$test_home/deep-audit-doctor.out"
+            rg -q 'Deep Audit models[[:space:]]+OK' "$test_home/deep-audit-doctor.out"
            rg -q 'Read-only sandbox[[:space:]]+OK' "$test_home/deep-audit-doctor.out"
            rg -q 'Deep Audit auth[[:space:]]+REQUIRED' "$test_home/deep-audit-doctor.out"
            for scanner in jscpd ast-grep semgrep gitleaks osv-scanner ruff vulture knip bandit pip-audit sqlfluff pytest; do
@@ -228,9 +423,9 @@ jobs:
           done
            test -f "$test_home/state/maintenance/launchagents/it.danilodantoni.opencode-team.runtime-gc.plist"
            node --test "$package_root/shared/response-copy/tests/"*.test.mjs
-           OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" bash "$GITHUB_WORKSPACE/tests/config-parity.sh"
+             OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" bash "$GITHUB_WORKSPACE/tests/config-parity.sh"
            OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team doctor
-           OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_TEST_DEPENDENCY_ROOT="$test_home/setup-smoke-dependencies" bash "$GITHUB_WORKSPACE/tests/setup-smoke.sh"
+            OPENCODE_TEAM_PACKAGE_ROOT="$package_root" OPENCODE_TEAM_TEST_DEPENDENCY_ROOT="$shared_dependencies" bash "$GITHUB_WORKSPACE/tests/setup-smoke.sh"
           bash "$package_root/tests/runtime-readiness.test.sh"
           if rg -n '/Users/|\.opencode-team-staging|go-final-ux-v1|best-shared-v1' "$test_home/config" "$test_home/state" "$test_home/cache/runtime"; then
             exit 1
@@ -261,11 +456,9 @@ jobs:
         run: |
           test_home="$(mktemp -d)"
           trap 'rm -rf "$test_home"' EXIT
-          shared_dependencies="$test_home/shared-dependencies"
-           OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup >/dev/null
-           OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team best-ecc-setup >/dev/null
-           OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team deep-audit-setup >/dev/null
-           tmux_socket="opencode-team-ci-$$"
+           shared_dependencies="$RUNNER_TEMP/opencode-team-clean-install-dependencies"
+            OPENCODE_TEAM_TEST_SKIP_TIME_MACHINE=1 OPENCODE_TEAM_HOME="$test_home" OPENCODE_TEAM_DEPENDENCY_ROOT="$shared_dependencies" opencode-team setup >/dev/null
+            tmux_socket="opencode-team-ci-$$"
           export TMUX_TMPDIR=/tmp
           for team in best best-ecc deep-audit go openai daily; do
             run_dir="$(mktemp -d)"
@@ -366,6 +559,28 @@ jobs:
               done <<< "$remaining_runs"
               exit 1
             fi
-            if [ "$runtime_stopped" -ne 1 ]; then exit 1; fi
-            rm -rf "$run_dir"
+           if [ "$runtime_stopped" -ne 1 ]; then exit 1; fi
+           rm -rf "$run_dir"
           done
+
+  publish-stable-release:
+    needs: [source-validation, release_state, clean-install]
+    if: github.event_name == 'workflow_dispatch' && inputs.publish_stable_release && needs.release_state.outputs.published == 'true' && needs.clean-install.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout verified release source
+        uses: actions/checkout@v4
+
+      - name: Publish stable GitHub Release after green install gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          tag="v$version"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "GitHub Release $tag already exists; refusing to replace it." >&2
+            exit 1
+          fi
+          gh release create "$tag" --title "OpenCode Team $tag" --generate-notes --verify-tag

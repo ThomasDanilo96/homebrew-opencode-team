@@ -54,6 +54,7 @@ test("Deep Audit pins exact models, denies project mutation and omits OmO hooks"
   assert.equal(config.enabled_providers.includes("openai"), true);
   assert.equal(config.permission["*"], "deny");
   assert.equal(config.permission.external_directory["*"], "deny");
+  assert.equal(config.permission.external_directory["@REPORT_ROOT@/**"], "allow");
   assert.equal(config.permission.bash, "deny");
   assert.equal(config.permission.write, "deny");
   assert.equal(config.tools.bash, false);

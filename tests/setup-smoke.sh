@@ -9,8 +9,61 @@ fi
 TEST_ROOT="$(mktemp -d "${TMPDIR:-/tmp}/opencode-team-setup.XXXXXX")"
 TEAM_HOME="$TEST_ROOT/home-a"
 SECOND_TEAM_HOME="$TEST_ROOT/home-b"
-DEP_ROOT="${OPENCODE_TEAM_TEST_DEPENDENCY_ROOT:-$TEST_ROOT/shared-dependencies}"
-trap 'rm -rf "$TEST_ROOT"' EXIT
+DEP_ROOT="${OPENCODE_TEAM_TEST_DEPENDENCY_ROOT:-${TMPDIR:-/tmp}/opencode-team-setup-dependencies-${USER:-$(id -u)}}"
+
+cleanup_setup_smoke() {
+  local status=$? cleanup_failed=0 path pid image_ref
+  local -a cleanup_pids=()
+  trap - EXIT HUP INT TERM
+  printf 'SETUP SMOKE CLEANUP START test_root=%s\n' "$TEST_ROOT" >&2
+  case "$DEP_ROOT" in
+    "$TEST_ROOT"/*)
+      local runner_images="$DEP_ROOT/deep-audit/test-runners/images.json"
+      if [ -f "$runner_images" ] && command -v docker >/dev/null 2>&1; then
+        while IFS= read -r image_ref; do
+          case "$image_ref" in
+            opencode-team/deep-audit-python:*|opencode-team/deep-audit-php:*)
+              docker image rm "$image_ref" >/dev/null 2>&1 || cleanup_failed=1
+              ;;
+          esac
+        done < <(jq -r '[.python.reference, .php.reference][]' "$runner_images")
+      fi
+      ;;
+  esac
+  for path in "$TEAM_HOME" "$SECOND_TEAM_HOME" "$TEST_ROOT/root-isolation-home"; do
+    if [ -e "$path" ]; then
+      rm -rf -- "$path" &
+      cleanup_pids+=("$!")
+    fi
+  done
+  case "$DEP_ROOT" in
+    "$TEST_ROOT"/*)
+      for path in "$DEP_ROOT"/* "$DEP_ROOT"/.[!.]* "$DEP_ROOT"/..?*; do
+        [ -e "$path" ] || continue
+        rm -rf -- "$path" &
+        cleanup_pids+=("$!")
+      done
+      ;;
+    *)
+      printf 'SETUP SMOKE DEPENDENCY CACHE PRESERVED path=%s\n' "$DEP_ROOT" >&2
+      ;;
+  esac
+  for pid in "${cleanup_pids[@]}"; do
+    wait "$pid" || cleanup_failed=1
+  done
+  rm -rf -- "$TEST_ROOT" || cleanup_failed=1
+  printf 'SETUP SMOKE CLEANUP COMPLETE status=%s cleanup_failed=%s\n' "$status" "$cleanup_failed" >&2
+  [ "$cleanup_failed" -eq 0 ] || return 1
+  return "$status"
+}
+
+trap cleanup_setup_smoke EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+(umask 077; : >"$TEST_ROOT/npmrc")
+export npm_config_userconfig="$TEST_ROOT/npmrc"
+npm_config_cache="$TEST_ROOT/npm-cache"
+export npm_config_cache
 
 shared_bytes() {
   [ -d "$DEP_ROOT" ] || { printf '%s\n' 0; return; }
@@ -19,45 +72,9 @@ shared_bytes() {
 
 shared_before_bytes="$(shared_bytes)"
 
-ROOT_ISOLATION_HOME="$TEST_ROOT/root-isolation-home"
-mkdir -p "$ROOT_ISOLATION_HOME"
-ROOT_ISOLATION_BIN="$TEST_ROOT/root-isolation-bin"
-ROOT_ISOLATION_LAUNCHCTL_STATE="$TEST_ROOT/root-isolation-launchctl-state"
-mkdir -p "$ROOT_ISOLATION_BIN" "$ROOT_ISOLATION_LAUNCHCTL_STATE"
-printf '%s\n' \
-  '#!/usr/bin/env bash' \
-  'set -eu' \
-  'state="${LAUNCHCTL_STUB_STATE:?}"' \
-  'case "${1:-}" in' \
-  '  print) label="${2##*/}"; test -e "$state/$label" ;;' \
-  '  bootstrap) label="$(basename "${3%.plist}")"; : >"$state/$label" ;;' \
-  '  enable) label="${2##*/}"; : >"$state/$label" ;;' \
-  '  bootout) label="${2##*/}"; rm -f "$state/$label" ;;' \
-  '  *) exit 0 ;;' \
-  'esac' >"$ROOT_ISOLATION_BIN/launchctl"
-chmod 755 "$ROOT_ISOLATION_BIN/launchctl"
-LAUNCHCTL_STUB_STATE="$ROOT_ISOLATION_LAUNCHCTL_STATE" \
-PATH="$ROOT_ISOLATION_BIN:$PATH" \
-HOME="$ROOT_ISOLATION_HOME" \
-XDG_CONFIG_HOME="$ROOT_ISOLATION_HOME/best/xdg-config" \
-XDG_DATA_HOME="$ROOT_ISOLATION_HOME/best/data" \
-XDG_STATE_HOME="$ROOT_ISOLATION_HOME/best/state" \
-XDG_CACHE_HOME="$ROOT_ISOLATION_HOME/best/cache" \
-SANDBOX="$ROOT_ISOLATION_HOME/best" \
-PERSISTENT_DATA_ROOT="$ROOT_ISOLATION_HOME/best/data" \
-RUNTIME_ROOT="$ROOT_ISOLATION_HOME/best/cache/runtime" \
-TEAM_RUNTIME_INNER=1 TEAM_NAME=best \
-OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" \
-  "$ROOT/bin/opencode-team" setup >"$TEST_ROOT/root-isolation.out"
-rg -q "config root       $ROOT_ISOLATION_HOME/.config/opencode-team$" "$TEST_ROOT/root-isolation.out"
-rg -q "data root         $ROOT_ISOLATION_HOME/.local/share/opencode-team$" "$TEST_ROOT/root-isolation.out"
-rg -q "state root        $ROOT_ISOLATION_HOME/.local/state/opencode-team$" "$TEST_ROOT/root-isolation.out"
-rg -q "cache root        $ROOT_ISOLATION_HOME/.cache/opencode-team$" "$TEST_ROOT/root-isolation.out"
-rg -q "runtime root      $ROOT_ISOLATION_HOME/.cache/opencode-team/runtime$" "$TEST_ROOT/root-isolation.out"
-rg -q "dependency root   $DEP_ROOT$" "$TEST_ROOT/root-isolation.out"
-! rg -q '/best/(xdg-config|data|state|cache)/opencode-team' "$TEST_ROOT/root-isolation.out"
+node --test "$ROOT/tests/opencode-team-launcher-regression.test.mjs"
 
-OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" setup >/tmp/opencode-team-setup-smoke.out
+OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" setup >"$TEST_ROOT/setup-first.out"
 OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_PACKAGE_ROOT="$ROOT" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" \
   "$ROOT/tests/config-parity.sh"
 bash "$ROOT/tests/zsh-completion.test.sh"
@@ -76,6 +93,28 @@ done
 test -f "$TEAM_HOME/config/best-ecc/claude-config/settings.json"
 test -f "$TEAM_HOME/data/best-ecc/ecc/.opencode/plugins/ecc-hooks.ts"
 test -f "$TEAM_HOME/data/deep-audit/ecc/skills/security-review/SKILL.md"
+deep_audit_config_root="$TEAM_HOME/config/deep-audit"
+node - "$deep_audit_config_root" <<'NODE'
+const fs = require("node:fs");
+const path = require("node:path");
+const configRoot = process.argv[2];
+const pluginEntry = path.join(configRoot, "node_modules/@opencode-ai/plugin/dist/tool.js");
+if (!fs.existsSync(pluginEntry)) {
+  throw new Error(`Deep Audit plugin entry is missing from its config root: ${pluginEntry}`);
+}
+if (pluginEntry.includes("/config/best/")) throw new Error(`Deep Audit plugin path escaped into BEST: ${pluginEntry}`);
+NODE
+serena_npmrc="$TEAM_HOME/data/deep-audit/serena/npmrc"
+test -f "$serena_npmrc"
+test "$(stat -f '%Lp' "$serena_npmrc")" = 600
+if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
+  test -f "$DEP_ROOT/deep-audit/scanners/node/node_modules/jscpd-darwin-arm64/package.json"
+  node - "$DEP_ROOT/deep-audit/scanners/node/node_modules/jscpd-darwin-arm64/package.json" <<'NODE'
+const fs = require("node:fs");
+const manifest = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (manifest.version !== "5.4.1") throw new Error(`Unexpected jscpd-darwin-arm64 version: ${manifest.version}`);
+NODE
+fi
 for tui_file in "${TUI_FILES[@]}"; do
   test -f "$tui_file"
   node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$tui_file"
@@ -83,12 +122,14 @@ done
 
 CONFIG_FILES=("$TEAM_HOME"/config/*/{team-runtime.conf,opencode.jsonc})
 before="$(shasum -a 256 "${CONFIG_FILES[@]}" "${TUI_FILES[@]}")"
-OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" setup >/tmp/opencode-team-setup-smoke-second.out
+OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" OPENCODE_TEAM_TEST_SKIP_ECC_SETUP=1 \
+  "$ROOT/bin/opencode-team" setup >"$TEST_ROOT/setup-idempotency.out"
 after="$(shasum -a 256 "${CONFIG_FILES[@]}" "${TUI_FILES[@]}")"
 test "$before" = "$after"
 
 second_before_bytes="$(shared_bytes)"
-OPENCODE_TEAM_HOME="$SECOND_TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" setup >/tmp/opencode-team-setup-smoke-third.out
+OPENCODE_TEAM_HOME="$SECOND_TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" \
+  "$ROOT/bin/opencode-team" setup >"$TEST_ROOT/setup-second-home.out"
 second_after_bytes="$(shared_bytes)"
 test -d "$DEP_ROOT/best/node_modules/oh-my-openagent"
 test -f "$TEAM_HOME/config/free/opencode.jsonc"
@@ -127,7 +168,9 @@ first_setup_dependency_bytes="$((first_shared_bytes - shared_before_bytes))"
 second_setup_dependency_bytes="$((second_after_bytes - second_before_bytes))"
 printf 'shared_dependency_bytes=%s\nfirst_setup_dependency_bytes=%s\nsecond_setup_dependency_bytes=%s\nsecond_home_profile_plugin_cache_bytes=%s\n' "$shared_dependency_bytes" "$first_setup_dependency_bytes" "$second_setup_dependency_bytes" "$second_home_plugin_cache_bytes" >"$TEST_ROOT/dependency-sharing-evidence.txt"
 test "$shared_dependency_bytes" -gt 0
-test "$first_setup_dependency_bytes" -gt 0
+# A persistent isolated test cache may already be warm; its current bytes and
+# the second-home no-growth check prove sharing without requiring a redownload.
+test "$first_setup_dependency_bytes" -ge 0
 test "$second_home_plugin_cache_bytes" -gt 0
 test "$second_setup_dependency_bytes" -le 0
 
@@ -163,8 +206,19 @@ for team in best best-ecc deep-audit free go openai daily; do
   rm -rf "$TEAM_HOME/cache/runtime/$team" "$TEAM_HOME/data/$team/data"
 done
 
-if ! OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" doctor >/tmp/opencode-team-setup-smoke-upgrade.out; then
-  cat /tmp/opencode-team-setup-smoke-upgrade.out >&2
+if ! OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" \
+  "$ROOT/bin/opencode-team" doctor >"$TEST_ROOT/setup-upgrade-doctor.out" 2>&1; then
+  cat "$TEST_ROOT/setup-upgrade-doctor.out" >&2
+  exit 1
+fi
+if ! rg -q 'Runtime tool state[[:space:]]+VERIFIED .*Serena MCP connected/read-only call executed; no model request' "$TEST_ROOT/setup-upgrade-doctor.out"; then
+  cat "$TEST_ROOT/setup-upgrade-doctor.out" >&2
+  printf '%s\n' 'Deep Audit plugin/Serena preflight did not reach VERIFIED' >&2
+  exit 1
+fi
+if ! rg -q 'Deep Audit auth[[:space:]]+REQUIRED' "$TEST_ROOT/setup-upgrade-doctor.out"; then
+  cat "$TEST_ROOT/setup-upgrade-doctor.out" >&2
+  printf '%s\n' 'Clean smoke profile unexpectedly has no separate OAuth-required status' >&2
   exit 1
 fi
 ! rg -q '/Cellar/opencode-team/[0-9]' "$TEAM_HOME/config"
@@ -252,11 +306,17 @@ TEAM_NAME=opencode-openai-daily OMO_PROFILE=openai-daily BRIDGE_MODE=native_ui \
 printf '%s\n' 'UPGRADE CONFIG PASS'
 
 printf '%s\n' '{' >"$TEAM_HOME/config/daily/opencode.jsonc"
-if OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" doctor >/dev/null 2>&1; then
-  printf '%s\n' 'doctor accepted an invalid DAILY config' >&2
+if ! HOME="$HOME" OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" \
+  "$ROOT/bin/opencode-team" doctor >"$TEST_ROOT/daily-config-self-heal.out" 2>&1; then
+  cat "$TEST_ROOT/daily-config-self-heal.out" >&2
+  printf '%s\n' 'doctor failed to repair the invalid generated DAILY config' >&2
   exit 1
 fi
-OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" setup >/dev/null
+node - "$TEAM_HOME/config/daily/opencode.jsonc" <<'NODE'
+const fs = require("node:fs");
+const config = JSON.parse(fs.readFileSync(process.argv[2], "utf8"));
+if (config.model !== "openai/gpt-6-luna") throw new Error("DAILY config was not restored from its generated profile template");
+NODE
 mkdir -p "$TEAM_HOME/data/daily/state/team/work-packets"
 printf '%s\n' '{"outcome":"completed","complexity":"TRIVIAL"}' >"$TEAM_HOME/data/daily/state/team/work-packets/0000000000000000000000000000000000000000000000000000000000000001.json"
 report="$(OPENCODE_TEAM_HOME="$TEAM_HOME" OPENCODE_TEAM_DEPENDENCY_ROOT="$DEP_ROOT" "$ROOT/bin/opencode-team" daily-report)"

@@ -86,17 +86,23 @@ test("real sandboxed OpenCode registers and executes the Deep Audit tools and Se
     assert.notEqual(config.agent["audit-orchestrator"].tools[tool], true, `orchestrator must not be enabled for mutative ${tool}`);
   }
 
-  const root = await realpath(await mkdtemp(join(tmpdir(), "deep-audit-runtime-tool-probe.")));
+  // Keep the macOS /var temporary path spelling in this fixture. Serena uses
+  // project_serena_folder_location relative to SERENA_HOME; canonicalizing the
+  // root to /private/var and then resolving it again can produce /private/private/var.
+  const root = await mkdtemp(join(tmpdir(), "deep-audit-runtime-tool-probe."));
   t.after(() => rm(root, { recursive: true, force: true }));
   const target = join(root, "fixture project with spaces");
   const serenaTarget = join(root, "Serena read-only fixture");
   const reports = join(process.env.OPENCODE_TEAM_DEEP_AUDIT_SANDBOX, "reports");
-  const xdgData = join(root, "xdg-data");
-  const xdgCache = join(root, "xdg-cache");
-  const xdgState = join(root, "xdg-state");
+  const xdgRoot = join(process.env.OPENCODE_TEAM_DEEP_AUDIT_SANDBOX, `runtime-tool-probe-${process.pid}`);
+  const xdgData = join(xdgRoot, "xdg-data");
+  const xdgCache = join(xdgRoot, "xdg-cache");
+  const xdgState = join(xdgRoot, "xdg-state");
   const serenaHome = join(root, "serena-home");
   const runtime = join(root, "runtime");
+  t.after(() => rm(xdgRoot, { recursive: true, force: true }));
   await Promise.all([target, serenaTarget, reports, xdgData, xdgCache, xdgState, serenaHome, runtime].map((path) => mkdir(path, { recursive: true, mode: 0o700 })));
+  await writeFile(join(serenaHome, "npmrc"), "", { mode: 0o600 });
   const profileSerenaHome = join(process.env.OPENCODE_TEAM_DEEP_AUDIT_SANDBOX, "serena");
   const profileSerenaConfig = (await readFile(join(profileSerenaHome, "serena_config.yml"), "utf8"))
     .replace("projects:\n  []", `projects:\n  - ${JSON.stringify(serenaTarget)}`)
@@ -139,6 +145,7 @@ test("real sandboxed OpenCode registers and executes the Deep Audit tools and Se
     RUNTIME_ROOT: runtime,
     SERENA_HOME: serenaHome,
     npm_config_cache: join(serenaHome, "npm-cache"),
+    npm_config_userconfig: join(serenaHome, "npmrc"),
     npm_config_audit: "false",
     npm_config_fund: "false",
     DEEP_AUDIT_TARGET_ROOT: target,
@@ -155,6 +162,12 @@ test("real sandboxed OpenCode registers and executes the Deep Audit tools and Se
     DEEP_AUDIT_DOCKER_BIN: process.env.OPENCODE_TEAM_DEEP_AUDIT_DOCKER_BIN,
     OPENCODE_PURE: undefined,
   };
+  for (const name of [
+    "OMO_PROFILE", "OPENCODE_PROFILE", "OPENCODE_BIN", "OPENCODE_PURE",
+    "OPENCODE_TEAM_HOME", "OPENCODE_TEAM_DEPENDENCY_ROOT", "OPENCODE_TEAM_PACKAGE_ROOT",
+    "OPENAI_API_KEY", "OPENAI_ACCESS_TOKEN", "ANTHROPIC_API_KEY", "AZURE_OPENAI_API_KEY", "OPENROUTER_API_KEY",
+    "GITHUB_TOKEN", "GH_TOKEN", "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+  ]) delete env[name];
   delete env.OPENCODE_BIN;
   delete env.OPENCODE_PURE;
 
@@ -182,7 +195,12 @@ test("real sandboxed OpenCode registers and executes the Deep Audit tools and Se
   assert.match(mcp.output, /connected/i, `Serena MCP must be live: ${mcp.output}`);
 
   const discovery = await runTool("deep_audit_test_discover", {});
-  const discoveryResult = JSON.parse(discovery).result;
+  let discoveryResult;
+  try {
+    discoveryResult = JSON.parse(discovery).result;
+  } catch (error) {
+    throw new Error(`deep_audit_test_discover returned non-JSON output: ${discovery.slice(0, 4000)}`, { cause: error });
+  }
   assert.match(discoveryResult.output, /npm-test/, "test discovery did not return the fixture suite");
   assert.equal(JSON.parse(discoveryResult.output).coverage.test_files, 1, `JavaScript test discovery omitted the fixture's test file: ${discoveryResult.output}`);
   assert.equal(JSON.parse(discoveryResult.output).coverage.suite_counts.discovered, 1);
@@ -241,15 +259,20 @@ test("real sandboxed OpenCode registers and executes the Deep Audit tools and Se
   assert.ok(reportDirectory, "report tool did not write the preflight bundle");
   const manifest = JSON.parse(await readFile(join(reports, reportDirectory, "execution-manifest.json"), "utf8"));
   assert.equal(manifest.model_usage_independently_verified, false);
-  const reportRead = await reviewerRead(join(reports, reportDirectory, "00_EXECUTIVE_SUMMARY.md"));
+  const reportSummary = await realpath(join(reports, reportDirectory, "00_EXECUTIVE_SUMMARY.md"));
+  const reportRead = await reviewerRead(reportSummary);
   assert.match(reportRead, /Runtime tool registration preflight only/, "reviewer could not read the generated report bundle");
 
   const serenaExecutable = process.env.OPENCODE_TEAM_DEEP_AUDIT_SERENA_BIN;
-  const serenaLauncher = (await readFile(serenaExecutable, "utf8")).split(/\r?\n/, 1)[0].replace(/^#!\s*/, "").trim();
-  const serenaPython = serenaLauncher.startsWith("/usr/bin/env ")
-    ? spawnSync("/bin/sh", ["-c", `command -v ${serenaLauncher.slice("/usr/bin/env ".length)}`], { encoding: "utf8" }).stdout.trim()
-    : serenaLauncher;
-  assert.ok(serenaPython && serenaPython.startsWith("/"), `could not resolve Serena's Python interpreter: ${serenaLauncher}`);
+  // Serena's MCP client dependency is installed in its profile-local uv tool
+  // environment, not the separate managed scanner/runtime Python. Resolve the
+  // interpreter from that owned tool root rather than shell-parsing a shebang
+  // through the host PATH (which can select unrelated commands).
+  const serenaPython = join(process.env.OPENCODE_TEAM_DEEP_AUDIT_DEPENDENCY_ROOT, "serena/serena-agent/bin/python");
+  assert.ok(serenaPython.startsWith("/"), `Serena tool environment is unavailable: ${serenaPython}`);
+  const pythonCheck = spawnSync(serenaPython, ["-c", "import mcp, sys; print(sys.executable)"], { encoding: "utf8" });
+  assert.equal(pythonCheck.status, 0, `Serena's profile-local Python cannot run its MCP client: ${pythonCheck.stderr}`);
+  assert.equal(await realpath(pythonCheck.stdout.trim()), await realpath(serenaPython), "MCP client must use the profile-managed Python interpreter");
   const mcpProbe = join(root, "serena-mcp-probe.py");
   await writeFile(mcpProbe, `import asyncio, json, os, sys
 from mcp import ClientSession, StdioServerParameters
@@ -301,7 +324,6 @@ asyncio.run(main())
   assert.match(serena.output, /SERENA_REFERENCES=.*consumer\.ts/, `Serena did not return a cross-file TypeScript reference: ${serena.output}`);
   const semanticEvidence = serena.output.split(/\r?\n/).filter((line) => /SERENA_(?:DEFINITION|REFERENCES)=/.test(line));
   t.diagnostic(`Serena LSP 5.1.3 / TypeScript 5.9.3 via real MCP; definition and cross-file reference verified: ${semanticEvidence.join(" | ")}`);
-  assert.equal(await realpath(target), target);
   assert.equal(treeDigest(target), originalTargetDigest, "runtime tool diagnostics changed the fixture");
   assert.equal(treeDigest(serenaTarget), originalSerenaDigest, "Serena changed its read-only fixture");
 });

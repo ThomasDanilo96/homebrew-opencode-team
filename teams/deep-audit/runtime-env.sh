@@ -9,6 +9,8 @@ export SERENA_HOME="$SANDBOX/serena"
 # Language-server packages are installed only in Serena's profile-owned cache;
 # never let npm use the user's potentially read-only/shared ~/.npm cache.
 export npm_config_cache="$SERENA_HOME/npm-cache"
+if [ ! -e "$SERENA_HOME/npmrc" ]; then (umask 077; : >"$SERENA_HOME/npmrc"); fi
+export npm_config_userconfig="$SERENA_HOME/npmrc"
 export npm_config_audit=false
 export npm_config_fund=false
 # --pure / OPENCODE_PURE disables even explicitly configured local plugins.

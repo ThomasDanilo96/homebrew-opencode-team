@@ -26,6 +26,7 @@
       "@DEPENDENCY_ROOT@/python/**": "allow",
       "@DEPENDENCY_ROOT@/bin/serena": "allow",
       "@DEPENDENCY_ROOT@/deep-audit/scanners/**": "allow"
+      ,"@REPORT_ROOT@/**": "allow"
       ,"@REPORT_ROOT@/*/**": "allow"
       ,"@REPORT_ROOT@/test-runs/**": "allow"
       ,"@REPORT_ROOT@/scanner-results/**": "allow"

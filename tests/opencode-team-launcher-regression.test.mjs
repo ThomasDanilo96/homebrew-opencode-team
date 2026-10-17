@@ -84,6 +84,36 @@ test("Node check executes real Node.js and rejects shims and malformed versions"
   }
 });
 
+test("setup roots stay owned by HOME instead of inherited XDG profile paths", async (t) => {
+  const root = await makeTempRoot();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const home = join(root, "root-isolation-home");
+  const dependencies = join(root, "shared-dependencies");
+  const functionCode = extractFunction("setup_roots");
+  const result = runBash(`set -euo pipefail\n${functionCode}\nsetup_roots\nprintf '%s\\n' "$CONFIG_ROOT" "$DATA_ROOT" "$STATE_ROOT" "$CACHE_ROOT" "$RUNTIME_ROOT" "$DEPENDENCY_ROOT"`, {
+    env: {
+      HOME: home,
+      XDG_CONFIG_HOME: join(home, "best/xdg-config"),
+      XDG_DATA_HOME: join(home, "best/data"),
+      XDG_STATE_HOME: join(home, "best/state"),
+      XDG_CACHE_HOME: join(home, "best/cache"),
+      OPENCODE_TEAM_HOME: "",
+      OPENCODE_TEAM_DEPENDENCY_ROOT: dependencies,
+      TEAM_RUNTIME_INNER: "1",
+      TEAM_NAME: "best",
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(result.stdout.trim().split("\n"), [
+    join(home, ".config/opencode-team"),
+    join(home, ".local/share/opencode-team"),
+    join(home, ".local/state/opencode-team"),
+    join(home, ".cache/opencode-team"),
+    join(home, ".cache/opencode-team/runtime"),
+    dependencies,
+  ]);
+});
+
 test("ambient OpenCode cannot replace the Homebrew binary", async (t) => {
   const root = await makeTempRoot();
   t.after(() => rm(root, { recursive: true, force: true }));
@@ -101,28 +131,46 @@ test("ambient OpenCode cannot replace the Homebrew binary", async (t) => {
 test("the centralized resolver rejects unsupported Homebrew OpenCode versions", async (t) => {
   const root = await makeTempRoot();
   t.after(() => rm(root, { recursive: true, force: true }));
-  const fake = await fakeOpenCode(root, "1.17.99");
-  const result = runBash(`set -euo pipefail\n${resolverFunctions}\nif load_opencode; then exit 99; fi\nprintf 'unsupported-version-rejected\\n'`, {
-    env: {
-      PATH: `${fake.bin}:${process.env.PATH}`,
-      FAKE_BREW_PREFIX: fake.prefix,
-      OPENCODE_MIN_VERSION: "1.18.30",
-    },
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.match(result.stdout, /unsupported-version-rejected/);
+  for (const version of ["1.17.99", "opencode 1.17.99"]) {
+    const fake = await fakeOpenCode(root, version);
+    const result = runBash(`set -euo pipefail\n${resolverFunctions}\nif load_opencode; then exit 99; fi\nprintf 'unsupported-version-rejected\\n'`, {
+      env: {
+        PATH: `${fake.bin}:${process.env.PATH}`,
+        FAKE_BREW_PREFIX: fake.prefix,
+        OPENCODE_MIN_VERSION: "1.18.30",
+      },
+    });
+    assert.equal(result.status, 0, `${version}: ${result.stderr}`);
+    assert.match(result.stdout, /unsupported-version-rejected/);
+  }
 });
 
-test("Homebrew OpenCode version parser accepts the product-prefixed CLI format", async (t) => {
+test("Homebrew OpenCode version parser accepts bare and product-prefixed CLI formats", async (t) => {
   const root = await makeTempRoot();
   t.after(() => rm(root, { recursive: true, force: true }));
-  const fake = await fakeOpenCode(root, "opencode 2.0.30");
   const functions = ["opencode_version_supported", "validate_opencode"].map(extractFunction).join("\n");
-  const result = runBash(`set -euo pipefail\n${functions}\nOPENCODE_MIN_VERSION=1.18.30\nvalidate_opencode "$SELECTED"\nprintf '%s\\n' "$OPENCODE_VERSION"`, {
-    env: { SELECTED: fake.executable },
-  });
-  assert.equal(result.status, 0, result.stderr);
-  assert.equal(result.stdout.trim(), "2.0.30");
+  for (const version of ["2.0.30", "opencode 2.0.30"]) {
+    const fake = await fakeOpenCode(root, version);
+    const result = runBash(`set -euo pipefail\n${functions}\nOPENCODE_MIN_VERSION=1.18.30\nvalidate_opencode "$SELECTED"\nprintf '%s\\n' "$OPENCODE_VERSION"`, {
+      env: { SELECTED: fake.executable },
+    });
+    assert.equal(result.status, 0, `${version}: ${result.stderr}`);
+    assert.equal(result.stdout.trim(), "2.0.30");
+  }
+});
+
+test("Homebrew OpenCode version parser rejects malformed CLI output", async (t) => {
+  const root = await makeTempRoot();
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const functions = ["opencode_version_supported", "validate_opencode"].map(extractFunction).join("\n");
+  for (const version of ["not-a-version", "opencode 2.0.bad", "2.0.30 extra", "2.0.30\n2.0.31"]) {
+    const fake = await fakeOpenCode(root, version);
+    const result = runBash(`set -euo pipefail\n${functions}\nOPENCODE_MIN_VERSION=1.18.30\nunset OPENCODE_VERSION\nif validate_opencode "$SELECTED"; then exit 99; fi\nprintf '%s\\n' "${"$"}{OPENCODE_VERSION:-unset}"`, {
+      env: { SELECTED: fake.executable },
+    });
+    assert.equal(result.status, 0, `${version}: ${result.stderr}`);
+    assert.equal(result.stdout.trim(), "unset", `invalid output must not set OPENCODE_VERSION: ${version}`);
+  }
 });
 
 const debugConfig = {

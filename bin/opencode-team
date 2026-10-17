@@ -200,12 +200,9 @@ opencode_version_supported() {
 validate_opencode() {
   local executable="$1" version
   [ -x "$executable" ] || return 1
-  version="$($executable --version 2>/dev/null | awk '
-    NR != 1 { next }
-    $1 ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/ { version = $1 }
-    $1 == "opencode" && $2 ~ /^v?[0-9]+\.[0-9]+\.[0-9]+$/ { version = $2 }
-    version != "" { sub(/^v/, "", version); print version }
-  ')"
+  version="$("$executable" --version 2>/dev/null)" || return 1
+  [[ "$version" =~ ^(opencode[[:blank:]]+)?v?([0-9]+\.[0-9]+\.[0-9]+)$ ]] || return 1
+  version="${BASH_REMATCH[2]}"
   opencode_version_supported "$version" || return 1
   OPENCODE_VERSION="$version"
   export OPENCODE_VERSION
@@ -1068,6 +1065,12 @@ deep_audit_doctor() {
   fi
   SERENA_BIN="${SERENA_BIN:-$DATA_ROOT/bin/serena}"
   export SERENA_BIN
+  if [ -f "$DATA_ROOT/deep-audit/serena/npmrc" ]; then
+    npm_config_userconfig="$DATA_ROOT/deep-audit/serena/npmrc"
+  else
+    npm_config_userconfig=/dev/null
+  fi
+  export npm_config_userconfig
   if [ ! -f "$CONFIG_ROOT/deep-audit/team-runtime.conf" ] || [ ! -f "$CONFIG_ROOT/deep-audit/opencode.jsonc" ]; then
     printf '  %-18s NOT CONFIGURED (run opencode-team deep-audit-setup)\n' "deep-audit profile"
     return 1
@@ -1177,6 +1180,10 @@ setup_deep_audit_profile() {
   if ! managed_python_healthy; then ensure_python || return 1; fi
   export PYTHON_BIN OPENCODE_TEAM_PYTHON PACKAGE_ROOT CONFIG_ROOT DATA_ROOT STATE_ROOT CACHE_ROOT RUNTIME_ROOT DEPENDENCY_ROOT
   SERENA_BIN="${SERENA_BIN:-$DATA_ROOT/bin/serena}"
+  mkdir -p "$DATA_ROOT/deep-audit/serena"
+  if [ ! -e "$DATA_ROOT/deep-audit/serena/npmrc" ]; then (umask 077; : >"$DATA_ROOT/deep-audit/serena/npmrc"); fi
+  npm_config_userconfig="$DATA_ROOT/deep-audit/serena/npmrc"
+  export npm_config_userconfig
   if [ ! -x "$SERENA_BIN" ]; then ensure_serena || return 1; fi
   export SERENA_BIN
   bash "$PACKAGE_ROOT/teams/deep-audit/setup-ecc.sh" "$DATA_ROOT/deep-audit/ecc" || return 1
@@ -1372,7 +1379,7 @@ values = {
     "@DEEP_AUDIT_ECC_SOURCE@": os.path.join(os.environ["DATA_ROOT"], "deep-audit", "ecc"),
     "@DEEP_AUDIT_SERENA_HOME@": os.path.join(os.environ["DATA_ROOT"], "deep-audit", "serena"),
     "@REPORT_ROOT@": os.path.join(os.environ["DATA_ROOT"], "deep-audit", "reports"),
-    "@OPENCODE_TOOL_MODULE@": pathlib.Path(os.path.join(os.environ["DEPENDENCY_ROOT"], "best", "node_modules", "@opencode-ai", "plugin", "dist", "tool.js")).as_uri(),
+    "@OPENCODE_TOOL_MODULE@": pathlib.Path(os.path.join(os.environ["CONFIG_ROOT"], "deep-audit", "node_modules", "@opencode-ai", "plugin", "dist", "tool.js")).as_uri(),
 }
 for marker, value in values.items():
     template = template.replace(marker, value)
@@ -1558,6 +1565,24 @@ ensure_generated_config_current() {
     grep -q '^RUNTIME_ROOT=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
     grep -q '^PERSISTENT_DATA_ROOT=' "$CONFIG_ROOT/$team/team-runtime.conf" || config_missing=1
   done
+  if ! "$PYTHON_BIN" - "$CONFIG_ROOT" <<'PY'
+import json
+import pathlib
+import re
+import sys
+
+root = pathlib.Path(sys.argv[1])
+json_tokens = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*.*?\*/', re.DOTALL)
+trailing_commas = re.compile(r'"(?:\\.|[^"\\])*"|,(?=\s*[}\]])', re.DOTALL)
+for path in root.glob("*/opencode.jsonc"):
+    source = path.read_text()
+    source = json_tokens.sub(lambda match: match.group() if match.group().startswith('"') else "", source)
+    source = trailing_commas.sub(lambda match: "" if match.group().startswith(",") else match.group(), source)
+    json.loads(source)
+PY
+  then
+    config_missing=1
+  fi
   if [ -f "$CONFIG_ROOT/best/team-runtime.conf" ] && [ -f "$PACKAGE_ROOT/teams/best/omo.jsonc.template" ] && [ ! -f "$DATA_ROOT/best/.omo/omo.jsonc" ]; then
     config_missing=1
   fi

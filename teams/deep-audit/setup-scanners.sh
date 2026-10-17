@@ -8,6 +8,10 @@ scanner_root="$dependency_root/deep-audit/scanners"
 node_root="$scanner_root/node"
 tools="$scanner_root/bin"
 marker="$scanner_root/.installed-lock-sha256"
+jscpd_native_package=""
+if [ "$(uname -s)" = Darwin ] && [ "$(uname -m)" = arm64 ]; then
+  jscpd_native_package=jscpd-darwin-arm64
+fi
 mkdir -p "$scanner_root" "$tools"
 chmod 700 "$scanner_root" "$tools"
 
@@ -25,7 +29,9 @@ serena_home="${DATA_ROOT:?DATA_ROOT must be set}/deep-audit/serena"
 ts_root="$serena_home/language_servers/ts-lsp"
 mkdir -p "$serena_home" "$serena_home/language_servers" "$ts_root"
 chmod 700 "$serena_home" "$serena_home/language_servers" "$ts_root"
+if [ ! -e "$serena_home/npmrc" ]; then (umask 077; : >"$serena_home/npmrc"); fi
 export npm_config_cache="$serena_home/npm-cache"
+export npm_config_userconfig="$serena_home/npmrc"
 export npm_config_audit=false npm_config_fund=false
 if ! "$python_bin" - "$ts_root" <<'PY'
 import json
@@ -61,7 +67,8 @@ if [ -f "$marker" ] && [ "$(<"$marker")" = "$lock_hash" ] \
   && [ -x "$scanner_root/python/bin/pytest" ] \
   && [ -x "$scanner_root/python/bin/ruff" ] \
   && [ -x "$scanner_root/python/bin/sqlfluff" ] \
-  && [ -x "$scanner_root/python/bin/vulture" ]; then
+  && [ -x "$scanner_root/python/bin/vulture" ] \
+  && { [ -z "$jscpd_native_package" ] || [ -f "$node_root/node_modules/$jscpd_native_package/package.json" ]; }; then
   printf 'Deep Audit scanners already installed from the pinned lock\n'
   exit 0
 fi
@@ -69,7 +76,11 @@ fi
 mkdir -p "$node_root"
 cp "$package_root/teams/deep-audit/scanners/package.json" "$node_root/package.json"
 cp "$package_root/teams/deep-audit/scanners/package-lock.json" "$node_root/package-lock.json"
-npm ci --no-audit --no-fund --prefix "$node_root"
+npm ci --include=optional --no-audit --no-fund --prefix "$node_root"
+if [ -n "$jscpd_native_package" ] && [ ! -f "$node_root/node_modules/$jscpd_native_package/package.json" ]; then
+  printf 'Deep Audit jscpd native package is missing: %s\n' "$jscpd_native_package" >&2
+  exit 1
+fi
 
 UV_PROJECT_ENVIRONMENT="$scanner_root/python" \
 UV_CACHE_DIR="$scanner_root/uv-cache" \
