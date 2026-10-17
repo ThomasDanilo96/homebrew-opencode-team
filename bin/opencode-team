@@ -917,8 +917,8 @@ deep_audit_model_check() {
     OPENCODE_CONFIG="$CONFIG_ROOT/deep-audit/opencode.jsonc" \
     OPENCODE_CONFIG_DIR="$CONFIG_ROOT/deep-audit" \
     OPENCODE_DISABLE_PROJECT_CONFIG=1 \
-    "$OPENCODE_BIN" models openai 2>/dev/null)" || {
-      printf '  %-18s UNAVAILABLE (OpenCode cannot enumerate OpenAI models)\n' "Deep Audit models" >&2
+    "$OPENCODE_BIN" models openai 2>&1)" || {
+      printf '  %-18s UNAVAILABLE (OpenCode cannot enumerate OpenAI models): %s\n' "Deep Audit models" "${openai_models:0:1000}" >&2
       return 1
     }
   for model in openai/gpt-6-astra openai/gpt-6.1-sol; do
