@@ -9,7 +9,8 @@ grep -Fq 'expected_version="$(tr -d '\''[:space:]'\'' < VERSION)"' "$workflow"
 grep -Fq 'test "$(opencode-team version)" = "OpenCode Team $expected_version"' "$workflow"
 grep -Fq 'if [ "$team" = best ]; then launch_team=best-opencode; fi' "$workflow"
 grep -Fq 'OPENCODE_TEAM_PACKAGE_ROOT="$package_root"' "$workflow"
-grep -Fq '"$ROOT/bin/opencode-team" best' "${workflow%/*}/../../tests/setup-smoke.sh"
+grep -Fq 'PACKAGING CONFIG SMOKE PASS' "${workflow%/*}/../../tests/setup-smoke.sh"
+grep -Fq 'DEEP_AUDIT_SANDBOX PASS' "${workflow%/*}/../../tests/deep-audit-sandbox.test.sh"
 if grep -En '0\.1\.17|v0\.1\.17' "$workflow"; then
   echo "workflow contains a stale release version" >&2
   exit 1
@@ -30,8 +31,7 @@ grep -Fq 'brew fetch --force ThomasDanilo96/opencode-team/opencode-team' "$workf
 grep -Fq 'for dependency in git jq node@22 ripgrep terminal-notifier tmux uv opencode' "$workflow"
 grep -Fq 'brew fetch --force-bottle "$dependency"' "$workflow"
 grep -Fq 'Gem::Version.new("1.18.30")' "$workflow"
-grep -Fq 'Verify launcher in installed release archive' "$workflow"
-grep -Fq 'node --test "$(brew --prefix opencode-team)/libexec/tests/opencode-team-launcher-regression.test.mjs"' "$workflow"
+grep -Fq 'node --test "$ROOT/tests/opencode-team-launcher-regression.test.mjs"' "${workflow%/*}/../../tests/setup-smoke.sh"
 grep -Fq 'brew test ThomasDanilo96/opencode-team/opencode-team' "$workflow"
 grep -Fq 'brew audit --strict --formula ThomasDanilo96/opencode-team/opencode-team' "$workflow"
 grep -Fq 'brew update' "$workflow"
@@ -84,6 +84,10 @@ if 'git archive --format=tar.gz --prefix="opencode-team-$version/" "$candidate_s
     raise SystemExit("Phase A must archive the selected ref SHA")
 if "brew tap-new --no-git opencode-team/staging" not in staging or 'formula="$(brew --repo opencode-team/staging)/Formula/opencode-team-staging.rb"' not in staging:
     raise SystemExit("Phase A formula must stay in the temporary no-git tap")
+if "start-docker-desktop.sh" in staging or "brew install --cask docker" in staging or "deep-audit-runtime-smoke.sh" in staging:
+    raise SystemExit("Phase A Homebrew package validation must not provision Docker or run Docker runtime tests")
+if 'tests/deep-audit-sandbox.test.sh' not in Path("tests/setup-smoke.sh").read_text():
+    raise SystemExit("Phase A must test the macOS Seatbelt policy from the installed candidate package")
 
 official = text.split("  official-archive-validation:\n", 1)[1].split("  clean-install:\n", 1)[0]
 if "github.event_name == 'push' && github.ref_type == 'tag'" not in official or 'archive_url="https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v$version.tar.gz"' not in official:

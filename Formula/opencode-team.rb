@@ -43,24 +43,51 @@ class OpencodeTeam < Formula
     assert_match "best-native", help
     assert_match "best-ecc", help
     assert_predicate bin/"opencode-team", :executable?
+    assert_predicate bin/"opencode-daily-team", :executable?
     assert_predicate libexec/"core/lib/runtime-lifecycle.mjs", :file?
     assert_predicate libexec/"core/lib/runtime-reaper.sh", :file?
     assert_predicate libexec/"shared/maintenance/version-check.mjs", :file?
     assert_predicate libexec/"completions/_opencode-team", :file?
+    assert_predicate libexec/"tests/setup-smoke.sh", :file?
+    assert_predicate libexec/"tests/setup-smoke.sh", :executable?
     if (libexec/"teams/deep-audit").directory?
-      assert_predicate libexec/"teams/deep-audit/setup-ecc.sh", :file?
-      assert_predicate libexec/"teams/deep-audit/report-plugin.mjs.template", :file?
-      assert_predicate libexec/"teams/deep-audit/scanner-plugin.mjs.template", :file?
-      assert_predicate libexec/"teams/deep-audit/test-runner-plugin.mjs.template", :file?
-      assert_predicate libexec/"teams/deep-audit/rules/semgrep.yml", :file?
-      assert_predicate libexec/"teams/deep-audit/rules/ast-grep.yml", :file?
-      assert_predicate libexec/"tests/deep-audit-cli.test.mjs", :file?
-      assert_predicate libexec/"tests/deep-audit-plugin-registration.test.mjs", :file?
-      assert_predicate libexec/"tests/deep-audit-test-runner.e2e.mjs", :file?
+      deep_audit_assets = %w[
+        teams/deep-audit/team-runtime.conf.template
+        teams/deep-audit/opencode.jsonc.template
+        teams/deep-audit/runtime-env.sh
+        teams/deep-audit/setup-ecc.sh
+        teams/deep-audit/setup-scanners.sh
+        teams/deep-audit/setup-test-runners.sh
+        teams/deep-audit/test-runner-integrity.mjs
+        teams/deep-audit/report-plugin.mjs.template
+        teams/deep-audit/scanner-plugin.mjs.template
+        teams/deep-audit/test-runner-plugin.mjs.template
+        teams/deep-audit/report-schema.md
+        teams/deep-audit/bin/read-only-opencode.sh
+        teams/deep-audit/bin/report.mjs
+        teams/deep-audit/bin/test-runner-health.mjs
+        teams/deep-audit/scanners/package.json
+        teams/deep-audit/scanners/package-lock.json
+        teams/deep-audit/scanners/pyproject.toml
+        teams/deep-audit/scanners/uv.lock
+        teams/deep-audit/rules/semgrep.yml
+        teams/deep-audit/rules/ast-grep.yml
+        teams/deep-audit/test-runners/images.lock.json
+        teams/deep-audit/test-runners/python.Dockerfile
+        teams/deep-audit/test-runners/php.Dockerfile
+        teams/deep-audit/test-runners/python-requirements.txt
+        tests/deep-audit-cli.test.mjs
+        tests/deep-audit-report.test.mjs
+        tests/deep-audit-scanner.test.mjs
+        tests/deep-audit-sandbox.test.sh
+        tests/deep-audit-runtime-smoke.sh
+        tests/deep-audit-test-runner.e2e.mjs
+        tests/deep-audit-plugin-registration.test.mjs
+      ]
+      deep_audit_assets.each { |asset| assert_predicate libexec/asset, :file? }
+      assert_predicate libexec/"teams/deep-audit/test-runners", :directory?
       assert_predicate libexec/"teams/deep-audit/bin/read-only-opencode.sh", :executable?
-      # These setup scripts are invoked explicitly through bash by the launcher.
-      assert_predicate libexec/"teams/deep-audit/setup-scanners.sh", :file?
-      assert_predicate libexec/"teams/deep-audit/setup-test-runners.sh", :file?
+      assert_predicate libexec/"tests/deep-audit-sandbox.test.sh", :executable?
     end
     assert_predicate zsh_completion/"_opencode-team", :file?
     system "zsh", "-n", zsh_completion/"_opencode-team"
