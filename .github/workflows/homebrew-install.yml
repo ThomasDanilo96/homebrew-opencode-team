@@ -242,7 +242,7 @@ jobs:
 
   clean-install:
     needs: release_state
-    if: needs.release_state.outputs.published == 'true' && !((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.official_archive_sha256 != ''))
+    if: needs.release_state.outputs.published == 'true' && !((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.official_archive_sha256 != '') || (github.event_name == 'workflow_dispatch' && inputs.publish_stable_release))
     # The current node@22 bottle is available on Tahoe; macos-14 would build V8 from source.
     runs-on: macos-26
     timeout-minutes: 100
@@ -585,23 +585,75 @@ jobs:
           done
 
   publish-stable-release:
-    needs: [source-validation, release_state, clean-install]
-    if: github.event_name == 'workflow_dispatch' && inputs.publish_stable_release && needs.release_state.outputs.published == 'true' && needs.clean-install.result == 'success'
+    needs: [source-validation, release_state]
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.publish_stable_release && needs.release_state.outputs.published == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
+      actions: read
       contents: write
     steps:
       - name: Checkout verified release source
         uses: actions/checkout@v4
 
-      - name: Publish stable GitHub Release after green install gate
+      - name: Verify Phase B evidence for immutable tag SHA
+        id: verify-phase-b
         timeout-minutes: 5
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           version="$(tr -d '[:space:]' < VERSION)"
           tag="v$version"
+          tag_refs="$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+          tag_sha="$(printf '%s\n' "$tag_refs" | awk -v ref="refs/tags/$tag^{}" '$2 == ref { print $1; exit }')"
+          if [ -z "$tag_sha" ]; then
+            tag_sha="$(printf '%s\n' "$tag_refs" | awk -v ref="refs/tags/$tag" '$2 == ref { print $1; exit }')"
+          fi
+          if [ -z "$tag_sha" ]; then
+            echo "Unable to resolve immutable tag $tag to a commit SHA" >&2
+            exit 1
+          fi
+          runs="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow 'Homebrew Install' --event push --branch "$tag" --limit 100 --json databaseId,headSha,conclusion)"
+          run_id="$(printf '%s' "$runs" | jq -r --arg sha "$tag_sha" '[.[] | select(.headSha == $sha and .conclusion == "success")][0].databaseId // empty')"
+          if [ -z "$run_id" ]; then
+            printf 'No successful official-archive-validation run found for tag SHA %s\n' "$tag_sha" >&2
+            exit 1
+          fi
+          job="$(gh run view "$run_id" --repo "$GITHUB_REPOSITORY" --json jobs --jq '.jobs[] | select(.name == "official-archive-validation") | .conclusion')"
+          if [ "$job" != success ]; then
+            printf 'Phase B job for tag SHA %s did not pass (result: %s)\n' "$tag_sha" "${job:-missing}" >&2
+            exit 1
+          fi
+          clean_runs="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow 'Homebrew Install' --event push --branch master --limit 100 --json databaseId,headSha,conclusion)"
+          clean_run_id="$(printf '%s' "$clean_runs" | jq -r --arg sha "$GITHUB_SHA" '[.[] | select(.headSha == $sha and .conclusion == "success")][0].databaseId // empty')"
+          if [ -z "$clean_run_id" ]; then
+            printf 'No successful stable clean-install run found for master formula commit %s\n' "$GITHUB_SHA" >&2
+            exit 1
+          fi
+          clean_job="$(gh run view "$clean_run_id" --repo "$GITHUB_REPOSITORY" --json jobs --jq '.jobs[] | select(.name == "clean-install") | .conclusion')"
+          if [ "$clean_job" != success ]; then
+            printf 'Stable clean-install for master commit %s did not pass (result: %s)\n' "$GITHUB_SHA" "${clean_job:-missing}" >&2
+            exit 1
+          fi
+          echo "tag_sha=$tag_sha" >>"$GITHUB_OUTPUT"
+
+      - name: Publish stable GitHub Release after green install gate
+        timeout-minutes: 5
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERIFIED_TAG_SHA: ${{ steps.verify-phase-b.outputs.tag_sha }}
+        run: |
+          version="$(tr -d '[:space:]' < VERSION)"
+          tag="v$version"
+          tag_refs="$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+          current_tag_sha="$(printf '%s\n' "$tag_refs" | awk -v ref="refs/tags/$tag^{}" '$2 == ref { print $1; exit }')"
+          if [ -z "$current_tag_sha" ]; then
+            current_tag_sha="$(printf '%s\n' "$tag_refs" | awk -v ref="refs/tags/$tag" '$2 == ref { print $1; exit }')"
+          fi
+          if [ -z "$VERIFIED_TAG_SHA" ] || [ "$current_tag_sha" != "$VERIFIED_TAG_SHA" ]; then
+            printf 'Tag %s changed after Phase B verification (verified %s, current %s)\n' "$tag" "${VERIFIED_TAG_SHA:-missing}" "${current_tag_sha:-missing}" >&2
+            exit 1
+          fi
           if gh release view "$tag" >/dev/null 2>&1; then
             echo "GitHub Release $tag already exists; refusing to replace it." >&2
             exit 1

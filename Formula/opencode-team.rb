@@ -1,10 +1,9 @@
 class OpencodeTeam < Formula
   desc "Portable runtime foundation for OpenCode Team"
   homepage "https://github.com/ThomasDanilo96/homebrew-opencode-team"
-  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.65.tar.gz"
-  sha256 "7906f46061ca48e02b55ea40ff51b49eee8467e6424423c56dd65b2e069c7f0b"
+  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.66.tar.gz"
+  sha256 "6ac1af38c2e63a918c576805e88b5677328c75f0e49ae723057ff97ce71140df"
   license "MIT"
-  disable! date: "2026-10-17", because: "v0.1.65 install fails with OpenCode 2.0.30; awaiting verified v0.1.66"
 
   depends_on "git"
   depends_on "jq"

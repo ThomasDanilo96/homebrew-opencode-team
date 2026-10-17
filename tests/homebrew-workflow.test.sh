@@ -100,10 +100,22 @@ if "gh run list" not in official or "prepublication-staging" not in official or 
 clean_install = text.split("  clean-install:\n", 1)[1].split("  publish-stable-release:\n", 1)[0]
 if clean_install.count("start-docker-desktop.sh") != 1 or "Provision Docker Desktop for isolated runtime tests" not in clean_install:
     raise SystemExit("Docker Desktop provisioning must stay a single named runtime-test gate")
+if "inputs.publish_stable_release" not in clean_install:
+    raise SystemExit("release publication dispatch must reuse, not repeat, the verified stable clean-install")
 
 release = text.split("  publish-stable-release:\n", 1)[1]
-if "needs: [source-validation, release_state, clean-install]" not in release or "if: github.event_name == 'workflow_dispatch' && inputs.publish_stable_release && needs.release_state.outputs.published == 'true' && needs.clean-install.result == 'success'" not in release:
-    raise SystemExit("stable Release creation must require explicit publication after green stable clean-install")
+if "needs: [source-validation, release_state]" not in release or "if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.publish_stable_release && needs.release_state.outputs.published == 'true'" not in release:
+    raise SystemExit("stable Release creation must require master dispatch and explicit publication")
+if "Verify Phase B evidence for immutable tag SHA" not in release or 'git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}"' not in release:
+    raise SystemExit("publication must resolve the immutable tag SHA before checking Phase B evidence")
+if "gh run list" not in release or "--event push --branch \"$tag\"" not in release or 'select(.headSha == $sha and .conclusion == "success")' not in release or 'select(.name == "official-archive-validation")' not in release:
+    raise SystemExit("publication must refuse missing, failed, or mismatched Phase B evidence")
+if 'gh run list --repo "$GITHUB_REPOSITORY" --workflow \'Homebrew Install\' --event push --branch master' not in release or 'select(.name == "clean-install")' not in release or 'clean_job" != success' not in release:
+    raise SystemExit("publication must reuse only a successful stable clean-install for the exact master formula commit")
+if 'echo "tag_sha=$tag_sha" >>"$GITHUB_OUTPUT"' not in release or 'VERIFIED_TAG_SHA: ${{ steps.verify-phase-b.outputs.tag_sha }}' not in release or '"$current_tag_sha" != "$VERIFIED_TAG_SHA"' not in release:
+    raise SystemExit("publication must recheck the immutable tag SHA immediately before Release creation")
+if "      actions: read\n      contents: write" not in release:
+    raise SystemExit("publication requires read-only Actions access and contents write access")
 PY
 if grep -Fq 'opencode-team best-ecc-setup' "$workflow" || grep -Fq 'opencode-team deep-audit-setup' "$workflow"; then
   echo "clean-install workflow repeats setup work already performed by setup" >&2
