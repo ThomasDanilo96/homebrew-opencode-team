@@ -61,7 +61,8 @@ grep -Fq 'official-archive-validation:' "$workflow"
 grep -Fq 'actual_sha256="$(shasum -a 256 "$archive"' "$workflow"
 grep -Fq 'brew test --verbose --force opencode-team/staging/opencode-team-official' "$workflow"
 grep -Fq 'publish-stable-release:' "$workflow"
-grep -Fq "needs.clean-install.result == 'success'" "$workflow"
+grep -Fq 'inputs.publish_stable_release' "$workflow"
+grep -Fq 'No successful stable clean-install run found' "$workflow"
 grep -Fq 'gh release create "$tag"' "$workflow"
 python3 - "$workflow" <<'PY'
 from pathlib import Path
