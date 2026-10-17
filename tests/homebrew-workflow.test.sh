@@ -92,8 +92,14 @@ if 'tests/deep-audit-sandbox.test.sh' not in Path("tests/setup-smoke.sh").read_t
 official = text.split("  official-archive-validation:\n", 1)[1].split("  clean-install:\n", 1)[0]
 if "github.event_name == 'push' && github.ref_type == 'tag'" not in official or 'archive_url="https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v$version.tar.gz"' not in official:
     raise SystemExit("tag pushes must still validate the official vVERSION archive")
+if "start-docker-desktop.sh" in official or "brew install --cask docker" in official:
+    raise SystemExit("official archive packaging validation must not provision Docker Desktop")
 if "gh run list" not in official or "prepublication-staging" not in official or 'test "$tag_commit" = "$GITHUB_SHA"' not in official:
     raise SystemExit("Phase B must prove Phase A succeeded for the exact tagged candidate commit")
+
+clean_install = text.split("  clean-install:\n", 1)[1].split("  publish-stable-release:\n", 1)[0]
+if clean_install.count("start-docker-desktop.sh") != 1 or "Provision Docker Desktop for isolated runtime tests" not in clean_install:
+    raise SystemExit("Docker Desktop provisioning must stay a single named runtime-test gate")
 
 release = text.split("  publish-stable-release:\n", 1)[1]
 if "needs: [source-validation, release_state, clean-install]" not in release or "if: github.event_name == 'workflow_dispatch' && inputs.publish_stable_release && needs.release_state.outputs.published == 'true' && needs.clean-install.result == 'success'" not in release:
