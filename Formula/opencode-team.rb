@@ -4,7 +4,7 @@ class OpencodeTeam < Formula
   url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.1.65.tar.gz"
   sha256 "7906f46061ca48e02b55ea40ff51b49eee8467e6424423c56dd65b2e069c7f0b"
   license "MIT"
-  disable! date: "2026-10-17", because: "v0.1.65 clean-install fails with OpenCode 2.0.30; wait for a verified v0.1.66"
+  disable! date: "2026-10-17", because: "v0.1.65 install fails with OpenCode 2.0.30; awaiting verified v0.1.66"
 
   depends_on "git"
   depends_on "jq"
