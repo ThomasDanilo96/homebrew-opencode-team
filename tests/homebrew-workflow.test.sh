@@ -101,7 +101,7 @@ if grep -Fq 'opencode-team best-ecc-setup' "$workflow" || grep -Fq 'opencode-tea
 fi
 grep -Fq 'git ls-remote origin "refs/tags/$tag"' "$workflow"
 grep -Fq 'if ! tag_result=' "$workflow"
-grep -Fq 'resolved_ref="$(printf '\''%s\\n'\'' "$tag_result" | awk '\''NR == 1 { print $2 }'\'')"' "$workflow"
+grep -Fq 'resolved_ref="$(printf '\''%s\n'\'' "$tag_result" | awk '\''NR == 1 { print $2 }'\'')"' "$workflow"
 if grep -Fq 'git ls-remote --exit-code' "$workflow"; then
   echo "workflow cannot distinguish a missing tag from a failed remote lookup" >&2
   exit 1
