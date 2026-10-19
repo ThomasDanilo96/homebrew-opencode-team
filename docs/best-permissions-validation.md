@@ -1,6 +1,7 @@
 # BEST permissions validation — 2026-10-19
 
-Status: locally validated, **not released**. Installed package remains 0.2.0;
+Initial checkpoint status (superseded by the completion record below): locally
+validated, **not released**. Installed package remained 0.2.0;
 the candidate configuration was applied with the source launcher `setup`.
 
 ## Cause and change
@@ -68,3 +69,53 @@ untrusted `anomalyco/tap`. Trust was not relaxed to bypass these gates.
 
 Do not publish 0.2.1 or update the stable formula/checksum until required remote
 and Homebrew gates pass. Tag v0.2.0 and the Premium configuration were not changed.
+
+## Release completion — 2026-10-19
+
+**0.2.1 is published and installed through the normal Homebrew command.**
+
+- Existing Git HTTPS credentials authenticated GitHub API calls in memory only;
+  no login, token output, credential copying or credential-store change.
+- PR #1 merged at `9050cba08622811bf5fa344c0868784803e1c5ec`.
+- Immutable `v0.2.1`: `2426cef12372dcf48d4e6e56a546ebe8af10fa07`.
+  Stable formula metadata: `a09ac280f3f2798df6062972535fe56844dff50b`.
+- Official source archive SHA-256, measured locally and matched against Phase B:
+  `c8eb4793a344b62e025cc3e6d50787b5374445a813e33a173ea7caa86b1378cc`.
+- GitHub Actions successful runs:
+  - Phase A: `39274860309` (source validation and actual staging install/tests).
+  - Phase B on immutable tag: `39275365617`.
+  - Stable tap clean-install, formula test and audit: `39275939204`.
+  - Explicit official-checksum verification on the tag: `39278267968`.
+- Retained failures: initial candidate source validation `39274614122` found an
+  outdated packaging baseline (0.1.66); updated the baseline to published 0.2.0,
+  focused test passed, then Phase A passed. Checksum dispatch `39275960639` on
+  the later metadata commit correctly rejected missing Phase A for that SHA;
+  dispatching on the immutable tag passed. README now specifies the correct ref.
+- GitHub API quota exhaustion was respected until its declared reset. GitHub
+  subsequently reported incident `8tzbpcnl75jp` affecting Actions. Publication run
+  `39280069355` did not execute the publisher. Rather than omit checks, the exact
+  existing workflow's `Verify Phase B evidence for immutable tag SHA` and
+  `Publish stable GitHub Release after green install gate` scripts were executed
+  locally with the authenticated API, same repository/master SHA and `pipefail`.
+  Both exited 0, verified remote green gate jobs and immutable tag identity, and
+  published the release. This is **not** a claim that the publication Actions run
+  passed. No gate code was changed or skipped.
+- Release lookup confirms non-draft, non-prerelease publication at
+  `2026-10-19T16:11:20Z`:
+  https://github.com/ThomasDanilo96/homebrew-opencode-team/releases/tag/v0.2.1
+- Verified tap remote matched the official repository. Only
+  `ThomasDanilo96/opencode-team/opencode-team` was trusted, as specified by the
+  repository workflow; no whole-tap/global trust changes or Premium updates.
+- Normal Homebrew upgrade installed only OpenCode Team 0.2.0 → 0.2.1, with cleanup
+  disabled to retain the prior keg. `brew test`, installed `setup` and `doctor`
+  exited 0. `/opt/homebrew/bin/opencode-team version` reports `OpenCode Team 0.2.1`.
+- Installed-package BEST E2E session `ses_eab4157f8ffecXRVj6MB2Fziam`, no `--auto`:
+  env-prefixed Python printed `release_021`; patch created and modified fixture
+  `prima` → `dopo`; native General delegation created `GENERAL_OK`; final shell
+  assertions exited 0. No `Permission required` in the JSON events.
+- Installed-package FREE E2E session `ses_eab41586cffevT8NvGsYS06EkL` returned
+  `FREE_021_OK`, exit 0, without tools or model overrides.
+
+Authentication, sessions, existing backups, FREE policy and Premium configuration
+were preserved. The only remaining infrastructure caveat is the failed Actions
+publication run during GitHub's incident; the official release itself is verified.

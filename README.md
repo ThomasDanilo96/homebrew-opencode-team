@@ -202,8 +202,9 @@ following is the release procedure; completed gates are recorded in validation:
 2. Only after Phase A succeeds, authorize the immutable `v0.2.1` tag on the
    **same commit**. The tag workflow validates the published source archive.
 3. Measure that official archive's SHA-256, update the stable formula URL/checksum
-   together, and push the metadata commit. Dispatch with `official_archive_sha256`
-   to validate a clean stable-tap install.
+    together, and push the metadata commit. The `master` push validates the clean
+    stable-tap install. For an explicit checksum recheck, dispatch on `v0.2.1`
+    with `official_archive_sha256` (not on the later formula-metadata commit).
 4. Enable `publish_stable_release` only after those gates pass. Install/upgrade
    the stable package separately; never migrate credentials automatically.
 
