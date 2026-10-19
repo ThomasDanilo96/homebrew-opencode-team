@@ -1,6 +1,6 @@
 # BEST Hybrid 0.3.0 validation
 
-Status: candidate locally validated; release gates pending.
+Status: **0.3.0 published, installed with Homebrew and verified**.
 
 ## Acceptance protocol
 
@@ -132,4 +132,52 @@ exit 0. It is an evidence test, not an installed runtime orchestration gate.
   unchanged. Historical auth metadata unchanged; every prior backup retained.
   Existing accounts remain usable; no credentials or sessions were imported.
 
-Release and installed-package evidence follows after remote gates.
+## Release and installed-package acceptance
+
+- PR #2 merged: `cfec27b5c1eb2bb8680d9d5047d46720868c988b`.
+- Immutable `v0.3.0`: `d197d649b7827d0025e880f4b94ab48c2ab0d4fa`.
+  Stable formula commit: `912f3b36a41341a7f6f6a6ab2bde8bc8758b33ff`.
+- Official archive SHA-256, measured locally and identical to Phase B:
+  `556b728e2f38b9eca964d2dc0830eea7cbc9a381d2b0cfcff9cc9fa94c5e347e`.
+- All required GitHub Actions gates succeeded:
+  - Phase A staging install/tests: `39292163345`.
+  - Phase B official archive: `39292668146`.
+  - Stable tap clean-install / formula test / audit: `39294443082`.
+  - Gated official publisher: `39295084885`.
+- API watch encountered rate-limit exhaustion. Waited until the declared reset,
+  then confirmed Phase B success and matching checksum. No quota/auth bypass,
+  failed-job relabeling, tag rewrite or alternate publication path was needed.
+- Official non-draft, non-prerelease release published at `2026-10-19T17:34:06Z`:
+  https://github.com/ThomasDanilo96/homebrew-opencode-team/releases/tag/v0.3.0
+- Normal Homebrew upgrade changed only OpenCode Team 0.2.1 → 0.3.0, with cleanup
+  disabled. Previous kegs/backups retained. `brew test`, `opencode-team setup` and
+  `doctor` exited 0. `/opt/homebrew/bin/opencode-team version` reports 0.3.0;
+  native OpenCode remains 2.0.32. Installed executable, VERSION and all profile
+  assets match the verified official archive byte-for-byte.
+- Installed BEST structured E2E parent: `ses_eaac4e08dffeS9DRTcUm6YOCIc`.
+  Actual foreground children:
+  - Explore Go MiMo: `ses_eaac48c34ffevkI5qJi7sMeb9e`.
+  - General Go MiniMax: `ses_eaac48c22ffeNVlL2yQKHaBeJN`.
+  - General Go MiniMax: `ses_eaac48c27ffejbgBv7URBVMdZn`.
+  - Specialist Sol Medium: `ses_eaac48c13ffeyJKhHZxvgiQfqE`.
+  - Subsequent Reviewer Sol Medium: `ses_eaac38246ffeP7HWy59yYX3C3c`.
+- Native export audit passed 6/6, exit 0, on the installed sessions: four initial
+  calls in one response, overlapping execution, disjoint actual writes, Medium
+  specialist/reviewer, Build Low definition/default, reviewer after writers,
+  frozen-file hashes, 14/14 final unittest checks, no permission requests.
+  Both writer tests and the coordinator's combined tests used env-prefixed Python.
+- Installed run: 120.283s, 35 requests, input 289,288, output 5,207, reasoning 204,
+  cache-read 1,396,113. This later trial was slower than the baseline observation;
+  there is **no claim of consistent latency improvement**. Request/context counts
+  and native execution semantics, not a selected fast timing, justify the change.
+- Installed FREE: `ses_eaac4e0a9ffelmvHLUzNsHtjPf`, `FREE_030_OK`, exit 0; actual
+  assistant model provider verified as `team-free`, no tools or paid fallback.
+- Final preservation checks: FREE and Premium byte hashes unchanged; historical
+  auth metadata and every pre-existing backup retained. The 0.2.1 baseline session
+  remains retrievable after upgrade. No auth/session import or database rewrite;
+  normal native account refresh/session recording remains owned by OpenCode.
+
+Limitations: single synthetic workload, non-randomized provider/cache conditions,
+no measured monetary cost or remaining subscription quota, and no guarantee that
+arbitrary prompts always choose four useful lanes. Delegation remains a native
+instruction preference, intentionally not an enforced custom gate.
