@@ -119,12 +119,15 @@ function provision() {
   if (process.env.OPENCODE_TEAM_ECC_SOURCE) console.error(`Explicit local ECC source: ${eccSource} (${actual}; official pin ${eccPin})`);
 }
 const rule = (action, effect, resource = '*') => ({ action, resource, effect });
-function readonlyPermissions() {
+function readonlyPermissions(profile) {
   return [rule('*', 'deny'), ...['read', 'glob', 'grep', 'webfetch', 'websearch', 'skill', 'question',
     'serena_initial_instructions', 'serena_get_current_config', 'serena_get_symbols_overview', 'serena_find_symbol',
     'serena_find_declaration', 'serena_find_implementations', 'serena_find_referencing_symbols',
     'serena_get_diagnostics_for_file', 'serena_search_for_pattern', 'serena_list_dir', 'serena_find_file'].map((a) => rule(a, 'allow')),
-  rule('external_directory', 'ask'), rule('read', 'ask', '*.env'), rule('read', 'ask', '*.env.*')];
+  rule('external_directory', profile === 'best' ? 'allow' : 'ask'),
+  rule('read', profile === 'best' ? 'deny' : 'ask', '*.env'),
+  rule('read', profile === 'best' ? 'deny' : 'ask', '*.env.*'),
+  ...(profile === 'best' ? [rule('read', 'allow', '*.env.example')] : [])];
 }
 function configuration(profile) {
   const bestModel = process.env.OPENCODE_TEAM_BEST_MODEL || 'openai/gpt-6.1-sol';
@@ -141,7 +144,7 @@ function configuration(profile) {
     for (const id of ['general', 'summary', 'compaction']) agents[id].model = goModel;
     agents.general.description = 'Implement an independent, well-scoped task using Go; return focused changes and actual test results';
   }
-  for (const id of ['plan', 'explore', 'reviewer']) agents[id].permissions = readonlyPermissions();
+  for (const id of ['plan', 'explore', 'reviewer']) agents[id].permissions = readonlyPermissions(profile);
   agents.reviewer = { ...agents.reviewer, description: 'Review changes for correctness, security and regressions without editing',
     mode: 'subagent', system: 'Read-only review. Report verified findings with file references and missing regressions. Never mutate files or run shell commands.' };
   for (const id of ['title', 'summary', 'compaction']) agents[id].permissions = [rule('*', 'deny')];
@@ -157,7 +160,10 @@ function configuration(profile) {
   }
   const config = { $schema: 'https://opencode.ai/config.json', model, default_agent: 'build', agents,
     policies: [rule('provider.use', 'deny'), ...(profile === 'best' ? ['opencode-go', 'openai'] : ['team-free']).map((provider) => rule('provider.use', 'allow', provider))],
-    permissions: [rule('external_directory', 'ask'), rule('shell', 'ask')],
+    permissions: [rule('external_directory', profile === 'best' ? 'allow' : 'ask'),
+      rule('shell', profile === 'best' ? 'allow' : 'ask'),
+      ...(profile === 'best' ? [rule('read', 'deny', '*.env'), rule('read', 'deny', '*.env.*'),
+        rule('read', 'allow', '*.env.example')] : [])],
     skills: [path.join(eccSource, 'skills')], instructions,
     mcp: { servers: { serena: { type: 'local', command: [serenaBin, 'start-mcp-server', '--context', 'ide', '--project-from-cwd', '--enable-web-dashboard', 'false', '--open-web-dashboard', 'false'],
       codemode: false, disabled: false, environment: { SERENA_HOME: path.join(roots.state, profile, 'serena') },

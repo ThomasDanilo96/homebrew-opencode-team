@@ -5,6 +5,8 @@ node --test tests/*.test.mjs
 node --test --experimental-test-coverage tests/*.test.mjs
 bash tests/setup-smoke.sh
 bash tests/homebrew-workflow.test.sh
+# Optional integration with an installed V2 binary (no models or database calls):
+OPENCODE_TEAM_NATIVE_TEST_BIN="$(command -v opencode)" node --test --test-name-pattern='native V2 resolves' tests/native-profiles.test.mjs
 ```
 
 - Node tests cover native launcher/config/migration behavior, a Homebrew install
@@ -13,6 +15,11 @@ bash tests/homebrew-workflow.test.sh
   disposable HOME/roots, no auth/model traffic or real dependency installation.
 - Workflow tests retain immutable archive/staging/install/release gates and run
   actionlint when available. Local PASS is not a remote GitHub Actions result.
+- Permission tests inspect generated JSON, not source regexes. The optional native
+  integration supplies the documented base plus generated rules as session rules
+  to the real permission API. The standalone API host does not register CLI agents;
+  this checks native rule evaluation, not CLI agent registration or shell scanning.
+  Shell command resources (including the MySQL reproducer) are never executed.
 
 Mocks are passed by absolute path. Disk errors use temporary Node preloads, not
 production test hooks. Tests verify the Sol low coordinator/native effort setting,

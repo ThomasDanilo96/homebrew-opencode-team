@@ -47,6 +47,89 @@ esac
 }
 const ok = (result) => assert.equal(result.status, 0, result.stderr + result.stdout);
 
+test('generated BEST permissions allow authorized work while FREE and read-only boundaries remain intact', (t) => {
+  const f = fixture(t);
+  ok(f.run('setup'));
+  const rule = (action, effect, resource = '*') => ({ action, resource, effect });
+  assert.deepEqual(f.config('best').permissions, [
+    rule('external_directory', 'allow'), rule('shell', 'allow'),
+    rule('read', 'deny', '*.env'), rule('read', 'deny', '*.env.*'),
+    rule('read', 'allow', '*.env.example'),
+  ]);
+  assert.deepEqual(f.config('free').permissions, [rule('external_directory', 'ask'), rule('shell', 'ask')]);
+  assert.equal(f.config('best').agents.general.permissions, undefined, 'General inherits global rules after native defaults');
+  for (const id of ['plan', 'explore', 'reviewer']) {
+    const rules = f.config('best').agents[id].permissions;
+    assert.ok(rules.some((r) => r.action === '*' && r.effect === 'deny'));
+    assert.ok(!rules.some((r) => r.effect === 'ask'));
+    assert.ok(rules.some((r) => r.action === 'external_directory' && r.effect === 'allow'));
+    for (const action of ['shell', 'edit', 'execute', 'subagent', 'serena_replace_symbol_body']) {
+      assert.ok(!rules.some((r) => r.action === action && r.effect === 'allow'), `${id}: ${action}`);
+    }
+    assert.ok(f.config('free').agents[id].permissions.some((r) => r.action === 'external_directory' && r.effect === 'ask'));
+  }
+});
+
+test('native V2 resolves generated policies without executing shell resources', {
+  skip: !process.env.OPENCODE_TEAM_NATIVE_TEST_BIN,
+  timeout: 300000,
+}, (t) => {
+  const f = fixture(t);
+  ok(f.run('setup'));
+  f.env.OPENCODE_TEAM_OPENCODE_BIN = process.env.OPENCODE_TEAM_NATIVE_TEST_BIN;
+  f.env.PATH = process.env.PATH;
+  const api = (profile, method, route, body) => {
+    const result = f.run(profile, 'api', method, route, ...(body ? ['--data', JSON.stringify(body)] : []));
+    ok(result);
+    return JSON.parse(result.stdout).data;
+  };
+  const commands = [
+    `DB_ENGINE=mysql DB_HOST=127.0.0.1 .venv/bin/python manage.py shell -c "from django.db import connection; cursor = connection.cursor(); cursor.execute('SELECT VERSION()'); print(cursor.fetchone()[0]); cursor.close()"`,
+    'python manage.py test', 'FLAG=yes python -c "print(1)"', 'npm install',
+    'git status --short', 'git push origin HEAD', 'git fetch origin',
+    'ssh -o BatchMode=yes devhost true', 'scp fixture devhost:development/',
+    'sftp -b batch devhost', 'rsync -a fixture/ devhost:development/',
+  ];
+  for (const profile of ['best', 'free']) {
+    // The standalone API host does not register the CLI's built-in agents.
+    // Supply the documented base and generated rules as session permissions:
+    // this tests the native evaluator, not CLI agent registration or scanning.
+    const config = f.config(profile);
+    const sessions = new Map();
+    const evaluate = (agent, action, resource, expected) => {
+      if (!sessions.has(agent)) {
+        const permissions = [
+          { action: '*', resource: '*', effect: 'allow' },
+          { action: 'read', resource: '*.env', effect: 'ask' },
+          { action: 'read', resource: '*.env.*', effect: 'ask' },
+          { action: 'read', resource: '*.env.example', effect: 'allow' },
+          ...config.permissions, ...(config.agents[agent].permissions || []),
+        ];
+        sessions.set(agent, api(profile, 'post', '/api/session', {
+          title: 'permission regression fixture', location: { directory: f.dir }, permissions,
+        }));
+      }
+      const session = sessions.get(agent);
+      const result = api(profile, 'post', `/api/session/${session.id}/permission`, { action, resources: [resource] });
+      assert.equal(result.effect, expected, `${profile}/${agent}: ${action} ${resource}`);
+    };
+    for (const agent of ['build', 'general']) {
+      for (const command of commands) evaluate(agent, 'shell', command, profile === 'best' ? 'allow' : 'ask');
+      evaluate(agent, 'external_directory', '/development/fixture/*', profile === 'best' ? 'allow' : 'ask');
+      for (const action of ['read', 'edit', 'skill', 'serena_replace_symbol_body']) evaluate(agent, action, 'fixture', 'allow');
+      evaluate(agent, 'read', 'settings.env', profile === 'best' ? 'deny' : 'ask');
+      evaluate(agent, 'read', 'settings.env.production', profile === 'best' ? 'deny' : 'ask');
+      evaluate(agent, 'read', 'settings.env.example', 'allow');
+    }
+    evaluate('build', 'subagent', 'general', 'allow');
+    for (const agent of ['plan', 'explore', 'reviewer']) {
+      for (const action of ['shell', 'edit', 'execute', 'subagent', 'serena_replace_symbol_body']) evaluate(agent, action, 'fixture', 'deny');
+      evaluate(agent, 'serena_find_symbol', '*', 'allow');
+      evaluate(agent, 'external_directory', '/development/fixture/*', profile === 'best' ? 'allow' : 'ask');
+    }
+  }
+});
+
 test('only best/free public profiles; native arguments and resume are forwarded exactly', (t) => {
   const f = fixture(t);
   ok(f.run('setup'));
