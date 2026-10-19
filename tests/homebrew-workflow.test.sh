@@ -131,3 +131,46 @@ fi
 if command -v actionlint >/dev/null 2>&1; then
   actionlint "$workflow"
 fi
+
+# Execute the real publication block with local mocks: no GitHub mutations.
+python3 - "$workflow" <<'PY'
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import tempfile
+import textwrap
+
+text = Path(sys.argv[1]).read_text()
+step = text.split('      - name: Publish stable GitHub Release after green install gate\n', 1)[1]
+script = textwrap.dedent(step.split('        run: |\n', 1)[1])
+with tempfile.TemporaryDirectory(prefix='team-release-') as directory:
+    root = Path(directory)
+    (root / 'VERSION').write_text('0.2.0\n')
+    (root / 'git').write_text('#!/bin/sh\nprintf "%s\\trefs/tags/v0.2.0\\n" "$VERIFIED_TAG_SHA"\n')
+    (root / 'gh').write_text('''#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+args = sys.argv[1:]
+state = Path('created')
+scenario = os.environ['SCENARIO']
+if args[:2] == ['release', 'create']:
+    assert scenario != 'existing', 'must never replace an existing release'
+    if scenario != 'failed': state.touch()
+    sys.exit(1 if scenario in ['timeout', 'failed'] else 0)
+assert args[:2] == ['release', 'view']
+if scenario not in ['existing', 'draft'] and not state.exists(): sys.exit(1)
+print(json.dumps({'tagName': 'v0.2.0', 'isDraft': scenario == 'draft', 'isPrerelease': False, 'url': 'https://example.invalid/release'}))
+''')
+    for name in ['git', 'gh']:
+        (root / name).chmod(0o755)
+    for scenario, succeeds in [('existing', True), ('created', True), ('timeout', True), ('failed', False), ('draft', False)]:
+        (root / 'created').unlink(missing_ok=True)
+        env = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'],
+               'VERIFIED_TAG_SHA': 'a' * 40, 'SCENARIO': scenario}
+        result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], cwd=root,
+                                env=env, capture_output=True, text=True, timeout=15)
+        assert (result.returncode == 0) == succeeds, (scenario, result.returncode, result.stdout, result.stderr)
+        print('Release scenario PASS:', scenario)
+PY
