@@ -10,9 +10,9 @@ mandatory fanout or background maintenance is installed.
 | `best` | OpenAI Sol coordinator + Go workers | Connect OpenAI and Go independently inside BEST |
 | `free` | `team-free/mimo-v2.6-flash-free` | Anonymous; no paid credentials |
 
-**Unpublished candidate: 0.2.0.** The stable formula still identifies the immutable
-0.1.66 archive; it does not yet install these changes. The local candidate is
-keg-only and does not replace the existing `opencode-team` command.
+**Version 0.2.0.** The stable formula selects the official, checksum-verified
+`v0.2.0` archive. The tag is immutable; formula metadata follows on `master`.
+See [validation](docs/validation.md) for release-gate and installation evidence.
 
 ## Setup
 
@@ -193,7 +193,8 @@ pending rollout checks](docs/validation.md), and [V2 compatibility/sources](docs
 
 ## Release preparation
 
-The workflow deliberately separates candidate testing from publication:
+The workflow deliberately separates candidate testing from publication. The
+following is the release procedure; completed gates are recorded in validation:
 
 1. After approval, commit and push the reviewed source to `prerelease/v0.2.0`.
    Run **Homebrew Install** manually on that branch: Phase A installs the exact

@@ -203,7 +203,7 @@ archive, check logs, model proofs and preservation comparisons remain under
 `team-refactor-evidence/package-candidate/`. That archive predates this final
 documentation-only report; installed payload bytes match final source.
 
-## Pending rollout and remote CI
+## Historical candidate rollout boundary
 
 - GitHub Actions on this source and fresh stable-tap installation: **pending an
   authorized commit/push**. The latest inspected successful run, `39079614524`,
@@ -223,3 +223,25 @@ Historical reduction only: at the **initial refactor boundary**, measured agains
 the captured **starting dirty worktree**, the code diff was 812 added / 32,045
 removed (**31,233 fewer lines**). This excludes docs/locks/generated artifacts
 and later revisions; it is **not the current cumulative LOC measurement**.
+
+## Official 0.2.0 archive and stable formula rollout
+
+The user authorized commit/push, then tag, publication and local stable update.
+The immutable tag `v0.2.0` selects `cfa40169ba172a10923e8dc40d79b2356849d369`.
+
+| Remote gate | Actual result |
+| --- | --- |
+| Phase A, run `39258569474` | SUCCESS, including `prepublication-staging` installation/tests |
+| Phase B, run `39260462896` | SUCCESS, including `official-archive-validation` installation/tests |
+
+The official archive SHA-256 was independently measured locally:
+`d38a6a01d1bd20eb823776cabbd63589a12bdb979046ce86244f5e5a49d949a2`.
+All eight executable/config/test/completion payload files match tested source.
+The stable formula now points to that archive and checksum, not the earlier local
+candidate tarball. The immutable tagged README retains its prepublication record;
+the current rollout evidence and formula metadata follow on `master`.
+
+Stable-tap clean-install, GitHub Release publication and normal local Team package
+upgrade are the next gates, not outcomes claimed by the two archive runs.
+The REST monitor exhausted its quota; read-only GraphQL check-suite results
+confirmed both remote gates without changing authentication or permissions.
