@@ -113,7 +113,7 @@ test('native V2 resolves generated policies without executing shell resources', 
       const result = api(profile, 'post', `/api/session/${session.id}/permission`, { action, resources: [resource] });
       assert.equal(result.effect, expected, `${profile}/${agent}: ${action} ${resource}`);
     };
-    for (const agent of ['build', 'general']) {
+    for (const agent of profile === 'best' ? ['build', 'general', 'specialist'] : ['build', 'general']) {
       for (const command of commands) evaluate(agent, 'shell', command, profile === 'best' ? 'allow' : 'ask');
       evaluate(agent, 'external_directory', '/development/fixture/*', profile === 'best' ? 'allow' : 'ask');
       for (const action of ['read', 'edit', 'skill', 'serena_replace_symbol_body']) evaluate(agent, action, 'fixture', 'allow');
@@ -161,6 +161,7 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE stays singleton and 
       explore: 'opencode-go/mimo-v2.6-flash', title: 'opencode-go/mimo-v2.6-flash',
       summary: 'opencode-go/minimax-m3', compaction: 'opencode-go/minimax-m3',
       plan: 'openai/gpt-6.1-sol#medium', reviewer: 'openai/gpt-6.1-sol#medium',
+      specialist: 'openai/gpt-6.1-sol#medium',
     } : Object.fromEntries(['build', 'plan', 'explore', 'general', 'reviewer', 'title', 'summary', 'compaction'].map((id) => [id, c.model]));
     assert.deepEqual(Object.fromEntries(Object.entries(c.agents).map(([id, agent]) => [id, agent.model])), expected);
     assert.equal(c.plugin, undefined);
@@ -193,6 +194,102 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE stays singleton and 
   assert.equal(provider.settings.apiKey, '');
   assert.equal(provider.headers.Authorization, '');
   assert.deepEqual(provider.env, []);
+});
+
+test('BEST Hybrid specialist reuses general, denies only question/subagent and inherits 0.2.1 shell/edit from BEST globals', (t) => {
+  const f = fixture(t);
+  ok(f.run('setup'));
+  const best = f.config('best');
+  const free = f.config('free');
+  const specialist = best.agents.specialist;
+  assert.ok(specialist, 'BEST Hybrid introduces a specialist agent');
+  assert.equal(specialist.model, 'openai/gpt-6.1-sol#medium');
+  assert.equal(specialist.mode, 'subagent');
+  assert.equal(typeof specialist.description, 'string');
+  assert.ok(specialist.description.length > 16, `specialist description must be meaningful, got ${JSON.stringify(specialist.description)}`);
+  assert.ok(Array.isArray(specialist.permissions));
+  // The contract is "deny question and subagent only": shell, edit, execute and
+  // external_directory must flow through the shared BEST globals, which allow
+  // shell and external_directory and deny only *.env/*.env.* secret reads.
+  assert.deepEqual(specialist.permissions, [
+    { action: 'question', resource: '*', effect: 'deny' },
+    { action: 'subagent', resource: '*', effect: 'deny' },
+  ], 'specialist explicitly denies question and subagent and nothing else');
+  // General is reused, not duplicated as a separate role.
+  assert.ok(best.agents.general && best.agents.general.description, 'general agent still owns independent implementation');
+  assert.equal(best.agents['coder-a'], undefined, 'no coder-a duplicate alongside specialist');
+  assert.equal(best.agents['coder-b'], undefined, 'no coder-b duplicate alongside specialist');
+  // Reviewer remains a distinct read-only role; specialist is not a rename.
+  assert.equal(best.agents.reviewer.mode, 'subagent');
+  assert.ok(best.agents.reviewer.permissions.some((r) => r.action === 'serena_find_symbol' && r.effect === 'allow'));
+  // 0.2.1 BEST globals: shell allow, external_directory allow, *.env read deny.
+  const globals = best.permissions;
+  assert.ok(globals.some((r) => r.action === 'shell' && r.effect === 'allow'),
+    '0.2.1 BEST globals still allow shell for any agent that does not deny it');
+  assert.ok(globals.some((r) => r.action === 'external_directory' && r.effect === 'allow'),
+    '0.2.1 BEST globals still allow external_directory');
+  assert.ok(globals.some((r) => r.action === 'read' && r.resource === '*.env' && r.effect === 'deny'),
+    '0.2.1 BEST globals still deny secret reads');
+  // FREE agent roster stays exactly the documented 0-agent, no-role extras.
+  assert.deepEqual(Object.keys(free.agents).sort(), ['build', 'compaction', 'explore', 'general', 'plan', 'reviewer', 'summary', 'title']);
+  assert.equal(free.agents.specialist, undefined, 'FREE does not inherit the BEST specialist role');
+});
+
+test('BEST Hybrid specialist inherits its coordinator override, FREE ignores it', (t) => {
+  const f = fixture(t);
+  f.env.OPENCODE_TEAM_BEST_MODEL = 'openai/another-coordinator';
+  ok(f.run('setup'));
+  const best = f.config('best');
+  assert.equal(best.agents.build.model, 'openai/another-coordinator#low');
+  assert.equal(best.agents.plan.model, 'openai/another-coordinator#medium');
+  assert.equal(best.agents.reviewer.model, 'openai/another-coordinator#medium');
+  assert.equal(best.agents.specialist.model, 'openai/another-coordinator#medium',
+    'specialist uses the same BEST coordinator and medium reasoning variant as plan/reviewer');
+  // Worker pool keeps its opencode-go identity: override only swaps the OpenAI tier.
+  assert.equal(best.agents.general.model, 'opencode-go/minimax-m3');
+  assert.equal(best.agents.explore.model, 'opencode-go/mimo-v2.6-flash');
+  assert.equal(best.agents.title.model, 'opencode-go/mimo-v2.6-flash');
+  assert.equal(best.agents.summary.model, 'opencode-go/minimax-m3');
+  assert.equal(best.agents.compaction.model, 'opencode-go/minimax-m3');
+  assert.equal(best.providers.openai.models['another-coordinator'].settings.reasoningEffort, 'low');
+  // FREE singleton is unaffected by the BEST override.
+  const free = f.config('free');
+  assert.equal(free.model, 'team-free/mimo-v2.6-flash-free');
+  assert.equal(free.agents.build.model, 'team-free/mimo-v2.6-flash-free');
+  assert.equal(free.agents.specialist, undefined);
+});
+
+test('BEST Hybrid supplement is appended to BEST AGENTS.md only; FREE stays exactly shared/instructions.md; setup is byte-idempotent', (t) => {
+  const f = fixture(t);
+  ok(f.run('setup'));
+  const instructionsPath = path.join(root, 'shared/instructions.md');
+  const supplementPath = path.join(root, 'shared/best-hybrid.md');
+  const instructionsBytes = fs.readFileSync(instructionsPath);
+  const supplementBytes = fs.readFileSync(supplementPath);
+  const bestFile = path.join(f.team, 'config/best/v2/AGENTS.md');
+  const freeFile = path.join(f.team, 'config/free/v2/AGENTS.md');
+  const bestBytes = fs.readFileSync(bestFile);
+  const freeBytes = fs.readFileSync(freeFile);
+  // FREE generated instructions must be byte-identical to the shared source.
+  assert.ok(freeBytes.equals(instructionsBytes),
+    'FREE generated AGENTS.md must equal shared/instructions.md byte-for-byte');
+  assert.equal(bestBytes.length >= instructionsBytes.length, true,
+    'BEST generated AGENTS.md must at minimum contain the shared instructions');
+  assert.equal(bestBytes.subarray(0, instructionsBytes.length).equals(instructionsBytes), true,
+    'BEST generated AGENTS.md must start with shared/instructions.md bytes verbatim');
+  assert.ok(supplementBytes.length > 0, 'supplement must carry content');
+  assert.deepEqual(bestBytes, Buffer.concat([instructionsBytes, Buffer.from('\n'), supplementBytes]));
+  // Idempotence: a second setup run must not rewrite either file.
+  const bestMtime = fs.statSync(bestFile).mtimeMs;
+  const freeMtime = fs.statSync(freeFile).mtimeMs;
+  ok(f.run('setup'));
+  assert.equal(fs.statSync(bestFile).mtimeMs, bestMtime, 'BEST AGENTS.md untouched on repeat');
+  assert.equal(fs.statSync(freeFile).mtimeMs, freeMtime, 'FREE AGENTS.md untouched on repeat');
+  assert.ok(fs.readFileSync(bestFile).equals(bestBytes), 'BEST AGENTS.md bytes preserved on repeat');
+  assert.ok(fs.readFileSync(freeFile).equals(freeBytes), 'FREE AGENTS.md bytes preserved on repeat');
+  // The shared source is never copied into the generated tree as a regular file.
+  assert.notEqual(bestFile, instructionsPath);
+  assert.notEqual(freeFile, instructionsPath);
 });
 
 test('isolated BEST permits Go without changing or inheriting the classic OpenAI-only configuration', (t) => {

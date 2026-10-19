@@ -7,6 +7,8 @@ bash tests/setup-smoke.sh
 bash tests/homebrew-workflow.test.sh
 # Optional integration with an installed V2 binary (no models or database calls):
 OPENCODE_TEAM_NATIVE_TEST_BIN="$(command -v opencode)" node --test --test-name-pattern='native V2 resolves' tests/native-profiles.test.mjs
+# Optional audit of real Hybrid native session exports (not a config mock):
+OPENCODE_TEAM_HYBRID_EXPORT_PREFIX=/path/to/evidence/candidate4 node --test tests/hybrid-evidence.test.mjs
 ```
 
 - Node tests cover native launcher/config/migration behavior, a Homebrew install

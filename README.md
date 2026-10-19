@@ -35,25 +35,31 @@ and `LICENSE` are checked out: no ECC agents, hooks, plugins or orchestrator.
 `doctor` checks local versions/dependencies/config, not auth, model requests or
 MCP connectivity.
 
-## BEST: strong coordinator, economical workers
+## BEST Hybrid: strong coordinator, economical workers
 
 | Responsibility | Native model |
 | --- | --- |
 | Build: implementation, tests and integration | `openai/gpt-6.1-sol#low` |
 | Optional Plan / independent Reviewer | `openai/gpt-6.1-sol#medium` |
+| Specialist: complex scoped implementation or critical analysis | `openai/gpt-6.1-sol#medium` |
 | General / summary / compaction | `opencode-go/minimax-m3` |
 | Explore / title | `opencode-go/mimo-v2.6-flash` |
 
 Build executes ChatGPT-prepared work, validates supplied commands against the
 actual code and permissions, and reports verification evidence. Small tasks stay
-local; substantial independent tasks can go to scoped Go workers. Plan/Reviewer
-are optional, not a routine second planning/review cycle. There is no duplicate
-Expert, fixed fanout, automatic high/max escalation or priority-tier alias.
+local. Normal work uses two or three useful independent lanes. Suitable structured
+mandates prefer Explore, two separate General sessions and Specialist, with disjoint
+writer files, followed by Reviewer after implementation. General is reused, not
+duplicated as Coder A/B. Fewer lanes are correct when four useful independent jobs
+do not exist; the coordinator explains why. Plan remains optional, not a routine
+second planning cycle. There is no fixed fanout, router, scheduler, hook or automatic
+high/max escalation. `shared/best-hybrid.md` supplements BEST only; FREE's existing
+instructions and configuration remain unchanged.
 Subscriptions combine **across agents**, not inside one model request; this is
 not a measured savings or comparative model-performance claim.
 
 V2 drops a variant placed only on the root `model`, so BEST also sets Sol's native
-per-model `settings.reasoningEffort: low`. Build selects `#low`; Plan/Reviewer
+per-model `settings.reasoningEffort: low`. Build selects `#low`; Plan/Reviewer/Specialist
 select `#medium`. Explicit session/CLI variants take precedence. Setup changes
 defaults for new sessions, not stored historical selections: use `/models` there.
 Changing a primary agent alone may retain the session model; children use their
@@ -196,14 +202,14 @@ pending rollout checks](docs/validation.md), and [V2 compatibility/sources](docs
 The workflow deliberately separates candidate testing from publication. The
 following is the release procedure; completed gates are recorded in validation:
 
-1. After approval, commit and push the reviewed source to `prerelease/v0.2.1`.
+1. After approval, commit and push the reviewed source to `prerelease/v0.3.0`.
    Run **Homebrew Install** manually on that branch: Phase A installs the exact
    candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
-2. Only after Phase A succeeds, authorize the immutable `v0.2.1` tag on the
+2. Only after Phase A succeeds, authorize the immutable `v0.3.0` tag on the
    **same commit**. The tag workflow validates the published source archive.
 3. Measure that official archive's SHA-256, update the stable formula URL/checksum
     together, and push the metadata commit. The `master` push validates the clean
-    stable-tap install. For an explicit checksum recheck, dispatch on `v0.2.1`
+    stable-tap install. For an explicit checksum recheck, dispatch on `v0.3.0`
     with `official_archive_sha256` (not on the later formula-metadata commit).
 4. Enable `publish_stable_release` only after those gates pass. Install/upgrade
    the stable package separately; never migrate credentials automatically.
