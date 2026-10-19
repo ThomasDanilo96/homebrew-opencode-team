@@ -36,6 +36,8 @@ on reads do not prevent indirect access through shell, scripts or SSH.
 - `node --test tests/*.test.mjs`: exit 0; 26 passed, 1 optional native test skipped.
   The optional native test was separately run with
   `OPENCODE_TEAM_NATIVE_TEST_BIN=/opt/homebrew/bin/opencode`; exit 0, no skips.
+- `node --test --experimental-test-coverage tests/*.test.mjs`: exit 0;
+  `shared/profiles.mjs` 100% lines, 88.19% branches, 97.83% functions.
 - `bash tests/setup-smoke.sh`: exit 0 (mock runtime).
 - `bash tests/homebrew-workflow.test.sh`: exit 0 (local workflow contract tests).
 - Ruby formula/staging syntax, Bash/Zsh syntax, Node syntax and `git diff --check`:
@@ -57,6 +59,9 @@ on reads do not prevent indirect access through shell, scripts or SSH.
 
 `gh` has no authenticated GitHub host (`gh pr view` exit 4). No login or credential
 export was attempted. Remote CI, PR merge and release creation are not certified.
+Normal non-interactive Git push did succeed: PR #1's branch now includes the
+implementation at `5010a5e`. Git transport access does not authenticate `gh` API
+operations; no credential extraction was used to bridge the two.
 `brew test opencode-team` exits 1 because Homebrew refuses the untrusted
 `thomasdanilo96/opencode-team` tap; runtime formula inspection also refused the
 untrusted `anomalyco/tap`. Trust was not relaxed to bypass these gates.
