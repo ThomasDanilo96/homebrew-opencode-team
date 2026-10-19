@@ -1,8 +1,8 @@
 class OpencodeTeam < Formula
   desc "Isolated BEST and FREE profiles for native OpenCode V2"
   homepage "https://github.com/ThomasDanilo96/homebrew-opencode-team"
-  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.2.1.tar.gz"
-  sha256 "c8eb4793a344b62e025cc3e6d50787b5374445a813e33a173ea7caa86b1378cc"
+  url "https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v0.3.0.tar.gz"
+  sha256 "556b728e2f38b9eca964d2dc0830eea7cbc9a381d2b0cfcff9cc9fa94c5e347e"
   license "MIT"
 
   depends_on "git"
