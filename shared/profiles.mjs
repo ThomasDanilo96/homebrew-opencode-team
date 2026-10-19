@@ -143,6 +143,9 @@ function configuration(profile) {
     for (const id of ['explore', 'title']) agents[id].model = 'opencode-go/mimo-v2.6-flash';
     for (const id of ['general', 'summary', 'compaction']) agents[id].model = goModel;
     agents.general.description = 'Implement an independent, well-scoped task using Go; return focused changes and actual test results';
+    agents.specialist = { model: `${bestModel}#medium`, mode: 'subagent',
+      description: 'Complex scoped implementation or critical technical analysis with Sol Medium; preserve file ownership and return concise evidence',
+      permissions: [rule('question', 'deny'), rule('subagent', 'deny')] };
   }
   for (const id of ['plan', 'explore', 'reviewer']) agents[id].permissions = readonlyPermissions(profile);
   agents.reviewer = { ...agents.reviewer, description: 'Review changes for correctness, security and regressions without editing',
@@ -257,7 +260,10 @@ function setup() {
   nativeBinary();
   preflight();
   const updates = profiles.flatMap((p) => [{ file: configFile(p), bytes: json(configuration(p)) },
-    { file: instructionFile(p), bytes: fs.readFileSync(path.join(packageRoot, 'shared/instructions.md')) }]);
+    { file: instructionFile(p), bytes: Buffer.concat([
+      fs.readFileSync(path.join(packageRoot, 'shared/instructions.md')),
+      ...(p === 'best' ? [Buffer.from('\n'), fs.readFileSync(path.join(packageRoot, 'shared/best-hybrid.md'))] : []),
+    ]) }]);
   locked(() => {
     provision();
     for (const p of profiles) for (const directory of [path.join(roots.config, p, 'v2/xdg-config/opencode'),
