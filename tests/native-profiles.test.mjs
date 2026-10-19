@@ -47,6 +47,29 @@ esac
 }
 const ok = (result) => assert.equal(result.status, 0, result.stderr + result.stdout);
 
+test('generated BEST permissions allow authorized work while FREE and read-only boundaries remain intact', (t) => {
+  const f = fixture(t);
+  ok(f.run('setup'));
+  const rule = (action, effect, resource = '*') => ({ action, resource, effect });
+  assert.deepEqual(f.config('best').permissions, [
+    rule('external_directory', 'allow'), rule('shell', 'allow'),
+    rule('read', 'deny', '*.env'), rule('read', 'deny', '*.env.*'),
+    rule('read', 'allow', '*.env.example'),
+  ]);
+  assert.deepEqual(f.config('free').permissions, [rule('external_directory', 'ask'), rule('shell', 'ask')]);
+  assert.equal(f.config('best').agents.general.permissions, undefined, 'General inherits global rules after native defaults');
+  for (const id of ['plan', 'explore', 'reviewer']) {
+    const rules = f.config('best').agents[id].permissions;
+    assert.ok(rules.some((r) => r.action === '*' && r.effect === 'deny'));
+    assert.ok(!rules.some((r) => r.effect === 'ask'));
+    assert.ok(rules.some((r) => r.action === 'external_directory' && r.effect === 'allow'));
+    for (const action of ['shell', 'edit', 'execute', 'subagent', 'serena_replace_symbol_body']) {
+      assert.ok(!rules.some((r) => r.action === action && r.effect === 'allow'), `${id}: ${action}`);
+    }
+    assert.ok(f.config('free').agents[id].permissions.some((r) => r.action === 'external_directory' && r.effect === 'ask'));
+  }
+});
+
 test('only best/free public profiles; native arguments and resume are forwarded exactly', (t) => {
   const f = fixture(t);
   ok(f.run('setup'));
