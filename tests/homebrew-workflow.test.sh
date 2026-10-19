@@ -156,21 +156,25 @@ args = sys.argv[1:]
 state = Path('created')
 scenario = os.environ['SCENARIO']
 if args[:2] == ['release', 'create']:
+    Path('create-called').touch()
     assert scenario != 'existing', 'must never replace an existing release'
     if scenario != 'failed': state.touch()
     sys.exit(1 if scenario in ['timeout', 'failed'] else 0)
 assert args[:2] == ['release', 'view']
-if scenario not in ['existing', 'draft'] and not state.exists(): sys.exit(1)
-print(json.dumps({'tagName': 'v0.2.0', 'isDraft': scenario == 'draft', 'isPrerelease': False, 'url': 'https://example.invalid/release'}))
+if scenario not in ['existing', 'draft', 'prerelease', 'wrong-tag'] and not state.exists(): sys.exit(1)
+print(json.dumps({'tagName': 'v0.1.66' if scenario == 'wrong-tag' else 'v0.2.0', 'isDraft': scenario == 'draft', 'isPrerelease': scenario == 'prerelease', 'url': 'https://example.invalid/release'}))
 ''')
     for name in ['git', 'gh']:
         (root / name).chmod(0o755)
-    for scenario, succeeds in [('existing', True), ('created', True), ('timeout', True), ('failed', False), ('draft', False)]:
+    for scenario, succeeds in [('existing', True), ('created', True), ('timeout', True), ('failed', False), ('draft', False), ('prerelease', False), ('wrong-tag', False)]:
         (root / 'created').unlink(missing_ok=True)
+        (root / 'create-called').unlink(missing_ok=True)
         env = {**os.environ, 'PATH': str(root) + os.pathsep + os.environ['PATH'],
                'VERIFIED_TAG_SHA': 'a' * 40, 'SCENARIO': scenario}
         result = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', script], cwd=root,
                                 env=env, capture_output=True, text=True, timeout=15)
         assert (result.returncode == 0) == succeeds, (scenario, result.returncode, result.stdout, result.stderr)
+        if scenario == 'existing':
+            assert not (root / 'create-called').exists(), 'existing release must never invoke create'
         print('Release scenario PASS:', scenario)
 PY

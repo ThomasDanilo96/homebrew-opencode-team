@@ -27,5 +27,6 @@ Live Go/OpenAI authentication, anonymous FREE responses, real Serena/ECC use,
 native model exports, coding and resume were independently exercised in disposable
 profiles. They are **not part of this mock suite**, nor proof of an installed
 formula's auth state. A keg-only Homebrew candidate was installed and `brew test`
-passed separately; remote CI still needs an authorized push. See
+passed separately. Phase A, official-archive and stable-tap remote CI also passed;
+publication-timeout recovery has separate behavioral coverage. See
 [recorded results and pending checks](../docs/validation.md).

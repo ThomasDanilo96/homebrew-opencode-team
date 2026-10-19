@@ -242,6 +242,51 @@ candidate tarball. The immutable tagged README retains its prepublication record
 the current rollout evidence and formula metadata follow on `master`.
 
 Stable-tap clean-install, GitHub Release publication and normal local Team package
-upgrade are the next gates, not outcomes claimed by the two archive runs.
+upgrade were the next gates at that boundary, resolved below; they were not
+outcomes claimed by the two archive runs.
 The REST monitor exhausted its quota; read-only GraphQL check-suite results
 confirmed both remote gates without changing authentication or permissions.
+
+## Stable release and normal local installation — completed
+
+- Stable tap run `39261157211`, master `e53120001aabc1739366a4cb1f9d98fcde3ca9d9`:
+  **SUCCESS**, including `clean-install`, formula test and strict audit.
+- GitHub Release `v0.2.0` was published at **2026-10-19T13:38:37Z**; native
+  `gh release view` confirmed the tag, published timestamp and non-draft,
+  non-prerelease state. The immutable tag still selects the tested candidate SHA.
+- Publication run `39261755253` passed its evidence gates but reported **FAILURE**:
+  GitHub returned **HTTP 504 after creating the release**. This failure is retained
+  as evidence, not relabeled green or followed by release deletion/recreation.
+- The workflow now verifies actual stable release state after creation errors and
+  accepts an already published release without replacing it, after the same
+  immutable-tag/Phase B/stable-install gates. Mandatory final lookup still rejects
+  missing releases, drafts and prereleases. Behavior tests run the actual shell
+  block against mocks: existing/create/post-create-timeout succeed; true failure
+  draft, prerelease and wrong-tag fail. RED rejected the existing release; all
+  seven final cases passed after the fix.
+  Independent review identified a mock gap; the existing-release case now also
+  explicitly asserts zero creation attempts. Remote confirmation follows via the
+  normal source/install and publication-dispatch gates; no tag/archive is changed.
+- Local `brew upgrade` installed **only OpenCode Team 0.2.0**. The usual
+  `/opt/homebrew/bin/opencode-team` now resolves to the stable 0.2.0 keg. Prior kegs
+  remain; automatic updates, cleanup and dependent upgrades were disabled.
+- Actual stable `brew test`, `brew audit --strict`, `version`, `setup` and `doctor`
+  all exited **0**. Setup created configuration backup
+  `2026-10-19T13-38-34.123Z-4bbbb2fc-2cb9-4028-bb33-4c979226ccbe` and imported no auth.
+- Normal BEST already reports stored **Go API key and OpenAI OAuth**; FREE reports
+  **no authenticated integrations**. Neither credential store was copied/exported.
+- A live run through the normal installed launcher and normal BEST roots delegated
+  Sol → Go General, executing **5/5 tests, exit 0** in the disposable fixture.
+  Native exports confirm `openai/gpt-6.1-sol` parent
+  `ses_eab9b5f0bffeJTC7dw47im5zQb` and `opencode-go/minimax-m3` General
+  `ses_eab9b47aeffe11h8o7ZyRtsP4Y`. Normal FREE replied `STABLE_FREE_OK`; its export
+  confirms only `team-free/mimo-v2.6-flash-free`.
+- Classic `opencode.jsonc`, `cli.json`, original `AGENTS.md` and native OpenCode
+  executable remain unchanged by checksum/mtime/mode and executable-target checks.
+  Final evidence is in `package-candidate/stable-model-proof.json` and
+  `stable-classic-before.json` / `stable-classic-after.json` outside the repository.
+
+The candidate keg remains separately installed but is not linked as the normal
+command. Historical data, backups and OS jobs remain preserved; no OS-job cleanup
+or unrelated repository changes were performed. The long-context/OAuth-expiry,
+comparative-benchmark and billing limitations above still apply.
