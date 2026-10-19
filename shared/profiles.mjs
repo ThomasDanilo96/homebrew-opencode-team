@@ -157,7 +157,8 @@ function configuration(profile) {
   }
   const config = { $schema: 'https://opencode.ai/config.json', model, default_agent: 'build', agents,
     policies: [rule('provider.use', 'deny'), ...(profile === 'best' ? ['opencode-go', 'openai'] : ['team-free']).map((provider) => rule('provider.use', 'allow', provider))],
-    permissions: [rule('external_directory', 'ask'), rule('shell', 'ask')],
+    permissions: [rule('external_directory', profile === 'best' ? 'allow' : 'ask'),
+      rule('shell', profile === 'best' ? 'allow' : 'ask')],
     skills: [path.join(eccSource, 'skills')], instructions,
     mcp: { servers: { serena: { type: 'local', command: [serenaBin, 'start-mcp-server', '--context', 'ide', '--project-from-cwd', '--enable-web-dashboard', 'false', '--open-web-dashboard', 'false'],
       codemode: false, disabled: false, environment: { SERENA_HOME: path.join(roots.state, profile, 'serena') },
