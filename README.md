@@ -196,10 +196,10 @@ pending rollout checks](docs/validation.md), and [V2 compatibility/sources](docs
 The workflow deliberately separates candidate testing from publication. The
 following is the release procedure; completed gates are recorded in validation:
 
-1. After approval, commit and push the reviewed source to `prerelease/v0.2.0`.
+1. After approval, commit and push the reviewed source to `prerelease/v0.2.1`.
    Run **Homebrew Install** manually on that branch: Phase A installs the exact
    candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
-2. Only after Phase A succeeds, authorize the immutable `v0.2.0` tag on the
+2. Only after Phase A succeeds, authorize the immutable `v0.2.1` tag on the
    **same commit**. The tag workflow validates the published source archive.
 3. Measure that official archive's SHA-256, update the stable formula URL/checksum
    together, and push the metadata commit. Dispatch with `official_archive_sha256`
