@@ -1,6 +1,0 @@
-{
-  "plugin": [
-    "oh-my-openagent",
-    "@PACKAGE_ROOT@/shared/response-copy"
-  ]
-}

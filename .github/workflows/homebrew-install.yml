@@ -1,5 +1,13 @@
 name: Homebrew Install
 
+permissions:
+  contents: read
+
+env:
+  GIT_TERMINAL_PROMPT: "0"
+  GCM_INTERACTIVE: "Never"
+  SSH_ASKPASS_REQUIRE: "never"
+
 on:
   push:
     branches: [master, "prerelease/**"]
@@ -34,20 +42,10 @@ jobs:
           bash tests/homebrew-workflow.test.sh
           ruby -c Formula/opencode-team.rb
           ruby -c .github/scripts/render-staging-formula.rb
-          node --test tests/opencode-team-launcher-regression.test.mjs
-          node --test tests/best-ecc-config.test.mjs tests/best-cli-routing.test.mjs
-          node --test tests/deep-audit-cli.test.mjs
-          node --test tests/deep-audit-report.test.mjs
-           node --test tests/deep-audit-scanner.test.mjs
-           node --test tests/deep-audit-test-runner.e2e.mjs
-          bash tests/deep-audit-sandbox.test.sh
-          bash -n tests/deep-audit-runtime-smoke.sh
-          bash tests/core-resume.test.sh
-          node --check shared/response-copy/exporter.js
-          node --check shared/response-copy/runtime-source.js
-          node --check teams/best/best-native-router.mjs
-          node --check teams/best/best-router-contract.mjs
-          node --test tests/best-native-router.test.mjs
+          bash -n bin/opencode-team tests/setup-smoke.sh
+          zsh -n completions/_opencode-team
+          node --check shared/profiles.mjs
+          node --test tests/*.test.mjs
 
   release_state:
     needs: source-validation
@@ -66,7 +64,7 @@ jobs:
           expected_version="$(tr -d '[:space:]' < VERSION)"
           [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           tag="v$expected_version"
-          if ! tag_result="$(git ls-remote origin "refs/tags/$tag" 2>&1)"; then
+          if ! tag_result="$(git -c credential.interactive=false ls-remote origin "refs/tags/$tag" 2>&1)"; then
             printf 'Unable to check publication state for %s:\n%s\n' "$tag" "$tag_result" >&2
             exit 1
           fi
@@ -100,12 +98,12 @@ jobs:
         run: |
           echo 'Phase A / bottle preflight: validating macOS Homebrew dependencies (no Docker Desktop required)'
           brew update
-          for dependency in git jq node@22 ripgrep terminal-notifier tmux uv opencode gitleaks; do
+          for dependency in git jq node@22 uv opencode gitleaks; do
             brew fetch --force-bottle "$dependency"
           done
           opencode_version="$(brew info --json=v2 opencode | jq -r '.formulae[0].versions.stable')"
           test -n "$opencode_version"
-          ruby -e 'abort "OpenCode #{ARGV[0]} is below required minimum 1.18.30" if Gem::Version.new(ARGV[0]) < Gem::Version.new("1.18.30")' "$opencode_version"
+          ruby -e 'abort "OpenCode V2 required" unless Gem::Version.new(ARGV[0]).segments.first == 2' "$opencode_version"
           brew install --force-bottle opencode gitleaks
 
       - name: Build candidate source artifact and ephemeral formula
@@ -128,8 +126,6 @@ jobs:
             Formula/opencode-team.rb "$formula" OpencodeTeamStaging "$version" \
             "file://$archive" "$staging_sha256"
           ruby -c "$formula"
-          printf 'staging_artifact=%s\nstaging_formula=%s\nstaging_sha256=%s\n' \
-            "$archive" "$formula" "$staging_sha256" >>"$GITHUB_OUTPUT"
 
       - name: Install and test isolated staging formula
         timeout-minutes: 35
@@ -146,11 +142,10 @@ jobs:
           test "$(cd "$RUNNER_TEMP" && opencode-team version)" = "OpenCode Team $version"
           package_root="$(brew --prefix opencode-team/staging/opencode-team-staging)/libexec"
           test -x "$package_root/bin/opencode-team"
-          test -x "$package_root/teams/deep-audit/bin/read-only-opencode.sh"
-          test -f "$package_root/teams/deep-audit/setup-scanners.sh"
-          test -f "$package_root/teams/deep-audit/setup-test-runners.sh"
+          test -f "$package_root/shared/profiles.mjs"
+          test -f "$package_root/shared/ecc.lock"
           gitleaks dir "$package_root"
-          CI=true OPENCODE_TEAM_TEST_SKIP_TIME_MACHINE=1 \
+          CI=true \
             OPENCODE_TEAM_PACKAGE_ROOT="$package_root" bash "$package_root/tests/setup-smoke.sh"
 
   official-archive-validation:
@@ -177,12 +172,12 @@ jobs:
             [[ "$EXPECTED_ARCHIVE_SHA256" =~ ^[0-9a-f]{64}$ ]]
           fi
           brew update
-          for dependency in git jq node@22 ripgrep terminal-notifier tmux uv opencode gitleaks; do
+          for dependency in git jq node@22 uv opencode gitleaks; do
             brew fetch --force-bottle "$dependency"
           done
           opencode_version="$(brew info --json=v2 opencode | jq -r '.formulae[0].versions.stable')"
           test -n "$opencode_version"
-          ruby -e 'abort "OpenCode #{ARGV[0]} is below required minimum 1.18.30" if Gem::Version.new(ARGV[0]) < Gem::Version.new("1.18.30")' "$opencode_version"
+          ruby -e 'abort "OpenCode V2 required" unless Gem::Version.new(ARGV[0]).segments.first == 2' "$opencode_version"
           brew install --force-bottle opencode gitleaks
           version="$(tr -d '[:space:]' < VERSION)"
           candidate_branch="prerelease/v$version"
@@ -235,9 +230,9 @@ jobs:
           package_root="$(brew --prefix opencode-team/staging/opencode-team-official)/libexec"
           test "$(command -v opencode-team)" = "$(brew --prefix)/bin/opencode-team"
           test "$(cd "$RUNNER_TEMP" && opencode-team version)" = "OpenCode Team $version"
-          node --test "$package_root/tests/opencode-team-launcher-regression.test.mjs"
+          node --test "$package_root/tests/native-profiles.test.mjs"
           gitleaks dir "$package_root"
-          CI=true OPENCODE_TEAM_TEST_SKIP_TIME_MACHINE=1 \
+          CI=true \
             OPENCODE_TEAM_PACKAGE_ROOT="$package_root" bash "$package_root/tests/setup-smoke.sh"
 
   clean-install:
@@ -255,13 +250,13 @@ jobs:
         run: |
           brew update
           # Fail before installing the formula if any direct dependency lacks a runner bottle.
-          for dependency in git jq node@22 ripgrep terminal-notifier tmux uv opencode gitleaks; do
+          for dependency in git jq node@22 uv opencode gitleaks; do
             brew fetch --force-bottle "$dependency"
           done
           brew install --force-bottle gitleaks
           opencode_version="$(brew info --json=v2 opencode | jq -r '.formulae[0].versions.stable')"
           test -n "$opencode_version"
-          ruby -e 'abort "OpenCode #{ARGV[0]} is below required minimum 1.18.30" if Gem::Version.new(ARGV[0]) < Gem::Version.new("1.18.30")' "$opencode_version"
+          ruby -e 'abort "OpenCode V2 required" unless Gem::Version.new(ARGV[0]).segments.first == 2' "$opencode_version"
 
       - name: Tap and trust formula
         timeout-minutes: 10
@@ -305,15 +300,13 @@ jobs:
           node --version
           git --version
           jq --version
-          tmux -V
           uv --version
-          rg --version
           curl --version
           package_root="$(brew --prefix opencode-team)/libexec"
           test -x "$package_root/bin/opencode-team"
           test "$(opencode-team version)" = "OpenCode Team $expected_version"
 
-      - name: Installed package configuration and Seatbelt smoke
+      - name: Installed package native profile mock smoke
         timeout-minutes: 10
         run: |
           package_root="$(brew --prefix opencode-team)/libexec"
@@ -346,7 +339,7 @@ jobs:
         run: |
           version="$(tr -d '[:space:]' < VERSION)"
           tag="v$version"
-          tag_refs="$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+          tag_refs="$(git -c credential.interactive=false ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")"
           tag_sha="$(printf '%s\n' "$tag_refs" | awk -v ref="refs/tags/$tag^{}" '$2 == ref { print $1; exit }')"
           if [ -z "$tag_sha" ]; then
             tag_sha="$(printf '%s\n' "$tag_refs" | awk -v ref="refs/tags/$tag" '$2 == ref { print $1; exit }')"
@@ -387,7 +380,7 @@ jobs:
         run: |
           version="$(tr -d '[:space:]' < VERSION)"
           tag="v$version"
-          tag_refs="$(git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")"
+          tag_refs="$(git -c credential.interactive=false ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}")"
           current_tag_sha="$(printf '%s\n' "$tag_refs" | awk -v ref="refs/tags/$tag^{}" '$2 == ref { print $1; exit }')"
           if [ -z "$current_tag_sha" ]; then
             current_tag_sha="$(printf '%s\n' "$tag_refs" | awk -v ref="refs/tags/$tag" '$2 == ref { print $1; exit }')"

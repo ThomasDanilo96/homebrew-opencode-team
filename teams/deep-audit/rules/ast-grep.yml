@@ -1,6 +1,0 @@
-id: python-subprocess-shell-true
-language: Python
-rule:
-  pattern: subprocess.run($COMMAND, shell=True)
-severity: warning
-message: Subprocess invocation enables a shell; verify data cannot control the command.

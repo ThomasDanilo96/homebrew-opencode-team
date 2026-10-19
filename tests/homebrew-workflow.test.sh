@@ -1,15 +1,20 @@
 #!/usr/bin/env bash
+# Workflow assertions below intentionally match literal $variables, not expansions.
+# shellcheck disable=SC2016
 set -euo pipefail
 
 workflow="${1:-.github/workflows/homebrew-install.yml}"
 expected_version="$(tr -d '[:space:]' < VERSION)"
 
 [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+grep -Fq '  GIT_TERMINAL_PROMPT: "0"' "$workflow"
+grep -Fq '  GCM_INTERACTIVE: "Never"' "$workflow"
+grep -Fq '  SSH_ASKPASS_REQUIRE: "never"' "$workflow"
+grep -Fq 'git -c credential.interactive=false ls-remote origin' "$workflow"
 grep -Fq 'expected_version="$(tr -d '\''[:space:]'\'' < VERSION)"' "$workflow"
 grep -Fq 'test "$(opencode-team version)" = "OpenCode Team $expected_version"' "$workflow"
 grep -Fq 'OPENCODE_TEAM_PACKAGE_ROOT="$package_root"' "$workflow"
 grep -Fq 'PACKAGING CONFIG SMOKE PASS' "${workflow%/*}/../../tests/setup-smoke.sh"
-grep -Fq 'DEEP_AUDIT_SANDBOX PASS' "${workflow%/*}/../../tests/deep-audit-sandbox.test.sh"
 if grep -En '0\.1\.17|v0\.1\.17' "$workflow"; then
   echo "workflow contains a stale release version" >&2
   exit 1
@@ -25,19 +30,18 @@ grep -Fq "formulae[0].urls.stable.url" "$workflow"
 grep -Fq "formulae[0].urls.stable.checksum" "$workflow"
 grep -Fq 'formula_url" != "$expected_url"' "$workflow"
 grep -Fq 'brew fetch --force ThomasDanilo96/opencode-team/opencode-team' "$workflow"
-grep -Fq 'for dependency in git jq node@22 ripgrep terminal-notifier tmux uv opencode' "$workflow"
+grep -Fq 'for dependency in git jq node@22 uv opencode' "$workflow"
 grep -Fq 'brew fetch --force-bottle "$dependency"' "$workflow"
-grep -Fq 'Gem::Version.new("1.18.30")' "$workflow"
-grep -Fq 'node --test "$ROOT/tests/opencode-team-launcher-regression.test.mjs"' "${workflow%/*}/../../tests/setup-smoke.sh"
+grep -Fq 'segments.first == 2' "$workflow"
+grep -Fq 'node --test "$ROOT/tests/native-profiles.test.mjs"' "${workflow%/*}/../../tests/setup-smoke.sh"
 grep -Fq 'brew test ThomasDanilo96/opencode-team/opencode-team' "$workflow"
 grep -Fq 'brew audit --strict --formula ThomasDanilo96/opencode-team/opencode-team' "$workflow"
 grep -Fq 'brew update' "$workflow"
 grep -Fq 'timeout-minutes: 60' "$workflow"
 grep -Fq 'brew install --verbose ThomasDanilo96/opencode-team/opencode-team' "$workflow"
 grep -Fq 'runs-on: macos-26' "$workflow"
-grep -Fq 'tests/deep-audit-sandbox.test.sh' "$workflow"
-grep -Fq 'tests/deep-audit-scanner.test.mjs' "$workflow"
-grep -Fq 'tests/deep-audit-runtime-smoke.sh' "$workflow"
+grep -Fq 'node --test tests/*.test.mjs' "$workflow"
+grep -Fq 'shared/profiles.mjs' "$workflow"
 grep -Fq 'prepublication-staging:' "$workflow"
 grep -Fq "if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/prerelease/') && needs.release_state.outputs.published == 'false'" "$workflow"
 grep -Fq 'candidate_sha="$(git rev-parse HEAD)"' "$workflow"
@@ -80,8 +84,8 @@ if "brew tap-new --no-git opencode-team/staging" not in staging or 'formula="$(b
     raise SystemExit("Phase A formula must stay in the temporary no-git tap")
 if "start-docker-desktop.sh" in staging or "brew install --cask docker" in staging or "deep-audit-runtime-smoke.sh" in staging:
     raise SystemExit("Phase A Homebrew package validation must not provision Docker or run Docker runtime tests")
-if 'tests/deep-audit-sandbox.test.sh' not in Path("tests/setup-smoke.sh").read_text():
-    raise SystemExit("Phase A must test the macOS Seatbelt policy from the installed candidate package")
+if 'tests/native-profiles.test.mjs' not in Path("tests/setup-smoke.sh").read_text():
+    raise SystemExit("Phase A must test native profile isolation from the installed candidate package")
 
 official = text.split("  official-archive-validation:\n", 1)[1].split("  clean-install:\n", 1)[0]
 if "github.event_name == 'push' && github.ref_type == 'tag'" not in official or 'archive_url="https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v$version.tar.gz"' not in official:
@@ -102,7 +106,7 @@ if "inputs.publish_stable_release" not in clean_install:
 release = text.split("  publish-stable-release:\n", 1)[1]
 if "needs: [source-validation, release_state]" not in release or "if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && inputs.publish_stable_release && needs.release_state.outputs.published == 'true'" not in release:
     raise SystemExit("stable Release creation must require master dispatch and explicit publication")
-if "Verify Phase B evidence for immutable tag SHA" not in release or 'git ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}"' not in release:
+if "Verify Phase B evidence for immutable tag SHA" not in release or 'git -c credential.interactive=false ls-remote origin "refs/tags/$tag" "refs/tags/$tag^{}"' not in release:
     raise SystemExit("publication must resolve the immutable tag SHA before checking Phase B evidence")
 if "gh run list" not in release or "--event push --branch \"$tag\"" not in release or 'select(.headSha == $sha and .conclusion == "success")' not in release or 'select(.name == "official-archive-validation")' not in release:
     raise SystemExit("publication must refuse missing, failed, or mismatched Phase B evidence")
@@ -117,7 +121,7 @@ if grep -Fq 'opencode-team best-ecc-setup' "$workflow" || grep -Fq 'opencode-tea
   echo "clean-install workflow repeats setup work already performed by setup" >&2
   exit 1
 fi
-grep -Fq 'git ls-remote origin "refs/tags/$tag"' "$workflow"
+grep -Fq 'git -c credential.interactive=false ls-remote origin "refs/tags/$tag"' "$workflow"
 grep -Fq 'if ! tag_result=' "$workflow"
 grep -Fq 'resolved_ref="$(printf '\''%s\n'\'' "$tag_result" | awk '\''NR == 1 { print $2 }'\'')"' "$workflow"
 if grep -Fq 'git ls-remote --exit-code' "$workflow"; then

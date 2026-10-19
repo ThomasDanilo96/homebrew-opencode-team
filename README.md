@@ -1,198 +1,210 @@
 # OpenCode Team
 
-Status: release `v0.1.64`.
+Two isolated profiles on **standard OpenCode V2**, with one launcher and config
+generator (`shared/profiles.mjs`). Native V2 owns agents, tools, permissions,
+skills, MCP and sessions. No custom server, router, daemon, OmO, Codex bridge,
+mandatory fanout or background maintenance is installed.
 
-## Goal
+| Profile | Default | Connection |
+| --- | --- | --- |
+| `best` | OpenAI Sol coordinator + Go workers | Connect OpenAI and Go independently inside BEST |
+| `free` | `team-free/mimo-v2.6-flash-free` | Anonymous; no paid credentials |
 
-Package the portable OpenCode Team runtime foundation for distribution through Homebrew.
+**Unpublished candidate: 0.2.0.** The stable formula still identifies the immutable
+0.1.66 archive; it does not yet install these changes. The local candidate is
+keg-only and does not replace the existing `opencode-team` command.
 
-## Requirements
+## Setup
 
-- macOS
-- Homebrew
-- Node.js
-- Git
-- curl, jq, uv, ripgrep
-- tmux for GO and the BEST OpenCode fallback
-- Codex and Serena for team integrations; `gh` remains optional
-- Node.js 22.22.2+, Node.js 24.15.0+, or Node.js 26+
+Install OpenCode **V2** yourself; V1 and unknown major versions are rejected.
+Setup never installs/replaces OpenCode or changes its shared service settings.
+Requirements: Node.js 22.16+ (Homebrew uses `node@22`), Git and uv.
 
-## Usage
-
-```bash
-HOMEBREW_NO_INSTALL_CLEANUP=1 brew install ThomasDanilo96/opencode-team/opencode-team
+```sh
 opencode-team setup
 opencode-team doctor
 opencode-team best
-```
-
-For the separate ECC-powered profile, the normal `opencode-team setup` also
-installs the pinned, curated ECC skills and hooks. Then launch
-`opencode-team best-ecc`. `opencode-team best-ecc-setup` remains available to
-repair or re-check those assets; `best` keeps its own configuration and remains
-independent.
-
-The in-development `deep-audit` profile is isolated from the coding teams and
-uses a target-scoped macOS write-deny sandbox. Prepare it with
-`opencode-team deep-audit-setup`, inspect prerequisites with
-`opencode-team deep-audit-doctor`, then run `opencode-team deep-audit [TARGET]`.
-The audit reports are stored under the Deep Audit data root, not in `TARGET`.
-OAuth must be connected inside this isolated profile with `/connect openai`;
-refresh tokens are not copied between teams. The profile is **not READY** until
-its doctor confirms required scanners and profile-local authentication.
-
-OAuth credentials are intentionally not copied between OpenCode profiles,
-because rotating refresh tokens become invalid when multiple isolated copies
-are used. On first use, connect each provider inside the target profile with
-`/connect openai` and `/connect opencode-go`. Setup removes legacy shared-token
-copies from BEST/BEST-ECC when it detects the previous bridge behavior.
-
-The Homebrew formula also installs Zsh completions for profiles and subcommands.
-Open a new shell after upgrading, or reload completions in the current shell
-with `autoload -Uz compinit && compinit`.
-
-`setup` installs a macOS LaunchAgent that checks the latest published Git tag
-every 12 hours. It sends one notification per newer version, with the Homebrew
-upgrade and setup commands; it never upgrades automatically. Chat completion
-notifications show the profile and session title, and open the target tmux chat
-when clicked. Their banner duration is controlled by macOS: choose **Alerts**
-for terminal-notifier under System Settings → Notifications to keep them visible
-until dismissed. The terminal-notifier `-timeout` option only controls waits for
-interactive replies; macOS has no per-notification banner-duration setting.
-
-To use the separate BEST-based profile with OpenCode Zen's currently free models,
-launch `opencode-team free` and run `/connect` inside that profile to
-authenticate OpenCode Zen; then restart `free`. Its credentials are
-isolated from the other profiles. It selects Step 5 Preview Free for coding,
-Nemotron 3 Ultra Free for architecture/review, MiMo V2.6 Flash Free for quick
-work, and Ling 3.1 Flash Free for exploration/documentation. Free model
-availability and limits can change; the normal BEST profile is unchanged.
-
-`best` launches the OpenCode BEST profile. `best-opencode` remains an alias for
-the same profile. OmO Native v5, with persistent memory and the BEST
-route-gating extension, is available separately as `best-native`. On first
-Native use, migrate the isolated BEST provider and model configuration with
-`opencode-team best-native-setup`; run it without flags to review and approve
-the import. OpenAI OAuth requires `/login chatgpt-subscription` inside OmO.
-
-`best-ecc` is an isolated OpenCode profile that layers ECC's selected TDD,
-verification, security, backend and frontend skills plus specialist agents on
-the BEST coordinator. Its ECC TDD planner uses the OpenCode Go Qwen model and
-is read-only; implementation and final review remain on the OpenAI models.
-Skills are discovered on demand rather than injected wholesale. Serena is the
-preferred code-navigation path to reduce broad scans and repeated context, but
-token savings are workload-dependent and are not guaranteed to be 50% without
-measuring comparable sessions.
-
-The install-scoped `HOMEBREW_NO_INSTALL_CLEANUP=1` prevents an unrelated broken
-Homebrew package from aborting this install. It does not change Homebrew's global
-configuration. `setup` reuses a compatible OpenCode already installed by Homebrew,
-including an existing v0.1.16-era tap installation, or installs Homebrew-core
-OpenCode when none is available. No third-party tap trust step is required.
-
-Alternative profiles:
-
-```bash
+# In BEST: /connect OpenCode Go; /connect OpenAI using ChatGPT sign-in.
 opencode-team free
-opencode-team go
-opencode-team openai
 ```
 
-## OpenAI profiles
+Setup provisions managed Serena **1.7.0** with uv/Python 3.13 under the dependency
+root. ECC comes from `https://github.com/affaan-m/ECC.git`, pinned by
+`shared/ecc.lock` to `b92f181b3b748d1abbc2afd94af6aa7d8c8fca29`. Only `skills/`
+and `LICENSE` are checked out: no ECC agents, hooks, plugins or orchestrator.
+`doctor` checks local versions/dependencies/config, not auth, model requests or
+MCP connectivity.
 
-`opencode-team daily` is the fast, cost-efficient OpenAI-only daily driver for
-repository analysis, coding, bug fixes, tests, and medium-size refactors. It
-uses Luna by default, escalates selectively to Terra or Sol, and keeps runtime
-state isolated from `openai`.
+## BEST: strong coordinator, economical workers
 
-Use `opencode-team openai` for maximum-capability or high-risk work.
+| Responsibility | Native model |
+| --- | --- |
+| Build: implementation, tests and integration | `openai/gpt-6.1-sol#low` |
+| Optional Plan / independent Reviewer | `openai/gpt-6.1-sol#medium` |
+| General / summary / compaction | `opencode-go/minimax-m3` |
+| Explore / title | `opencode-go/mimo-v2.6-flash` |
 
-Run `opencode-team daily-report` to summarize completed Daily work packets,
-token usage, estimated cost, model mix, fanout, and latency. Missing telemetry
-is reported as `null`/`unmeasured`.
+Build executes ChatGPT-prepared work, validates supplied commands against the
+actual code and permissions, and reports verification evidence. Small tasks stay
+local; substantial independent tasks can go to scoped Go workers. Plan/Reviewer
+are optional, not a routine second planning/review cycle. There is no duplicate
+Expert, fixed fanout, automatic high/max escalation or priority-tier alias.
+Subscriptions combine **across agents**, not inside one model request; this is
+not a measured savings or comparative model-performance claim.
 
-`free`, `go`, `openai`, and `daily` are aliases for `start <team>`. Both `best`
-and `start best` launch the OpenCode BEST profile; `best-opencode` is an alias.
-Use `best-native` for OmO Native. Native session resume uses OmO's `--resume` /
-`--continue` options.
+V2 drops a variant placed only on the root `model`, so BEST also sets Sol's native
+per-model `settings.reasoningEffort: low`. Build selects `#low`; Plan/Reviewer
+select `#medium`. Explicit session/CLI variants take precedence. Setup changes
+defaults for new sessions, not stored historical selections: use `/models` there.
+Changing a primary agent alone may retain the session model; children use their
+own configured models. For an explicit planning run:
 
-Profiles:
-
-- `BEST`: OpenCode v5 profile with BEST routing, launched with `opencode-team
-  best` or `opencode-team start best`.
-- `BEST Free`: BEST routing with OpenCode Zen free models, launched with
-  `opencode-team free` or `opencode-team start free`.
-- `BEST Native`: OmO Native v5 with persistent memory, session continuity, and
-  native enforcement of the BEST explore/librarian/four-agent routes, launched
-  with `opencode-team best-native`.
-- `BEST-ECC`: isolated BEST OpenCode profile with pinned ECC skills/agents,
-  Serena-first navigation, and an ECC test-first planning task on each
-  implementation, installed by `opencode-team setup` and launched with
-  `opencode-team best-ecc`.
-- `GO`: OpenCode Go profile with the certified GO OMO patches.
-- `OPENAI`: OpenAI-only orchestration profile with Codex and Serena integration.
-
-## OpenCode completion notifications
-
-The OpenCode profiles (BEST fallback, GO, OPENAI, and DAILY) send a macOS
-notification when the root chat finishes a response. Clicking it brings the
-terminal running that tmux session to the foreground and returns to the matching
-chat. Setup registers Homebrew's `terminal-notifier` app
-in `~/Applications` and sends one test notification to request macOS permission.
-Approve the system prompt; macOS does not allow setup to grant notification
-permission on the user's behalf. To keep notifications visible until clicked,
-set the alert style to **Alerts** in System Settings → Notifications; macOS
-automatically hides notifications using the **Banners** style.
-
-## Development
-
-The current repository contains the portable runtime foundation only. Machine-specific
-team configuration, user state, credentials, caches, and runtime data are intentionally
-excluded.
-
-Run the package checks locally:
-
-```bash
-bin/opencode-team version
-bin/opencode-team doctor
-bin/opencode-team --help
+```sh
+opencode-team best run --agent plan --model 'openai/gpt-6.1-sol#medium' "Plan this change"
+opencode-team best run --model opencode-go/minimax-m3 "Reply OK"
 ```
 
-Prepare an isolated installation root without starting OpenCode:
+Both connections are required. An explicit unavailable Go model fails; an
+implicit native model selection can use an available OpenAI model and is not
+proof of Go access. Use **ChatGPT sign-in** for OpenAI subscription usage, not a
+separately billed API key. BEST allows only `openai` and `opencode-go`, not the
+pay-as-you-go `opencode` provider. Quota exhaustion is an error, not a paid
+fallback. **Disable Go Console's “Use balance”** to avoid extra-credit consumption
+after its allowance; local configuration cannot enforce that server-side option.
 
-```bash
-OPENCODE_TEAM_HOME="$(mktemp -d)" bin/opencode-team setup
+### Shared rules, immutable classic configuration
+
+BEST remains a native **`--standalone`** environment: classic's OpenAI-only
+provider policy stays intact while BEST permits Go. Setup never patches classic
+config, imports its provider policies, or copies its credentials/sessions.
+
+When present, BEST references the original **`~/.config/opencode/AGENTS.md`** via
+native `instructions`, followed by profile guidance. It is not copied, written or
+rolled back; later requests read user edits from the same source. BEST's explicit
+model roles specialize shared role labels without importing classic config,
+hidden harness instructions or permissions. A missing default rules file is
+reported; an explicitly selected missing/non-file source fails before config
+replacement. FREE does not automatically gain this shared file.
+
+Build/General implement. Plan/Explore/Reviewer have deny-by-default read-only tool
+allowlists: no shell, edits, delegation or MCP mutators. Serena read tools are
+allowed individually and Code Mode is disabled. These permissions are **not an
+OS sandbox**. Build uses Serena's `initial_instructions`, relevant skills and TDD.
+
+## CLI and storage
+
+```sh
+opencode-team start best run "Explain this project"
+opencode-team best -s SESSION_ID
+opencode-team free run "Fix the regression and run the tests"
+opencode-team best auth list
+opencode-team best api get /api/mcp
+opencode-team config best
+opencode-team version
 ```
 
-`setup` provisions a private uv-managed Python 3.13 distribution and installs all
-team dependencies under the isolated data root, including the pinned OmO Native
-runtime and its bundled Bun runtime. It installs the version-pinned Serena MCP
-server, resolves a compatible brewed OpenCode provider, and generates the verified
-BEST Native and OpenCode fallback profiles plus the GO OMO bundle. It also schedules
-package-owned BEST tool-output GC and BEST/OPENAI
-retention jobs when no legacy maintenance agents are detected. It refuses unsupported
-Node versions and does not start a runtime.
+The launcher preserves native arguments, exit status and termination signals,
+adding `--standalone` in command scope. Resume uses native `-s`, not `--resume`.
+Do not use explicit server/attach/service options to connect to classic's shared
+service. Some V2 commands reject standalone; see [compatibility notes](docs/opencode-v2-compatibility.md).
 
-Runtime state is kept under the cache runtime root and published with process
-identity, heartbeat, size, and lifecycle state metadata. Use
-`opencode-team runtime-status` to inspect runs. `opencode-team runtime-gc` only
-reports old `RECLAIMABLE` runs by default; pass `--apply` to remove them. Runs
-marked `UNCERTAIN` are never reclaimed automatically.
+| Kind | Default root |
+| --- | --- |
+| Config | `~/.config/opencode-team` |
+| Data | `~/.local/share/opencode-team` |
+| State | `~/.local/state/opencode-team` |
+| Cache | `~/.cache/opencode-team` |
 
-When legacy maintenance agents are present, setup reports `DEFERRED` and does not
-install duplicate jobs. Disposable setups write and validate LaunchAgent plists under
-the test state root without loading them.
+Roots are independent of ambient XDG variables. `OPENCODE_TEAM_HOME=/absolute/path`
+instead uses its `config`, `data`, `state`, `cache` children; HOME must exist.
+Config lives at `CONFIG_ROOT/PROFILE/opencode.jsonc`, clean V2 discovery at
+`CONFIG_ROOT/PROFILE/v2` (XDG config in `v2/xdg-config`). Existing native data stays
+at **`DATA_ROOT/PROFILE/data/opencode`**. State/cache and `SERENA_HOME` are
+profile-local. Historical copied plugins/agents/OmO assets are not loaded.
 
-To upgrade an existing v0.1.16 installation, keep its compatible brewed OpenCode
-provider installed and run:
+Inherited `OPENCODE_*`, XDG and credential-like environment overrides are stripped
+from native launches, including shell-tool tokens and SSH auth sockets. Use
+explicit profile-local connections, not ambient credentials.
 
-```bash
-HOMEBREW_NO_INSTALL_CLEANUP=1 brew upgrade ThomasDanilo96/opencode-team/opencode-team
-opencode-team setup
-opencode-team doctor
+Explicit setup options:
+
+- `OPENCODE_TEAM_OPENCODE_BIN=/absolute/path/to/opencode`: trusted V2 executable.
+- `OPENCODE_TEAM_DEPENDENCY_ROOT=/absolute/path`: dependency content only.
+- `OPENCODE_TEAM_ECC_SOURCE=/absolute/checkout`: clean local skills/LICENSE Git
+  source; its actual commit is reported and may differ from the official pin.
+- `OPENCODE_TEAM_BEST_MODEL=openai/MODEL_ID`: Build/Plan/Reviewer; must support
+  low/medium. `OPENCODE_TEAM_BEST_GO_MODEL=opencode-go/MODEL_ID`: General/summary/
+  compaction only. Setup does not verify alternate-model entitlement.
+- `OPENCODE_TEAM_RULES_FILE=/absolute/path/AGENTS.md`: another existing common
+  rules source, referenced only; keep it outside generated profile files.
+
+## Migration and rollback
+
+Setup transactionally manages only two configs and two profile instruction files.
+Changed files are backed up at `CONFIG_ROOT/backups/BACKUP_ID` (directories 0700,
+files 0600). Unchanged setup does not rewrite them or create another backup.
+Both profiles are preflighted before replacement; writes use atomic rename.
+A journal restores prior configs after write failure or on the next setup after
+interruption. Launch checks lock/journal before and after native version discovery.
+A stale `.setup-lock` requires owner inspection: verify no setup is running,
+remove **that lock only**, then rerun setup for journal recovery.
+
+```sh
+opencode-team rollback BACKUP_ID
 ```
 
-## Uninstall
+Rollback backs up the current configuration, then restores owned config paths
+only—never databases or credentials. Back up profile data separately before V2
+database migration; unknown DB formats are not converted by this package. A
+restored V1 config is archival: never run V1 against a migrated DB.
 
-`brew uninstall opencode-team` removes the Homebrew package only. Configuration,
-session data, state, cache, and authentication data are not removed automatically.
+V2 accounts live in SQLite. Preserved `auth.json` does not establish imported
+accounts; check `best auth list` and prefer independent `/connect`. Intentional
+native migration requires a secure **V2 Credential.Entry array**, not the legacy
+object (`Expected array`). Protect exports with 0600 permissions and never share
+classic's rotating OAuth refresh token between independent stores.
+
+Historical profile data, backups, caches and LaunchAgent files are not deleted.
+Removed commands (`daily`, `openai`, `go`, `best-ecc`, `best-native`, `deep-audit`
+and runtime/maintenance aliases) fail rather than silently redirect. Owners must
+explicitly unload obsolete OS jobs; setup does not manage them.
+
+## FREE boundary
+
+Native `provider.use` filters provider IDs, not models. FREE therefore uses a
+singleton `team-free` provider without canonical catalog inheritance, at
+`https://opencode.ai/inference/openai/v1`, with empty API key/Authorization and no
+credential environment. All other providers are denied, including historical
+paid accounts. Every primary, child and maintenance agent selects the same free
+model; ordinary model/agent overrides cannot select a paid catalog fallback.
+Outages/rate limits must fail, not consume a paid account.
+
+This is **not an adversarial billing sandbox or perpetual free-service promise**.
+Trusted project/system/Console config, plugins and host shell/network authority
+can change boundaries. Do not add credentials, alter the endpoint/header or run
+untrusted project config expecting isolation. The 128k/8192 limits are local
+budgets; zero catalog cost is not an invoice audit. MiMo free-period inputs may
+be used to improve the model: do not submit secrets or confidential data.
+
+## Verification
+
+See [test commands and boundaries](tests/README.md), [recorded validation and
+pending rollout checks](docs/validation.md), and [V2 compatibility/sources](docs/opencode-v2-compatibility.md).
+
+## Release preparation
+
+The workflow deliberately separates candidate testing from publication:
+
+1. After approval, commit and push the reviewed source to `prerelease/v0.2.0`.
+   Run **Homebrew Install** manually on that branch: Phase A installs the exact
+   candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
+2. Only after Phase A succeeds, authorize the immutable `v0.2.0` tag on the
+   **same commit**. The tag workflow validates the published source archive.
+3. Measure that official archive's SHA-256, update the stable formula URL/checksum
+   together, and push the metadata commit. Dispatch with `official_archive_sha256`
+   to validate a clean stable-tap install.
+4. Enable `publish_stable_release` only after those gates pass. Install/upgrade
+   the stable package separately; never migrate credentials automatically.
+
+Do not replace the old checksum with the local candidate archive's checksum,
+retag an existing release, or claim the candidate is available from the stable tap.
