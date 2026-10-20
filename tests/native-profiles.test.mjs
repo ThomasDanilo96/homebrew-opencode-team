@@ -279,6 +279,17 @@ test('BEST Hybrid supplement is appended to BEST AGENTS.md only; FREE stays exac
     'BEST generated AGENTS.md must start with shared/instructions.md bytes verbatim');
   assert.ok(supplementBytes.length > 0, 'supplement must carry content');
   assert.deepEqual(bestBytes, Buffer.concat([instructionsBytes, Buffer.from('\n'), supplementBytes]));
+  const strict = bestBytes.toString().split('## BEST strict minimalism')[1];
+  assert.ok(strict, 'BEST must generate the strict minimalism policy');
+  assert.match(strict, /concrete demonstrated need/);
+  assert.match(strict, /Django ORM, QuerySet, ModelForm/);
+  assert.match(strict, /FAIL[\s\S]*simplif/);
+  assert.ok(!freeBytes.includes(Buffer.from('## BEST strict minimalism')));
+  ok(f.run('best', 'run', 'fixture'));
+  const capture = JSON.parse(fs.readFileSync(f.env.MOCK_CAPTURE));
+  const loaded = JSON.parse(fs.readFileSync(capture.env.OPENCODE_CONFIG));
+  assert.ok(loaded.instructions.includes(bestFile), 'launched BEST references the generated policy');
+  assert.equal(capture.env.OPENCODE_CONFIG_DIR, path.dirname(bestFile));
   // Idempotence: a second setup run must not rewrite either file.
   const bestMtime = fs.statSync(bestFile).mtimeMs;
   const freeMtime = fs.statSync(freeFile).mtimeMs;

@@ -43,3 +43,40 @@ Build stays Sol Low. Specialist/Reviewer stay Medium; do not escalate to High/Ma
 without a concrete reason and authorization. Use native summary/compaction and
 existing subscription connections. Report measured tokens/cache/time when useful,
 but never infer monetary savings or quota remaining from model names or call counts.
+
+## BEST strict minimalism
+
+For every implementation, prioritize the smallest linear, readable, correct and
+safe solution compatible with the request and existing contracts. Every added
+line, function, class, file, layer, configuration, dependency and abstraction must
+have a concrete demonstrated need. Reduce real complexity, not formatting; never
+trade security, authorization, data integrity or maintainability for fewer lines.
+
+- Before editing, locate the responsible code with Serena, check existing reuse
+  and choose the simplest compatible change. Reuse prior analysis and evidence.
+- Edit the existing responsible file; no new file or single-use class, service,
+  facade, adapter, registry, factory, manager, decorator, wrapper, helper or layer
+  without a concrete necessity. Simplify unnecessarily complex touched solutions
+  at their source instead of adding compensations or broadening the refactor.
+- Prefer native framework/library features: Django ORM, QuerySet, ModelForm,
+  validators, constraints, permissions and transactions where applicable. Do not
+  repeat guarantees of the framework or a trusted boundary; preserve distinct
+  security and integrity checks. Remove duplication at its authoritative source.
+- Do not duplicate authoritative data with configuration, state, dictionaries,
+  flags or caches. No speculative requirements, dependencies, compatibility,
+  alternative paths, silent fallbacks or defensive code without an evidenced risk.
+- Keep code inspectable and linear; no convenience scaffolding, temporary helpers
+  or redundant comments, logs, documentation or tests. Use a few focused behavioral
+  regressions covering essential contracts and risks; retain necessary checks.
+- Run relevant tests, inspect the diff and remove introduced redundancy before
+  delivery. For significant changes, the independent read-only Reviewer must
+  explicitly check strict minimalism after implementation; Build must resolve
+  concrete findings and rerun affected tests before delivery.
+
+Reviewer: check native alternatives, necessity of each new file/function, existing
+logic duplicated, gratuitous layers, excess complexity, redundant configuration or
+data structures, and behavioral test value without proliferation. Concrete excess
+complexity means FAIL: cite precise code, a simpler replacement and why it preserves
+requirements; require the coder to simplify before delivery. Do not fail changes
+for stylistic preference or line count alone. Report observed behavior separately
+from configured instructions; these rules are not a universal enforcement guarantee.
