@@ -182,7 +182,7 @@ no measured monetary cost or remaining subscription quota, and no guarantee that
 arbitrary prompts always choose four useful lanes. Delegation remains a native
 instruction preference, intentionally not an enforced custom gate.
 
-## Strict minimalism — 0.3.1 candidate
+## Strict minimalism — 0.3.1
 
 The BEST-only supplement now prioritizes demonstrated necessity for every addition,
 linear code, existing ownership/reuse, framework-native behavior, one authoritative
@@ -244,7 +244,7 @@ They were excluded, then rerun with explicit native session Locations and PWD.
   and Premium config/CLI/rules: five protected hashes unchanged after live trials.
 - Release-test maintenance advances the immutable published archive pin from
   0.2.1 to the verified 0.3.0 identity; the immutability assertions are unchanged.
-  Stable formula metadata remains 0.3.0 until official 0.3.1 archive verification.
+  Stable formula metadata advanced only after official 0.3.1 archive verification.
 - After candidate VERSION advance, `node --test tests/packaging.test.mjs`: 3 passed,
   exit 0. Local Gitleaks is unavailable; archive scanning remains a remote gate.
 
@@ -252,3 +252,15 @@ Limits: one synthetic comparison, not a universal minimalism guarantee or proof
 of consistent token/latency savings. Instructions guide native agents; there is no
 custom runtime enforcement. Remote release and installed-package gates are not
 implied by local tests.
+
+### 0.3.1 release gates
+
+- Phase A staging install/tests/Gitleaks: `39449093139`, success.
+- Immutable `v0.3.1`: `90bd242e7a6323cd0a099924b9973212baa89df8`, exactly the
+  Phase A candidate commit. No existing tag or release was rewritten.
+- Phase B official archive install/tests/Gitleaks: `39449813491`, success.
+  SHA-256 measured locally and independently by the runner:
+  `913459f53bfdfba5a3bfb3f498f320aa085576e0785e1865de775a84d1fa93be`.
+- Nine critical packaged assets match the reviewed source byte-for-byte.
+  Formula URL/checksum updated together only after Phase B; stable clean-install,
+  gated publication and local installed-package acceptance remain pending.
