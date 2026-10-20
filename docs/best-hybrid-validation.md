@@ -188,10 +188,10 @@ The BEST-only supplement now prioritizes demonstrated necessity for every additi
 linear code, existing ownership/reuse, framework-native behavior, one authoritative
 source, focused regressions and preserved contracts/security. Significant changes
 require independent read-only minimalism review, with concrete excess complexity
-rejected until simplified. No generator, model, permission, dependency, plugin,
+rejected until simplified. No generator, model, permission, declared dependency, plugin,
 hook, session boundary or FREE instruction was changed.
 
-### Behavioral comparison (OpenCode V2 2.0.32)
+### Behavioral comparison (OpenCode V2)
 
 Two fresh temporary Git fixtures contained identical `shipping.py` (three strategy/
 factory classes and `shipping_fee(subtotal)`) and a frozen unittest covering totals
@@ -262,5 +262,29 @@ implied by local tests.
   SHA-256 measured locally and independently by the runner:
   `913459f53bfdfba5a3bfb3f498f320aa085576e0785e1865de775a84d1fa93be`.
 - Nine critical packaged assets match the reviewed source byte-for-byte.
-  Formula URL/checksum updated together only after Phase B; stable clean-install,
-  gated publication and local installed-package acceptance remain pending.
+  Formula URL/checksum updated together only after Phase B.
+- PR #3 merged at `a78896c02e98e0a01801edaa881523e8d9f49a49`; stable tap
+  clean-install/formula test/audit: `39450687757`, success.
+- Gated publisher: `39455139485`, success. Official non-draft, non-prerelease
+  release published `2026-10-20T16:11:44Z`:
+  https://github.com/ThomasDanilo96/homebrew-opencode-team/releases/tag/v0.3.1
+- Normal Homebrew upgrade with cleanup disabled installed 0.3.1. `brew test`,
+  `opencode-team setup` and `doctor`: exit 0. Homebrew also upgraded transitive/
+  declared dependencies c-ares 1.34.8 → 1.34.9, ca-certificates 2026-09-25 →
+  2026-09-25_1 and uv 0.13.1 → 0.13.3; no general upgrade was requested.
+- Installed native fixture session `ses_ea5e8929fffediuBSfMbuOuydk`: same task,
+  20-line overengineered source → existing 2-line function, frozen tests unchanged,
+  initial unittest exit 1, native coding and final unittest exit 0.
+- Nine installed package assets match the official archive; generated BEST rules
+  equal the installed shared instructions plus supplement exactly. The first QA
+  asset check used the wrong completion location; rerunning with Homebrew's native
+  `share/zsh/site-functions` destination passed, without package changes.
+- Five FREE/Premium hashes unchanged; all prior backups and the 0.3.0 keg retained.
+  Existing auth metadata unchanged; auth/DB file identities and modes preserved.
+  Historical 0.3.0 session `ses_eaac4e08dffeS9DRTcUm6YOCIc` remains retrievable.
+  No credentials imported, database rewritten or session migrated.
+- Version caveat: the initial comparison did not capture the native binary version;
+  it must not be inferred from the historical 0.3.0 validation above. Installed
+  `doctor` reports OpenCode **2.1.0**, Serena **1.7.0**, and the unchanged ECC pin.
+  This upgrade did not install/replace OpenCode. These checks do not promise
+  universally minimal agent output or perpetual provider availability.
