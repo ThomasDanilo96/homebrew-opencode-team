@@ -181,3 +181,74 @@ Limitations: single synthetic workload, non-randomized provider/cache conditions
 no measured monetary cost or remaining subscription quota, and no guarantee that
 arbitrary prompts always choose four useful lanes. Delegation remains a native
 instruction preference, intentionally not an enforced custom gate.
+
+## Strict minimalism — 0.3.1 candidate
+
+The BEST-only supplement now prioritizes demonstrated necessity for every addition,
+linear code, existing ownership/reuse, framework-native behavior, one authoritative
+source, focused regressions and preserved contracts/security. Significant changes
+require independent read-only minimalism review, with concrete excess complexity
+rejected until simplified. No generator, model, permission, dependency, plugin,
+hook, session boundary or FREE instruction was changed.
+
+### Behavioral comparison (OpenCode V2 2.0.32)
+
+Two fresh temporary Git fixtures contained identical `shipping.py` (three strategy/
+factory classes and `shipping_fee(subtotal)`) and a frozen unittest covering totals
+0, 49, 50 and 51. The defect was `subtotal > 50` instead of `>= 50`. Identical native
+user messages requested the threshold fix, preservation of the function/tests and
+fixture-only work; they did not ask for class removal or prescribe the solution.
+Only the BEST supplement differed; existing BEST connections/data were reused in
+place, with temporary config/state/cache, no credential import and no installation.
+
+| Observation | Previous BEST | Strict candidate |
+| --- | --- | --- |
+| Native Build session | `ses_ea614e528ffelX11cn4CFlZsXv` | `ses_ea6146efffferJmkjyxdTtOxyc` |
+| Threshold test before / after | exit 1 / 0 | exit 1 / 0 |
+| Application result | 20 lines; classes/factory retained | 2 lines; one existing function |
+| Application files added | 0 | 0 |
+
+The candidate produced `return 0 if subtotal >= 50 else 5` in the existing function.
+Both used Sol with the unchanged Low configuration/default, called Serena and
+loaded ECC TDD; frozen tests remained identical. A no-tools instruction probe
+returned `ABSENT` on the previous supplement, but quoted the exact new concrete-
+complexity FAIL rule on the candidate. This observes instruction availability in
+the model context, beyond the mock test's generated-file/config reference checks.
+
+Negative control: native Reviewer `ses_ea6129c45ffelVsUv0Cdpunf11`, actual message
+model Sol **Medium**, inspected a proposed `ShippingFeeService.calculate()` wrapper
+delegating to the function with no consumer. Verdict: **Request changes** (rejection,
+not the literal label FAIL), citing `review.patch:9–11`, requiring class removal,
+and retaining the existing function/tests. No edits or shell execution occurred.
+The artificial proposal was never applied to the application. An earlier direct
+Reviewer run retained the root model's missing variant; it is not Medium evidence.
+
+Native exports, task/config snapshots, RED/GREEN outputs and probes are retained
+under the approved temporary directory `strict-eval.N3x7dD`. Two initial trials
+inherited the harness Location despite subprocess cwd; no fixture edits occurred.
+They were excluded, then rerun with explicit native session Locations and PWD.
+
+### Automated and independent checks
+
+- Existing instruction-generation test extended, not a new fixture framework:
+  `node --test --test-name-pattern='BEST Hybrid supplement' tests/native-profiles.test.mjs`.
+  RED exit 1 (missing policy), GREEN exit 0 (generation, launch reference, FREE
+  exclusion and byte-idempotence). Checkpoints: `5b60416`, `bfd73f9`.
+- `node --test --experimental-test-coverage tests/*.test.mjs`: 34 passed, 2 optional
+  native/evidence checks skipped, exit 0; generator line coverage 100%, branches
+  88.37%. Native permissions separately: 1 passed, zero skips, exit 0.
+- `bash tests/setup-smoke.sh`, `bash tests/homebrew-workflow.test.sh`, actionlint,
+  Ruby/Bash/Zsh/Node syntax and diff checks: exit 0. No separate build/type/lint
+  target exists for the changed Markdown and plain JavaScript test assertions.
+- Independent static Reviewer: PASS, no concrete finding. FREE config/instructions
+  and Premium config/CLI/rules: five protected hashes unchanged after live trials.
+- Release-test maintenance advances the immutable published archive pin from
+  0.2.1 to the verified 0.3.0 identity; the immutability assertions are unchanged.
+  Stable formula metadata remains 0.3.0 until official 0.3.1 archive verification.
+- After candidate VERSION advance, `node --test tests/packaging.test.mjs`: 3 passed,
+  exit 0. Local Gitleaks is unavailable; archive scanning remains a remote gate.
+
+Limits: one synthetic comparison, not a universal minimalism guarantee or proof
+of consistent token/latency savings. Instructions guide native agents; there is no
+custom runtime enforcement. Remote release and installed-package gates are not
+implied by local tests.

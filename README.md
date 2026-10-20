@@ -55,6 +55,10 @@ do not exist; the coordinator explains why. Plan remains optional, not a routine
 second planning cycle. There is no fixed fanout, router, scheduler, hook or automatic
 high/max escalation. `shared/best-hybrid.md` supplements BEST only; FREE's existing
 instructions and configuration remain unchanged.
+BEST prioritizes the smallest readable, safe solution with demonstrated necessity
+for each addition. Significant changes require a concrete minimalism review;
+unnecessary abstractions must be removed before delivery. These are native agent
+instructions, not a custom enforcement gate or a universal behavior guarantee.
 Subscriptions combine **across agents**, not inside one model request; this is
 not a measured savings or comparative model-performance claim.
 
@@ -202,14 +206,15 @@ pending rollout checks](docs/validation.md), and [V2 compatibility/sources](docs
 The workflow deliberately separates candidate testing from publication. The
 following is the release procedure; completed gates are recorded in validation:
 
-1. After approval, commit and push the reviewed source to `prerelease/v0.3.0`.
+1. After approval, commit and push the reviewed source to `prerelease/vVERSION`
+   using the candidate `VERSION` (currently `0.3.1`).
    Run **Homebrew Install** manually on that branch: Phase A installs the exact
    candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
-2. Only after Phase A succeeds, authorize the immutable `v0.3.0` tag on the
+2. Only after Phase A succeeds, authorize the immutable `vVERSION` tag on the
    **same commit**. The tag workflow validates the published source archive.
 3. Measure that official archive's SHA-256, update the stable formula URL/checksum
     together, and push the metadata commit. The `master` push validates the clean
-    stable-tap install. For an explicit checksum recheck, dispatch on `v0.3.0`
+    stable-tap install. For an explicit checksum recheck, dispatch on `vVERSION`
     with `official_archive_sha256` (not on the later formula-metadata commit).
 4. Enable `publish_stable_release` only after those gates pass. Install/upgrade
    the stable package separately; never migrate credentials automatically.
