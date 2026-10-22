@@ -10,8 +10,8 @@ mandatory fanout or background maintenance is installed.
 | `best` | OpenAI Sol coordinator + Go workers | Connect OpenAI and Go independently inside BEST |
 | `free` | `team-free/mimo-v2.6-flash-free` | Anonymous; no paid credentials |
 
-**Version 0.3.2.** The stable formula selects the official, checksum-verified
-`v0.3.2` archive. Tags are immutable; formula metadata follows on `master`.
+**Candidate version 0.3.3.** The stable formula remains on the checksum-verified
+`v0.3.2` archive until the release gates pass. Tags are immutable; formula metadata follows on `master`.
 See [Hybrid validation](docs/best-hybrid-validation.md) for comparison and release evidence.
 
 ## Setup
@@ -55,6 +55,16 @@ Setup does not install scanners or change system Python. Host Homebrew scanners
 remain ordinary host executables, not an isolation/security boundary.
 See [scanner installation and fixture evidence](docs/best-quality-scanners.md)
 and [browser/integration results and release blocker](docs/best-quality-validation.md).
+
+BEST overrides only ECC's `documentation-lookup` skill with the official Context7
+CLI workflow (`npx --yes ctx7@0.8.1`), installed on demand in BEST's private npm
+cache. No global package, additional MCP or automatic authentication is needed;
+telemetry is disabled. The skill is loaded only for uncertain APIs/native
+alternatives, project-version documentation or disputed contracts. Anonymous
+queries can be rate-limited; missing documentation is reported, not invented.
+Comments/docstrings must explain real non-obvious contracts, not narrate code.
+Targeted Ruff D301/D400/D415/D419 checks existing docstrings without a blanket
+missing-docstring policy. See [0.3.3 validation](docs/best-context7-validation.md).
 
 ## BEST Hybrid: strong coordinator, economical workers
 
@@ -228,7 +238,7 @@ The workflow deliberately separates candidate testing from publication. The
 following is the release procedure; completed gates are recorded in validation:
 
 1. After approval, commit and push the reviewed source to `prerelease/vVERSION`
-   using the candidate `VERSION` (currently `0.3.2`).
+   using the candidate `VERSION` (currently `0.3.3`).
    Run **Homebrew Install** manually on that branch: Phase A installs the exact
    candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
 2. Only after Phase A succeeds, authorize the immutable `vVERSION` tag on the

@@ -61,8 +61,12 @@ function profileEnvironment(profile) {
     // Connections belong to the profile, never the calling shell's paid account.
     if (/(?:KEY|TOKEN|SECRET|AUTH|CREDENTIAL)|^(AWS_|AZURE_|GOOGLE_|GCP_|GCLOUD_)/i.test(key)) delete env[key];
   }
-  if (profile === 'best') env.PATH = [path.join(roots.data, 'best/bin'),
-    path.join(roots.data, 'best/quality/node_modules/.bin'), env.PATH].filter(Boolean).join(path.delimiter);
+  if (profile === 'best') {
+    env.PATH = [path.join(roots.data, 'best/bin'),
+      path.join(roots.data, 'best/quality/node_modules/.bin'), env.PATH].filter(Boolean).join(path.delimiter);
+    env.npm_config_cache = path.join(roots.cache, 'best/npm');
+    env.CTX7_TELEMETRY_DISABLED = '1';
+  }
   return { ...env, XDG_CONFIG_HOME: path.join(roots.config, profile, 'v2/xdg-config'),
     XDG_DATA_HOME: path.join(roots.data, profile, 'data'), XDG_STATE_HOME: path.join(roots.state, profile),
     XDG_CACHE_HOME: path.join(roots.cache, profile), OPENCODE_CONFIG: configFile(profile),
@@ -169,7 +173,7 @@ function configuration(profile) {
       rule('shell', profile === 'best' ? 'allow' : 'ask'),
       ...(profile === 'best' ? [rule('read', 'deny', '*.env'), rule('read', 'deny', '*.env.*'),
         rule('read', 'allow', '*.env.example')] : [])],
-    skills: [path.join(eccSource, 'skills')], instructions,
+    skills: [path.join(eccSource, 'skills'), ...(profile === 'best' ? [path.join(packageRoot, 'shared/skills')] : [])], instructions,
     mcp: { servers: { serena: { type: 'local', command: [serenaBin, 'start-mcp-server', '--context', 'ide', '--project-from-cwd', '--enable-web-dashboard', 'false', '--open-web-dashboard', 'false'],
       codemode: false, disabled: false, environment: { SERENA_HOME: path.join(roots.state, profile, 'serena') },
       timeout: { startup: 45000, catalog: 30000, execution: 600000 } } } } };

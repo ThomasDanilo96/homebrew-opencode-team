@@ -143,6 +143,8 @@ test('only best/free public profiles; native arguments and resume are forwarded 
     const tools = path.join(f.team, 'data/best');
     if (profile === 'best') assert.ok(capture.env.PATH.startsWith(`${tools}/bin${path.delimiter}${tools}/quality/node_modules/.bin${path.delimiter}`));
     else assert.ok(!capture.env.PATH.includes(`${tools}/quality/node_modules/.bin`));
+    assert.equal(capture.env.npm_config_cache, profile === 'best' ? path.join(f.team, 'cache/best/npm') : f.env.npm_config_cache);
+    assert.equal(capture.env.CTX7_TELEMETRY_DISABLED, profile === 'best' ? '1' : f.env.CTX7_TELEMETRY_DISABLED);
   }
   for (const command of ['openai', 'daily', 'best-ecc', 'best-native', 'go', 'deep-audit', 'runtime-gc', 'maintenance']) {
     assert.notEqual(f.run(command).status, 0, command);
@@ -170,7 +172,8 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE stays singleton and 
     assert.equal(c.plugin, undefined);
     assert.equal(c.plugins, undefined);
     assert.equal(c.agent, undefined);
-    assert.deepEqual(c.skills, [path.join(f.ecc, 'skills')]);
+    assert.deepEqual(c.skills, [path.join(f.ecc, 'skills'), ...(profile === 'best' ? [path.join(root, 'shared/skills')] : [])]);
+    assert.deepEqual(Object.keys(c.mcp.servers), profile === 'best' ? ['serena', 'playwright'] : ['serena']);
     assert.ok(c.mcp.servers.serena.command.includes('--project-from-cwd'));
     if (profile === 'best') {
       assert.deepEqual(c.mcp.servers.playwright, {
