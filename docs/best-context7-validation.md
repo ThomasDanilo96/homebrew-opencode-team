@@ -69,8 +69,15 @@ New config/environment tests: RED 2 failures (missing BEST skill source/private
 cache), then GREEN 2 passes (exit 0). First full suite exposed an existing instruction
 assertion requiring the FAIL marker; instructions retain “FAIL / Request changes”
 without weakening the assertion. Targeted rerun passed. Source setup/doctor exit 0.
-Final suite, independent product review, remote release gates and installed-version
-acceptance are recorded in the release notes after completion, not claimed here.
+Final `node --test --test-concurrency=1 tests/*.test.mjs`: 34 pass, 2 optional
+skips, exit 0 (40.2s). Independent read-only product review: PASS; its nonblocking
+installed-skill byte-comparison suggestion was added, and all 3 packaging tests
+passed. Workflow scenarios, Ruby/Node syntax and diff checks passed. Native Serena
+overview and Playwright about:blank/close succeeded. Preservation comparison:
+both account lists and 7 existing BEST session IDs retained; FREE/global/backups
+unchanged; BEST JSON differs only in skills. Instructions are intentionally updated.
+Remote release gates and installed-version acceptance are recorded in the release
+notes after completion, not claimed here.
 
 A/B/C CLI metadata: **9 model steps**; sums of reported fields input **97,119**,
 output **1,397**, reasoning **56**, cache.read **354,816**, cache.write **0**;
