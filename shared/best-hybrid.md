@@ -101,16 +101,17 @@ trade security, authorization, data integrity or maintainability for fewer lines
   alternative paths, silent fallbacks or defensive code without an evidenced risk.
 - Keep code inspectable and linear; no convenience scaffolding, temporary helpers
   or redundant comments, logs, documentation or tests. Write a comment only when
-  it states the WHY for a real invariant (fiscal, security, concurrency, or a
+  it states the WHY for a real invariant (domain, fiscal, security, concurrency, or a
   verified compatibility workaround) that the code cannot express; skip comments
   that restate the obvious. Do not blanket-docstring every function or private
-  symbol, and no speculative TODO placeholders. Use a few focused behavioral
+  symbol, and no speculative TODO placeholders. Document non-obvious public
+  contracts, preconditions and side effects, not signatures. Use a few focused behavioral
   regressions covering essential contracts and risks; retain necessary checks.
 - Run project Ruff checks on changed Python; supplement existing docstrings with
   `ruff check --select D301,D400,D415,D419 <changed.py>` when relevant, not a D1xx
   presence blanket, separate pydocstyle dependency or blind autofix. Add docs when
-  the code itself does not explain
-  the intent, not to satisfy a linter. Run relevant tests, inspect the diff and
+  the code itself does not explain the intent, not to satisfy a linter.
+  Run relevant tests, inspect the diff and
   remove introduced redundancy before delivery. For significant changes, the
   independent read-only Reviewer must explicitly check strict minimalism after
   implementation; Build must resolve concrete findings and rerun affected tests
@@ -123,9 +124,9 @@ Also flag comments/docstrings that are redundant, wrong or misleading, or where 
 invariant (fiscal, security, concurrency, compatibility) is left unexplained.
 Report these like any other concrete finding, citing the exact file/line and the
 simpler fix; they do not trigger a separate review round or endless fix cycles.
-Concrete excess complexity or misleading documentation means Request changes:
-cite precise code, a simpler replacement and
-why it preserves requirements; require the coder to simplify before delivery. Do not
+Concrete excess complexity or misleading documentation means FAIL / Request changes:
+cite precise code, a simpler replacement and why it preserves requirements;
+require the coder to simplify before delivery. Do not
 fail changes for stylistic preference or line count alone, and do not demand fixes
 for trivial or cosmetic issues. Report observed behavior separately from configured
 instructions; these rules are not a universal enforcement guarantee.
