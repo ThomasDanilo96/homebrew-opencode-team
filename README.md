@@ -35,6 +35,27 @@ and `LICENSE` are checked out: no ECC agents, hooks, plugins or orchestrator.
 `doctor` checks local versions/dependencies/config, not auth, model requests or
 MCP connectivity.
 
+### BEST code quality and browser checks
+
+BEST alone configures official `@playwright/mcp@0.0.83` over native V2
+`mcp.servers`, with Code Mode, headless isolated Chromium, no automatic snapshots,
+no image responses and no page-provided WebMCP tools. npm resolves the exact
+version on first use; no `@latest` is distributed. Install its matching official
+browser (not personal Chrome) when needed:
+
+```sh
+npm exec --yes --package=@playwright/mcp@0.0.83 -- playwright install chromium
+```
+
+The BEST instructions use diff-first checks, not an automatic whole-repository
+audit. Ruff, jscpd, Vulture, ast-grep, Semgrep, Hadolint and Trivy are on-demand
+CLI tools, not extra MCP servers or hooks. BEST adds its private `bin` and
+`quality/node_modules/.bin` under its data root to PATH; FREE does not.
+Setup does not install scanners or change system Python. Host Homebrew scanners
+remain ordinary host executables, not an isolation/security boundary.
+See [scanner installation and fixture evidence](docs/best-quality-scanners.md)
+and [browser/integration results and release blocker](docs/best-quality-validation.md).
+
 ## BEST Hybrid: strong coordinator, economical workers
 
 | Responsibility | Native model |
