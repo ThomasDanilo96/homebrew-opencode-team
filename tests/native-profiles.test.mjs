@@ -140,6 +140,9 @@ test('only best/free public profiles; native arguments and resume are forwarded 
     assert.deepEqual(capture.args, ['run', '-s', 'ses_native', '--model', profile === 'free' ? 'opencode/big-pickle' : 'openai/gpt-6.1-sol', 'a prompt with spaces', '--standalone']);
     assert.equal(capture.env.XDG_DATA_HOME, path.join(f.team, 'data', profile, 'data'));
     assert.equal(capture.env.XDG_CONFIG_HOME, path.join(f.team, 'config', profile, 'v2', 'xdg-config'));
+    const tools = path.join(f.team, 'data/best');
+    if (profile === 'best') assert.ok(capture.env.PATH.startsWith(`${tools}/bin${path.delimiter}${tools}/quality/node_modules/.bin${path.delimiter}`));
+    else assert.ok(!capture.env.PATH.includes(`${tools}/quality/node_modules/.bin`));
   }
   for (const command of ['openai', 'daily', 'best-ecc', 'best-native', 'go', 'deep-audit', 'runtime-gc', 'maintenance']) {
     assert.notEqual(f.run(command).status, 0, command);
