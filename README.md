@@ -10,8 +10,8 @@ mandatory fanout or background maintenance is installed.
 | `best` | OpenAI Sol coordinator + Go workers | Connect OpenAI and Go independently inside BEST |
 | `free` | `team-free/mimo-v2.6-flash-free` | Anonymous; no paid credentials |
 
-**Version 0.3.1.** The stable formula selects the official, checksum-verified
-`v0.3.1` archive. The tag is immutable; formula metadata follows on `master`.
+**Candidate version 0.3.2.** The stable formula remains on the checksum-verified
+`v0.3.1` archive until the release gates pass. Tags are immutable; formula metadata follows on `master`.
 See [Hybrid validation](docs/best-hybrid-validation.md) for comparison and release evidence.
 
 ## Setup
@@ -228,7 +228,7 @@ The workflow deliberately separates candidate testing from publication. The
 following is the release procedure; completed gates are recorded in validation:
 
 1. After approval, commit and push the reviewed source to `prerelease/vVERSION`
-   using the candidate `VERSION` (currently `0.3.1`).
+   using the candidate `VERSION` (currently `0.3.2`).
    Run **Homebrew Install** manually on that branch: Phase A installs the exact
    candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
 2. Only after Phase A succeeds, authorize the immutable `vVERSION` tag on the
