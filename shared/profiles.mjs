@@ -61,6 +61,8 @@ function profileEnvironment(profile) {
     // Connections belong to the profile, never the calling shell's paid account.
     if (/(?:KEY|TOKEN|SECRET|AUTH|CREDENTIAL)|^(AWS_|AZURE_|GOOGLE_|GCP_|GCLOUD_)/i.test(key)) delete env[key];
   }
+  if (profile === 'best') env.PATH = [path.join(roots.data, 'best/bin'),
+    path.join(roots.data, 'best/quality/node_modules/.bin'), env.PATH].filter(Boolean).join(path.delimiter);
   return { ...env, XDG_CONFIG_HOME: path.join(roots.config, profile, 'v2/xdg-config'),
     XDG_DATA_HOME: path.join(roots.data, profile, 'data'), XDG_STATE_HOME: path.join(roots.state, profile),
     XDG_CACHE_HOME: path.join(roots.cache, profile), OPENCODE_CONFIG: configFile(profile),
@@ -171,6 +173,10 @@ function configuration(profile) {
     mcp: { servers: { serena: { type: 'local', command: [serenaBin, 'start-mcp-server', '--context', 'ide', '--project-from-cwd', '--enable-web-dashboard', 'false', '--open-web-dashboard', 'false'],
       codemode: false, disabled: false, environment: { SERENA_HOME: path.join(roots.state, profile, 'serena') },
       timeout: { startup: 45000, catalog: 30000, execution: 600000 } } } } };
+  if (profile === 'best') config.mcp.servers.playwright = {
+    type: 'local',
+    command: ['npx', '--yes', '@playwright/mcp@0.0.83', '--headless', '--isolated', '--browser', 'chromium', '--image-responses', 'omit', '--snapshot-mode', 'none', '--no-webmcp'],
+  };
   // V2 drops the root variant; low must also be the model's native default.
   if (profile === 'best') config.providers = { openai: {
     models: { [bestModel.slice('openai/'.length)]: { settings: { reasoningEffort: 'low' } } },

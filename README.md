@@ -10,8 +10,8 @@ mandatory fanout or background maintenance is installed.
 | `best` | OpenAI Sol coordinator + Go workers | Connect OpenAI and Go independently inside BEST |
 | `free` | `team-free/mimo-v2.6-flash-free` | Anonymous; no paid credentials |
 
-**Version 0.3.1.** The stable formula selects the official, checksum-verified
-`v0.3.1` archive. The tag is immutable; formula metadata follows on `master`.
+**Candidate version 0.3.2.** The stable formula remains on the checksum-verified
+`v0.3.1` archive until the release gates pass. Tags are immutable; formula metadata follows on `master`.
 See [Hybrid validation](docs/best-hybrid-validation.md) for comparison and release evidence.
 
 ## Setup
@@ -34,6 +34,27 @@ root. ECC comes from `https://github.com/affaan-m/ECC.git`, pinned by
 and `LICENSE` are checked out: no ECC agents, hooks, plugins or orchestrator.
 `doctor` checks local versions/dependencies/config, not auth, model requests or
 MCP connectivity.
+
+### BEST code quality and browser checks
+
+BEST alone configures official `@playwright/mcp@0.0.83` over native V2
+`mcp.servers`, with Code Mode, headless isolated Chromium, no automatic snapshots,
+no image responses and no page-provided WebMCP tools. npm resolves the exact
+version on first use; no `@latest` is distributed. Install its matching official
+browser (not personal Chrome) when needed:
+
+```sh
+npm exec --yes --package=@playwright/mcp@0.0.83 -- playwright install chromium
+```
+
+The BEST instructions use diff-first checks, not an automatic whole-repository
+audit. Ruff, jscpd, Vulture, ast-grep, Semgrep, Hadolint and Trivy are on-demand
+CLI tools, not extra MCP servers or hooks. BEST adds its private `bin` and
+`quality/node_modules/.bin` under its data root to PATH; FREE does not.
+Setup does not install scanners or change system Python. Host Homebrew scanners
+remain ordinary host executables, not an isolation/security boundary.
+See [scanner installation and fixture evidence](docs/best-quality-scanners.md)
+and [browser/integration results and release blocker](docs/best-quality-validation.md).
 
 ## BEST Hybrid: strong coordinator, economical workers
 
@@ -207,7 +228,7 @@ The workflow deliberately separates candidate testing from publication. The
 following is the release procedure; completed gates are recorded in validation:
 
 1. After approval, commit and push the reviewed source to `prerelease/vVERSION`
-   using the candidate `VERSION` (currently `0.3.1`).
+   using the candidate `VERSION` (currently `0.3.2`).
    Run **Homebrew Install** manually on that branch: Phase A installs the exact
    candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
 2. Only after Phase A succeeds, authorize the immutable `vVERSION` tag on the

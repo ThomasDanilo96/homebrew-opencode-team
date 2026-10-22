@@ -1,3 +1,31 @@
+## BEST diff-first quality
+
+Understand the requirement and locate reusable code with Serena; implement the
+smallest compatible solution, then inspect the changed diff. Run Ruff for Python
+and relevant tests/checks, not a whole-repository audit for each small fix.
+Use CLI scanners on demand: jscpd for concrete duplication risk; Vulture for
+suspected unused Python (check dynamic consumers); ast-grep for a specific structural
+pattern; Semgrep for relevant security/bug patterns. Use Hadolint for changed
+Dockerfiles and Trivy for relevant image, dependency or configuration changes.
+Confirm reachability and meaning before acting on findings: no speculative fixes
+or code/tests added merely to appease a scanner. Scanners do not detect all
+overengineering. Fix verified in-scope defects immediately and rerun focused tests.
+
+For UI/web workflow changes, use the pinned Playwright MCP in Code Mode. Its
+headless isolated browser never imports personal cookies or credentials. Prefer
+browser_find, semantic selectors and targeted content checks; request a small
+snapshot only when needed, not screenshots or full dumps. Test local/disposable
+apps, not production CRM. Close the browser in cleanup, including after errors.
+If Chromium is missing, install only the official browser matching the pinned
+MCP's Playwright dependency; never install/alter personal Chrome. CLI scanners
+are optional host tools, not permanent MCP servers or mandatory per-request gates.
+
+The existing read-only Reviewer must check the simplest compatible solution,
+new duplication/dead code, unnecessary files/abstractions, native Django features,
+functional/security regressions and actual tool/test results. Concrete safe
+simplifications require correction before delivery; finish with focused tests and
+minimalism review. Do not add another review system.
+
 ## BEST Hybrid: proportional native delegation
 
 This supplement applies only to BEST. Execute the ChatGPT mandate; validate it

@@ -140,6 +140,9 @@ test('only best/free public profiles; native arguments and resume are forwarded 
     assert.deepEqual(capture.args, ['run', '-s', 'ses_native', '--model', profile === 'free' ? 'opencode/big-pickle' : 'openai/gpt-6.1-sol', 'a prompt with spaces', '--standalone']);
     assert.equal(capture.env.XDG_DATA_HOME, path.join(f.team, 'data', profile, 'data'));
     assert.equal(capture.env.XDG_CONFIG_HOME, path.join(f.team, 'config', profile, 'v2', 'xdg-config'));
+    const tools = path.join(f.team, 'data/best');
+    if (profile === 'best') assert.ok(capture.env.PATH.startsWith(`${tools}/bin${path.delimiter}${tools}/quality/node_modules/.bin${path.delimiter}`));
+    else assert.ok(!capture.env.PATH.includes(`${tools}/quality/node_modules/.bin`));
   }
   for (const command of ['openai', 'daily', 'best-ecc', 'best-native', 'go', 'deep-audit', 'runtime-gc', 'maintenance']) {
     assert.notEqual(f.run(command).status, 0, command);
@@ -169,6 +172,12 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE stays singleton and 
     assert.equal(c.agent, undefined);
     assert.deepEqual(c.skills, [path.join(f.ecc, 'skills')]);
     assert.ok(c.mcp.servers.serena.command.includes('--project-from-cwd'));
+    if (profile === 'best') {
+      assert.deepEqual(c.mcp.servers.playwright, {
+        type: 'local',
+        command: ['npx', '--yes', '@playwright/mcp@0.0.83', '--headless', '--isolated', '--browser', 'chromium', '--image-responses', 'omit', '--snapshot-mode', 'none', '--no-webmcp'],
+      });
+    } else assert.equal(c.mcp.servers.playwright, undefined);
     const permissions = c.agents.reviewer.permissions;
     assert.ok(permissions.some((p) => p.action === '*' && p.effect === 'deny'));
     assert.ok(!permissions.some((p) => ['shell', 'edit', 'execute', 'subagent'].includes(p.action) && p.effect === 'allow'));
