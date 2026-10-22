@@ -169,6 +169,12 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE stays singleton and 
     assert.equal(c.agent, undefined);
     assert.deepEqual(c.skills, [path.join(f.ecc, 'skills')]);
     assert.ok(c.mcp.servers.serena.command.includes('--project-from-cwd'));
+    if (profile === 'best') {
+      assert.deepEqual(c.mcp.servers.playwright, {
+        type: 'local',
+        command: ['npx', '--yes', '@playwright/mcp@0.0.83', '--headless', '--isolated', '--browser', 'chromium', '--image-responses', 'omit', '--snapshot-mode', 'none', '--no-webmcp'],
+      });
+    } else assert.equal(c.mcp.servers.playwright, undefined);
     const permissions = c.agents.reviewer.permissions;
     assert.ok(permissions.some((p) => p.action === '*' && p.effect === 'deny'));
     assert.ok(!permissions.some((p) => ['shell', 'edit', 'execute', 'subagent'].includes(p.action) && p.effect === 'allow'));
