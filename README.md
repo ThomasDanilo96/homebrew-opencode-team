@@ -10,8 +10,8 @@ mandatory fanout or background maintenance is installed.
 | `best` | OpenAI Sol coordinator + Go workers | Connect OpenAI and Go independently inside BEST |
 | `free` | `team-free/mimo-v2.6-flash-free` | Anonymous; no paid credentials |
 
-**Candidate version 0.3.2.** The stable formula remains on the checksum-verified
-`v0.3.1` archive until the release gates pass. Tags are immutable; formula metadata follows on `master`.
+**Version 0.3.2.** The stable formula selects the official, checksum-verified
+`v0.3.2` archive. Tags are immutable; formula metadata follows on `master`.
 See [Hybrid validation](docs/best-hybrid-validation.md) for comparison and release evidence.
 
 ## Setup
