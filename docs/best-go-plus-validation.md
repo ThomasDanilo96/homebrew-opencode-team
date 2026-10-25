@@ -122,5 +122,17 @@ Explore's verbose discovery remains a limitation despite concise instructions.
   optional old-fixture native-export test skipped. No tests weakened or deleted.
 - `node --check shared/profiles.mjs` and `git diff --check`: exit 0.
 
-Release/package gates are still pending. Stable installed BEST/Homebrew remains
-0.3.3 until those gates and the release decision are complete.
+## Publication gates
+
+- Source PR: https://github.com/ThomasDanilo96/homebrew-opencode-team/pull/9
+- Phase A staging/install/test: PASS, run
+  https://github.com/ThomasDanilo96/homebrew-opencode-team/actions/runs/40187255748
+- Immutable tag `v0.3.4`: `2c0de4553a6cd392ace92ad241b16913c3b76628`.
+- Phase B official archive/install/test: PASS, run
+  https://github.com/ThomasDanilo96/homebrew-opencode-team/actions/runs/40187512572
+- Official archive SHA-256:
+  `47bdbeeca4451af507613ff90bbcfd23c8b0066bc758b811d85dc03cc53c3bab`.
+
+The formula update is separate from the immutable source tag. Stable clean-install
+and guarded release publication must succeed before claiming deployment complete.
+Live publication status: https://github.com/ThomasDanilo96/homebrew-opencode-team/releases/tag/v0.3.4
