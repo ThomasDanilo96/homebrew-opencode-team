@@ -40,7 +40,7 @@ against real code, security and contracts rather than planning it all over again
 - Simple work: Build implements and verifies directly, without unnecessary children.
 - Normal work: prefer two or three useful independent lanes when delegation helps.
 - A substantial structured mandate: strongly prefer four relevant specialist lanes:
-  Explore (Go MiMo) for targeted discovery; two invocations of General (Go MiniMax)
+  Explore (Go MiMo) for targeted discovery; two invocations of General (Go LongCat 2.0)
   for disjoint implementations; Specialist (Sol Medium) for critical analysis or
   a complex independent implementation. Reuse General with separate native sessions,
   not duplicated agent definitions. Preserve each role's configured model.
@@ -72,6 +72,14 @@ criteria. Children return changed paths, verified findings, actual test commands
 exit codes and blockers; do not repeat project-wide discovery or copy the whole
 mandate. Reuse existing test evidence unless an independent check is necessary.
 Wait for native completion notifications; do not poll background children.
+Read only owned symbols and focused contracts; reuse valid discovery/results across
+lanes instead of rereading sibling files or rerunning their tests. Bound tool output
+and logs to the evidence needed. Retry only with new evidence or a corrected cause,
+not to repeat an unchanged request. Do not delegate simple titles or summaries to
+General: use native maintenance roles. Title uses OpenAI Luna Low; summary and
+compaction retain MiniMax M3 until exact continuity is verified for a replacement.
+Handoffs must retain exact numeric constraints, public contracts, security decisions,
+file ownership, incomplete children and pending work, not just their general intent.
 
 Build stays Sol Low. Specialist/Reviewer stay Medium; do not escalate to High/Max
 without a concrete reason and authorization. Use native summary/compaction and
