@@ -162,8 +162,8 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE stays singleton and 
     assert.equal(c.$schema, 'https://opencode.ai/config.json');
     assert.equal(c.model, profile === 'best' ? 'openai/gpt-6.1-sol' : 'team-free/mimo-v2.6-flash-free');
     const expected = profile === 'best' ? {
-      build: 'openai/gpt-6.1-sol#low', general: 'opencode-go/minimax-m3',
-      explore: 'opencode-go/mimo-v2.6-flash', title: 'opencode-go/mimo-v2.6-flash',
+      build: 'openai/gpt-6.1-sol#low', general: 'opencode-go/longcat-2.0',
+      explore: 'opencode-go/mimo-v2.6-flash', title: 'openai/gpt-6-luna#low',
       summary: 'opencode-go/minimax-m3', compaction: 'opencode-go/minimax-m3',
       plan: 'openai/gpt-6.1-sol#medium', reviewer: 'openai/gpt-6.1-sol#medium',
       specialist: 'openai/gpt-6.1-sol#medium',
@@ -258,9 +258,9 @@ test('BEST Hybrid specialist inherits its coordinator override, FREE ignores it'
   assert.equal(best.agents.specialist.model, 'openai/another-coordinator#medium',
     'specialist uses the same BEST coordinator and medium reasoning variant as plan/reviewer');
   // Worker pool keeps its opencode-go identity: override only swaps the OpenAI tier.
-  assert.equal(best.agents.general.model, 'opencode-go/minimax-m3');
+  assert.equal(best.agents.general.model, 'opencode-go/longcat-2.0');
   assert.equal(best.agents.explore.model, 'opencode-go/mimo-v2.6-flash');
-  assert.equal(best.agents.title.model, 'opencode-go/mimo-v2.6-flash');
+  assert.equal(best.agents.title.model, 'openai/gpt-6-luna#low');
   assert.equal(best.agents.summary.model, 'opencode-go/minimax-m3');
   assert.equal(best.agents.compaction.model, 'opencode-go/minimax-m3');
   assert.equal(best.providers.openai.models['another-coordinator'].settings.reasoningEffort, 'low');
@@ -512,8 +512,9 @@ test('explicit coordinator and worker model choices update only their roles with
   ok(f.run('setup'));
   assert.equal(f.config('best').model, 'openai/another-coordinator');
   assert.equal(f.config('best').agents.general.model, 'opencode-go/another-worker');
-  assert.equal(f.config('best').agents.title.model, 'opencode-go/mimo-v2.6-flash');
-  assert.equal(f.config('best').agents.compaction.model, 'opencode-go/another-worker');
+  assert.equal(f.config('best').agents.title.model, 'openai/gpt-6-luna#low');
+  assert.equal(f.config('best').agents.summary.model, 'opencode-go/minimax-m3');
+  assert.equal(f.config('best').agents.compaction.model, 'opencode-go/minimax-m3');
   assert.equal(f.config('best').agents.build.model, 'openai/another-coordinator#low');
   assert.equal(f.config('best').agents.reviewer.model, 'openai/another-coordinator#medium');
   assert.equal(f.config('best').providers.openai.models['another-coordinator'].settings.reasoningEffort, 'low');
