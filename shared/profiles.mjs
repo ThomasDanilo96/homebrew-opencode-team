@@ -137,7 +137,7 @@ function readonlyPermissions(profile) {
 }
 function configuration(profile) {
   const bestModel = process.env.OPENCODE_TEAM_BEST_MODEL || 'openai/gpt-6.1-sol';
-  const goModel = process.env.OPENCODE_TEAM_BEST_GO_MODEL || 'opencode-go/minimax-m3';
+  const goModel = process.env.OPENCODE_TEAM_BEST_GO_MODEL || 'opencode-go/longcat-2.0';
   if (!/^openai\/[A-Za-z0-9][\w./-]*$/.test(bestModel)) fail('BEST coordinator model must be an openai/model ID without #variant');
   if (!/^opencode-go\/[A-Za-z0-9][\w./-]*$/.test(goModel)) fail('BEST worker model must be an opencode-go/model ID without #variant');
   if (process.env.OPENCODE_TEAM_FREE_MODEL && process.env.OPENCODE_TEAM_FREE_MODEL !== freeModel) fail(`FREE supports only ${freeModel}; no unverified paid models`);
@@ -146,8 +146,11 @@ function configuration(profile) {
   if (profile === 'best') {
     agents.build.model = `${bestModel}#low`;
     for (const id of ['plan', 'reviewer']) agents[id].model = `${bestModel}#medium`;
-    for (const id of ['explore', 'title']) agents[id].model = 'opencode-go/mimo-v2.6-flash';
-    for (const id of ['general', 'summary', 'compaction']) agents[id].model = goModel;
+    agents.explore.model = 'opencode-go/mimo-v2.6-flash';
+    agents.general.model = goModel;
+    agents.title.model = 'openai/gpt-6-luna#low';
+    // Worker selection must not replace the validated continuity model.
+    for (const id of ['summary', 'compaction']) agents[id].model = 'opencode-go/minimax-m3';
     agents.general.description = 'Implement an independent, well-scoped task using Go; return focused changes and actual test results';
     agents.specialist = { model: `${bestModel}#medium`, mode: 'subagent',
       description: 'Complex scoped implementation or critical technical analysis with Sol Medium; preserve file ownership and return concise evidence',

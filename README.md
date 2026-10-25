@@ -73,8 +73,10 @@ missing-docstring policy. See [0.3.3 validation](docs/best-context7-validation.m
 | Build: implementation, tests and integration | `openai/gpt-6.1-sol#low` |
 | Optional Plan / independent Reviewer | `openai/gpt-6.1-sol#medium` |
 | Specialist: complex scoped implementation or critical analysis | `openai/gpt-6.1-sol#medium` |
-| General / summary / compaction | `opencode-go/minimax-m3` |
-| Explore / title | `opencode-go/mimo-v2.6-flash` |
+| General | `opencode-go/longcat-2.0` |
+| Explore | `opencode-go/mimo-v2.6-flash` |
+| Title | `openai/gpt-6-luna#low` |
+| Summary / compaction (continuity retained) | `opencode-go/minimax-m3` |
 
 Build executes ChatGPT-prepared work, validates supplied commands against the
 actual code and permissions, and reports verification evidence. Small tasks stay
@@ -174,8 +176,9 @@ Explicit setup options:
 - `OPENCODE_TEAM_ECC_SOURCE=/absolute/checkout`: clean local skills/LICENSE Git
   source; its actual commit is reported and may differ from the official pin.
 - `OPENCODE_TEAM_BEST_MODEL=openai/MODEL_ID`: Build/Plan/Reviewer; must support
-  low/medium. `OPENCODE_TEAM_BEST_GO_MODEL=opencode-go/MODEL_ID`: General/summary/
-  compaction only. Setup does not verify alternate-model entitlement.
+  low/medium. `OPENCODE_TEAM_BEST_GO_MODEL=opencode-go/MODEL_ID`: General only;
+  summary/compaction retain the verified continuity model. Setup does not verify
+  alternate-model entitlement.
 - `OPENCODE_TEAM_RULES_FILE=/absolute/path/AGENTS.md`: another existing common
   rules source, referenced only; keep it outside generated profile files.
 

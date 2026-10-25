@@ -170,7 +170,7 @@ test('native Hybrid exports prove four concurrent lanes, models, ownership and s
   assert.equal(children.length, 5);
   assert.equal(new Set(children.map((c) => c.info.id)).size, 5);
   assert.deepEqual(children.map((c) => c.info.agent).sort(), ['explore', 'general', 'general', 'reviewer', 'specialist']);
-  const models = { explore: ['opencode-go', 'mimo-v2.6-flash'], general: ['opencode-go', 'minimax-m3'],
+  const models = { explore: ['opencode-go', 'mimo-v2.6-flash'], general: ['opencode-go', 'longcat-2.0'],
     specialist: ['openai', 'gpt-6.1-sol'], reviewer: ['openai', 'gpt-6.1-sol'] };
   const mutations = new Set(['edit', 'write', 'patch', 'serena_replace_symbol_body', 'serena_replace_content']);
   const messages = (c) => c.messages.filter((m) => m.type === 'assistant');
