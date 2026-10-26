@@ -14,7 +14,6 @@ done
 
 browser_caches() {
   /usr/bin/python3 - "$DRY_RUN" <<'PY'
-import re
 import shutil
 import subprocess
 import sys
@@ -22,7 +21,6 @@ from pathlib import Path
 
 home = Path.home()
 dry_run = sys.argv[1] == '1'
-registry = home / 'Library/Caches/ms-playwright'
 
 
 def safe_path(path):
@@ -83,45 +81,9 @@ for name in ('Chrome', 'Chrome-headless'):
         print(f'ERR Google {name}: {type(error).__name__}')
         failed = True
 
-try:
-    if not safe_path(registry) or not registry.is_dir():
-        raise ValueError('registry absent or symlinked')
-    if str(registry) in files:
-        raise ValueError('registry browser active')
-    links = registry / '.links'
-    if not safe_path(links) or not links.is_dir():
-        raise ValueError('missing or unsafe links')
-    packages = []
-    for link in sorted(links.iterdir()):
-        if not safe_path(link) or not link.is_file():
-            raise ValueError('unsafe registered link')
-        package = Path(link.read_text().strip())
-        if not safe_path(package / 'cli.js') or not (package / 'cli.js').is_file():
-            raise ValueError('missing or unsafe registered CLI')
-        if package not in packages:
-            packages.append(package)
-    node = shutil.which('node')
-    if not packages or not node:
-        raise ValueError('no registered CLI or node runtime')
-    for package in packages:
-        result = command([node, str(package / 'cli.js'), 'install', '--dry-run', 'chromium'])
-        locations = re.findall(r'^\s*Install location:\s*(.+?)\s*$', result.stdout, re.MULTILINE)
-        if result.stderr or len(locations) != 3:
-            raise ValueError('unrecognized native preflight')
-        for location in locations:
-            target = Path(location)
-            marker = target / 'INSTALLATION_COMPLETE'
-            if target.parent != registry or not safe_path(marker) or not marker.is_file():
-                raise ValueError('missing or unsafe complete browser; no install attempted')
-    # The original invokes native `install chromium` for GC after preflight.
-    # That command can download if an installation disappears concurrently.
-    # Keep native inspection, but fail closed: no offline-only GC command exists.
-    print(f'SKIP Playwright native GC: download-capable install disabled; registered_packages={len(packages)} reclaimed_bytes=0')
-except ValueError as error:
-    print(f'SKIP Playwright: {error}; reclaimed_bytes=0')
-except (OSError, subprocess.SubprocessError) as error:
-    print(f'ERR Playwright: {type(error).__name__}; reclaimed_bytes=unknown')
-    failed = True
+# Playwright exposes no offline-only GC. Preserve every revision and do not
+# execute registered package code merely to report that cleanup is skipped.
+print('SKIP Playwright native GC: download-capable install disabled; reclaimed_bytes=0')
 sys.exit(int(failed))
 PY
 }

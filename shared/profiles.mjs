@@ -331,8 +331,9 @@ function cleanup(action, automatic = false) {
     // retain the owned plist so the operation can safely be retried.
     atomicWrite(marker, json({ enabled: false, plist: state?.plist || null }));
     if (loaded) command('/bin/launchctl', ['bootout', target], { timeout: 15000 });
+    // An unloaded plist in LaunchAgents is automatically loaded at next login.
+    if (fs.existsSync(plist)) fs.unlinkSync(plist);
     if (action === 'uninstall') {
-      if (fs.existsSync(plist)) fs.unlinkSync(plist);
       atomicWrite(marker, json({ enabled: false, plist: null }));
     }
     console.log(`Cleanup ${action === 'disable' ? 'disabled' : 'uninstalled'}; profile data and legacy jobs untouched.`);
