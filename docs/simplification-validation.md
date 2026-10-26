@@ -253,3 +253,51 @@ no skips). The complete setup-smoke rerun also passed (33 passed, one opt-in ski
 Workflow scenarios, actionlint, JS/Bash/Zsh/Ruby syntax and safe cleanup dry-run
 passed. Dry-run reclaimed no bytes and did not execute cleanup. Gitleaks is still
 unavailable locally; no local Gitleaks PASS is claimed.
+
+### Live safety gates completed
+
+- Private backup: `~/.local/share/opencode-team/rollout-backups/20261026-114518`.
+  All BEST/FREE data, config and state trees, plus the exact legacy retention
+  plist and both original cleanup scripts, were copied under a 0700 root.
+  Source and backup bytes/modes/symlinks matched; a complete separate restoration
+  matched the 174,380-entry manifest. Both restored databases passed full
+  `integrity_check` and `foreign_key_check`. Verification receipt and restore
+  rehearsal remain private beside the payload; no backup enters Git.
+  Manifest SHA-256: `4b5e84a182a6deb1de08e45e4bb22b8423493d968edd9235a69b973124d7a85a`.
+- Counts: BEST **641 V2 sessions**, 155 legacy sessions, zero retention pins;
+  FREE six V2 and two legacy sessions. All are preserved, not merged or migrated.
+- BEST contains 16 durable suspended claims (15 roots, one child; attempts zero)
+  and four background recovery records (three shell, one subagent). No profile
+  database holder, pending input or inbox work was found. Dormant records were
+  not treated as proof of running inference and were never cleared or resumed.
+- Exact official v2.1.4 source confirms restart continuity is installed only for
+  the managed-service lifecycle, not the unregistered stdio host used by Team's
+  forced `--standalone`. A fresh projection-only fixture preserved all 16 claims,
+  exported all 641 sessions and 32,317 messages via official authenticated API,
+  and exited zero without SIGTERM. No credential rows were copied to that fixture.
+- Legacy BEST retention was persistently disabled with `launchctl disable`, then
+  unloaded with `bootout`. `print-disabled` reports disabled; `print` reports the
+  service absent (expected exit 113). Its original plist/scripts/binaries remain
+  available for deliberate rollback, not deleted. Other jobs/services were untouched.
+- A bounded live probe ran the candidate launcher sequentially for BEST and FREE,
+  requesting only `/api/info`. Both actual profile hosts reported official 2.1.4,
+  exited zero, and released DB/WAL/SHM. Before/after hashes of **every table's rows
+  and the schema** matched the backup, including credentials/accounts, claims,
+  recovery records, messages and legacy history. Integrity/FK checks passed;
+  owned profile/global config files and original cleanup assets stayed unchanged.
+  No historical prompt/resume, OAuth operation, setup or automatic recovery ran.
+- The probe initially stopped on its own read-only SQLite descriptor: Python's
+  connection context manager commits but does not close. Explicit `closing()`
+  fixed the private driver; no holder check was weakened, no process was killed,
+  and no official host had launched before the successful rerun.
+- Local real Homebrew install/test/uninstall passed for source commit
+  `0f1c8e770333451a762e1ae3bdc0f07ea9083935`, isolated keg-only 0.3.5. No dependency
+  upgrades, stable linking or replacement occurred; candidate/tap were removed.
+  Its local archive digest is not an official release checksum. Final stable
+  installation and remote workflow gates remain required before publication.
+
+Final independent read-only source/minimalism review approved entry into the
+gated publication process with no concrete blocking findings. It explicitly
+distinguishes supplied execution evidence from its own source inspection and
+does not waive Phase A, immutable-tag Phase B, stable CI, remote Gitleaks or
+installed-package verification.
