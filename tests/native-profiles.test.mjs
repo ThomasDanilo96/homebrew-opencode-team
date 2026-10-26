@@ -155,6 +155,26 @@ test('custom homes never schedule automatically and explicit enable escapes plis
   if (process.platform === 'darwin') ok(parsed);
 });
 
+test('scheduled cleanup follows the stable installation symlink across upgrades', (t) => {
+  const f = fixture(t);
+  mockCleanup(f);
+  const versions = ['old-keg', 'new-keg'].map((name) => path.join(f.dir, name));
+  for (const directory of versions) {
+    fs.mkdirSync(directory);
+    for (const asset of ['bin', 'shared']) fs.cpSync(path.join(root, asset), path.join(directory, asset), { recursive: true });
+  }
+  const stable = path.join(f.dir, 'opt-opencode-team');
+  fs.symlinkSync(versions[0], stable);
+  ok(spawnSync('bash', [path.join(stable, 'bin/opencode-team'), 'cleanup', 'enable'], { env: f.env, encoding: 'utf8' }));
+  const plist = fs.readFileSync(path.join(f.home, 'Library/LaunchAgents/io.opencode-team.safe-caches.plist'), 'utf8');
+  const scheduled = plist.match(/<string>\/bin\/zsh<\/string><string>([^<]+)<\/string>/)[1];
+  assert.equal(scheduled, path.join(stable, 'shared/disk-cleanup.sh'));
+  fs.unlinkSync(stable);
+  fs.symlinkSync(versions[1], stable);
+  fs.rmSync(versions[0], { recursive: true });
+  assert.ok(fs.existsSync(scheduled), 'upgrading/removing the old keg must not orphan the scheduled script');
+});
+
 test('cleanup refuses foreign or edited agents and propagates launchctl failures (mock launchctl)', (t) => {
   const f = fixture(t);
   const calls = mockCleanup(f);
