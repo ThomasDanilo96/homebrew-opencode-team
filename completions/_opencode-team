@@ -16,7 +16,7 @@ _opencode-team() {
         'start:Start a selected profile'
         'setup:Provision shared tools and isolated V2 configs'
         'doctor:Check local setup without changing it'
-        'cleanup:Manage the macOS safe-cache LaunchAgent'
+        'cleanup:Run safe maintenance or manage its macOS LaunchAgent'
         'config:Print a profile configuration path'
         'rollback:Restore a configuration backup'
         'version:Show package version'
@@ -27,7 +27,7 @@ _opencode-team() {
     argument)
       case "$words[2]" in
         cleanup)
-          cleanup_actions=('enable:Schedule safe caches daily' 'disable:Stop scheduling and persist the preference' 'uninstall:Remove only the owned agent' 'status:Show scheduling preference' 'dry-run:Inspect safe cleanup without deleting')
+          cleanup_actions=('enable:Schedule maintenance daily' 'disable:Stop scheduling and persist the preference' 'uninstall:Remove only the owned agent' 'status:Show scheduling preference' 'run:Run non-deleting session maintenance and safe caches' 'dry-run:Inspect maintenance without data changes')
           _describe 'cleanup action' cleanup_actions
           ;;
         start|config) _describe 'profile' profiles ;;

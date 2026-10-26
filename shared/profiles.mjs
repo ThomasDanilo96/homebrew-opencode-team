@@ -148,12 +148,19 @@ function provision() {
   if (process.env.OPENCODE_TEAM_ECC_SOURCE) console.error(`Explicit local ECC source: ${eccSource} (${actual}; official pin ${eccPin})`);
 }
 const rule = (action, effect, resource = '*') => ({ action, resource, effect });
+const bestExternalPermissions = [rule('external_directory', 'ask'),
+  ...['~/Sites/Github/*', '~/Sites/Python/*', '~/.local/bin/*', '~/Library/LaunchAgents/*',
+    ...new Set([os.tmpdir(), fs.realpathSync(os.tmpdir())].map((directory) => path.join(directory, 'opencode', '*')))]
+    .map((directory) => rule('external_directory', 'allow', directory))];
 function readonlyPermissions(profile) {
   return [rule('*', 'deny'), ...['read', 'glob', 'grep', 'webfetch', 'websearch', 'skill', 'question',
     'serena_initial_instructions', 'serena_get_current_config', 'serena_get_symbols_overview', 'serena_find_symbol',
     'serena_find_declaration', 'serena_find_implementations', 'serena_find_referencing_symbols',
     'serena_get_diagnostics_for_file', 'serena_search_for_pattern', 'serena_list_dir', 'serena_find_file'].map((a) => rule(a, 'allow')),
-  rule('external_directory', profile === 'best' ? 'allow' : 'ask'),
+  ...(profile === 'best' ? [
+    ...['execute', 'serena_activate_project', 'serena_list_memories', 'serena_read_memory'].map((a) => rule(a, 'allow')),
+    ...bestExternalPermissions,
+  ] : [rule('external_directory', 'ask')]),
   rule('read', profile === 'best' ? 'deny' : 'ask', '*.env'),
   rule('read', profile === 'best' ? 'deny' : 'ask', '*.env.*'),
   ...(profile === 'best' ? [rule('read', 'allow', '*.env.example')] : [])];
@@ -195,9 +202,24 @@ function configuration(profile) {
   }
   const config = { $schema: 'https://opencode.ai/config.json', model, default_agent: 'build', agents,
     policies: [rule('provider.use', 'deny'), ...(profile === 'best' ? ['opencode-go', 'openai'] : ['team-free']).map((provider) => rule('provider.use', 'allow', provider))],
-    permissions: [rule('external_directory', profile === 'best' ? 'allow' : 'ask'),
+    permissions: [...(profile === 'best' ? bestExternalPermissions : [rule('external_directory', 'ask')]),
       rule('shell', profile === 'best' ? 'allow' : 'ask'),
-      ...(profile === 'best' ? [rule('read', 'deny', '*.env'), rule('read', 'deny', '*.env.*'),
+      ...(profile === 'best' ? [
+        // Native command wildcards are approval guardrails, not a shell sandbox.
+        ...['git *reset *--hard*', 'git *clean *', 'git *push *-f*', 'git *push *--force*',
+          'git *push +*', 'git *push * +*', 'git *push *--mirror*',
+          'git *commit *--amend*', 'git *rebase *', 'git *filter-*',
+          'rm *', '*/rm *', 'rmdir *', '*/rmdir *',
+          'git *config *', 'git *credential *', 'ssh-keygen *', 'ssh-add *', 'security *',
+          '*.ssh/*', '*.git-credentials*', '*.netrc*', '*auth.json*',
+          'dropdb *', 'psql *', 'mysql *', 'opencode *api delete *',
+          'sudo *', 'launchctl *', 'kubectl *', 'helm *', 'terraform *', 'aws *', 'gcloud *', 'az *']
+          .map((resource) => rule('shell', 'ask', resource)),
+        ...['*.pem', '*.key', '*.env', '*.env.*', '*auth.json*', '*credentials*', '*secrets*',
+          '*.ssh/*', '*.aws/*', '*.gnupg/*', '*.netrc'].map((resource) => rule('edit', 'ask', resource)),
+        rule('edit', 'allow', '*.env.example'),
+        rule('edit', 'deny', '~/Library/LaunchAgents/*'),
+        rule('read', 'deny', '*.env'), rule('read', 'deny', '*.env.*'),
         rule('read', 'allow', '*.env.example')] : [])],
     skills: [path.join(eccSource, 'skills'), ...(profile === 'best' ? [path.join(packageRoot, 'shared/skills')] : [])], instructions,
     mcp: { servers: { serena: { type: 'local', command: [serenaBin, 'start-mcp-server', '--context', 'ide', '--project-from-cwd', '--enable-web-dashboard', 'false', '--open-web-dashboard', 'false'],
@@ -293,10 +315,13 @@ function locked(action) {
   finally { fs.closeSync(fd); fs.unlinkSync(lock); }
 }
 function cleanup(action, automatic = false) {
-  if (!['enable', 'disable', 'uninstall', 'status', 'dry-run'].includes(action)) fail('Expected cleanup enable, disable, uninstall, status or dry-run');
+  if (!['enable', 'disable', 'uninstall', 'status', 'run', 'dry-run'].includes(action)) fail('Expected cleanup enable, disable, uninstall, status, run or dry-run');
   if (process.platform !== 'darwin') { console.log('Cleanup skipped: macOS only.'); return; }
-  if (action === 'dry-run') {
-    console.log(command('/bin/zsh', [path.join(packageRoot, 'shared/disk-cleanup.sh'), '--safe-caches-only', '--dry-run']));
+  if (action === 'run' || action === 'dry-run') {
+    const result = spawnSync('/usr/bin/python3', [path.join(packageRoot, 'shared/maintenance.py'),
+      ...(action === 'dry-run' ? ['--dry-run'] : [])], { stdio: 'inherit', timeout: 600000 });
+    if (result.error) fail(`Maintenance failed: ${result.error.code}`);
+    process.exitCode = result.status ?? 1;
     return;
   }
   // launchctl targets the login user, not $HOME. Isolated setup fixtures must
@@ -344,13 +369,19 @@ function cleanup(action, automatic = false) {
     return;
   }
   const xml = (value) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;');
+  const log = path.join(roots.state, 'maintenance/logs/maintenance.launchd.log');
+  safe(log);
+  if (fs.existsSync(log) && fs.statSync(log).uid !== uid) fail(`Refusing maintenance log not owned by this user: ${log}`);
+  mkdir(path.dirname(log));
   // argv retains the launcher's stable Homebrew opt path; import.meta resolves the versioned Cellar path.
   const bytes = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>${label}</string>
-<key>ProgramArguments</key><array><string>/bin/zsh</string><string>${xml(path.resolve(path.dirname(process.argv[1]), 'disk-cleanup.sh'))}</string><string>--safe-caches-only</string></array>
-<key>EnvironmentVariables</key><dict><key>HOME</key><string>${xml(home)}</string><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+<key>ProgramArguments</key><array><string>/usr/bin/python3</string><string>${xml(path.resolve(path.dirname(process.argv[1]), 'maintenance.py'))}</string></array>
+<key>EnvironmentVariables</key><dict><key>HOME</key><string>${xml(home)}</string><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>${teamHome ? `<key>OPENCODE_TEAM_HOME</key><string>${xml(path.resolve(teamHome))}</string>` : ''}</dict>
+<key>StandardOutPath</key><string>${xml(log)}</string>
+<key>StandardErrorPath</key><string>${xml(log)}</string>
 <key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>15</integer></dict>
 <key>ProcessType</key><string>Background</string>
 </dict></plist>
@@ -369,7 +400,7 @@ function cleanup(action, automatic = false) {
     }
   } else if (!state.enabled) atomicWrite(marker, json({ enabled: true, plist: bytes }));
   if (!loaded || changed) command('/bin/launchctl', ['bootstrap', `gui/${uid}`, plist], { timeout: 15000 });
-  console.log('Cleanup enabled: daily safe caches at 04:15; no cleanup run during setup.');
+  console.log('Maintenance enabled: daily at 04:15; session deletion disabled; no maintenance run during setup.');
 }
 function setup() {
   nativeBinary();
@@ -434,7 +465,7 @@ function launch(profile, args) {
   });
 }
 function help() {
-  console.log(`OpenCode Team: native V2 profiles\n\n  opencode-team best|free [native OpenCode arguments]\n  opencode-team start best|free [native OpenCode arguments]\n  opencode-team setup\n  opencode-team doctor\n  opencode-team config best|free\n  opencode-team rollback BACKUP_ID\n  opencode-team cleanup enable|disable|uninstall|status|dry-run\n  opencode-team version\n\nBEST: OpenAI coordinator + Go workers; connect both subscriptions with /connect.\nFREE: anonymous MiMo only; no paid fallback.\nmacOS setup schedules safe caches daily; disable/uninstall persist across setup.\nCustom HOME/root skips automatic scheduling; explicit enable requires the login HOME.\nResume natively: opencode-team best -s SESSION_ID\nNative CLI arguments are preserved, with --standalone added in command scope.\nSee README for migration, backup and security boundaries.`);
+  console.log(`OpenCode Team: native V2 profiles\n\n  opencode-team best|free [native OpenCode arguments]\n  opencode-team start best|free [native OpenCode arguments]\n  opencode-team setup\n  opencode-team doctor\n  opencode-team config best|free\n  opencode-team rollback BACKUP_ID\n  opencode-team cleanup enable|disable|uninstall|status|run|dry-run\n  opencode-team version\n\nBEST: OpenAI coordinator + Go workers; connect both subscriptions with /connect.\nFREE: anonymous MiMo only; no paid fallback.\nmacOS setup schedules safe maintenance daily; session deletion is disabled.\nDisable/uninstall persist across setup.\nCustom HOME/root skips automatic scheduling; explicit enable requires the login HOME.\nResume natively: opencode-team best -s SESSION_ID\nNative CLI arguments are preserved, with --standalone added in command scope.\nSee README for migration, backup and security boundaries.`);
 }
 try {
   const [action = 'help', ...args] = process.argv.slice(2);
@@ -446,6 +477,7 @@ try {
   else if (action === 'doctor' && !args.length) doctor();
   else if (action === 'cleanup' && args.length === 1) {
     if (process.platform !== 'darwin' || ['status', 'dry-run'].includes(args[0])) cleanup(args[0]);
+    else if (args[0] === 'run') cleanup(args[0]);
     else locked(() => cleanup(args[0]));
   }
   else if (action === 'config' && args.length === 1) { validateProfile(args[0]); console.log(configFile(args[0])); }

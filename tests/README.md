@@ -5,6 +5,7 @@ node --test tests/*.test.mjs
 node --test --experimental-test-coverage tests/*.test.mjs
 bash tests/setup-smoke.sh
 bash tests/homebrew-workflow.test.sh
+python3 -B -m unittest discover -s tests -p test_maintenance.py
 # Optional integration with an installed V2 binary (no models or database calls):
 OPENCODE_TEAM_NATIVE_TEST_BIN="$(command -v opencode)" node --test --test-name-pattern='native V2 resolves' tests/native-profiles.test.mjs
 # Optional audit of real Hybrid native session exports (not a config mock):

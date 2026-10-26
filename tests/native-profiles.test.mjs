@@ -47,6 +47,44 @@ esac
 }
 const ok = (result) => assert.equal(result.status, 0, result.stderr + result.stdout);
 
+const trustedExternal = ['~/Sites/Github/*', '~/Sites/Python/*', '~/.local/bin/*', '~/Library/LaunchAgents/*',
+  ...new Set([os.tmpdir(), fs.realpathSync(os.tmpdir())].map((directory) => path.join(directory, 'opencode', '*')))];
+const ordinaryGit = ['git add shared/profiles.mjs', 'git commit -m "scoped fix"',
+  'git -C /development/fixture add .', 'git -C /development/fixture commit -m "scoped fix"',
+  'git -c credential.interactive=false add .',
+  'git -c credential.interactive=false -C /development/fixture commit -m "scoped fix"'];
+const approvalCommands = ['git reset --hard HEAD', 'git -C /development/fixture reset --hard HEAD',
+  'git clean -fd', 'git -c credential.interactive=false clean -fd',
+  'git push -f origin HEAD', 'git push --force origin HEAD', 'git push --force-with-lease origin HEAD',
+  'git -C /development/fixture push origin HEAD --force-with-lease',
+  'git push +HEAD:main', 'git push origin +HEAD:main', 'git push --mirror origin',
+  'git commit --amend --no-edit', 'git rebase main', 'git filter-branch --all', 'git filter-repo --force',
+  'rm -rf build', '/bin/rm -rf build', 'rmdir build',
+  'git config --global credential.helper store', 'git credential approve',
+  'ssh-keygen -t ed25519', 'ssh-add -D', 'security delete-generic-password -s fixture',
+  'chmod 600 ~/.ssh/config', 'cp fixture ~/.git-credentials',
+  'dropdb fixture', 'psql -c "DROP DATABASE fixture"', 'mysql -e "DROP DATABASE fixture"',
+  'opencode api delete /api/session/fixture', 'opencode --standalone api delete /api/session/fixture',
+  'kubectl delete deployment fixture', 'helm upgrade fixture chart', 'terraform apply',
+  'aws cloudformation deploy', 'gcloud run deploy fixture', 'az deployment group create',
+  'launchctl bootstrap gui/501 fixture.plist', 'sudo true'];
+
+// Mirror the documented whole-value wildcard rules; the opt-in test below also
+// checks these same resources against the native evaluator (never a shell).
+function permissionEffect(config, agent, action, resource, home) {
+  const match = (pattern, value) => {
+    const regex = pattern.replace(/[.+^${}()|[\]\\]/g, '\\$&').replaceAll('*', '.*').replaceAll('?', '.');
+    return new RegExp(`^${regex}$`).test(value) || (pattern.endsWith(' *') && value === pattern.slice(0, -2));
+  };
+  let effect = 'allow';
+  for (const rule of [...config.permissions, ...(config.agents[agent].permissions || [])]) {
+    const pattern = ['external_directory', 'read', 'edit'].includes(action)
+      ? rule.resource.replace(/^~(?=\/|$)/, home) : rule.resource;
+    if (match(rule.action, action) && match(pattern, resource)) effect = rule.effect;
+  }
+  return effect;
+}
+
 test('native discovery ignores profile-local OpenCode while BEST keeps private tools on PATH', (t) => {
   const f = fixture(t);
   const privateBin = path.join(f.team, 'data/best/bin');
@@ -129,7 +167,11 @@ test('macOS setup schedules only an owned safe job, with persistent disable and 
   fs.writeFileSync(old, 'legacy user job');
   ok(f.run('setup'));
   const bytes = fs.readFileSync(plist, 'utf8');
-  assert.match(bytes, /--safe-caches-only/);
+  assert.match(bytes, /\/usr\/bin\/python3/);
+  assert.match(bytes, /shared\/maintenance\.py/);
+  assert.match(bytes, /<key>StandardOutPath<\/key>/);
+  assert.match(bytes, /<key>StandardErrorPath<\/key>/);
+  assert.match(bytes, /<key>Hour<\/key><integer>4<\/integer><key>Minute<\/key><integer>15<\/integer>/);
   assert.doesNotMatch(bytes, /RunAtLoad|StartInterval/);
   assert.match(bytes, /StartCalendarInterval/);
   assert.equal(calls().filter((c) => c[0] === 'bootstrap').length, 1);
@@ -179,12 +221,20 @@ test('scheduled cleanup follows the stable installation symlink across upgrades'
   fs.symlinkSync(versions[0], stable);
   ok(spawnSync('bash', [path.join(stable, 'bin/opencode-team'), 'cleanup', 'enable'], { env: f.env, encoding: 'utf8' }));
   const plist = fs.readFileSync(path.join(f.home, 'Library/LaunchAgents/io.opencode-team.safe-caches.plist'), 'utf8');
-  const scheduled = plist.match(/<string>\/bin\/zsh<\/string><string>([^<]+)<\/string>/)[1];
-  assert.equal(scheduled, path.join(stable, 'shared/disk-cleanup.sh'));
+  const scheduled = plist.match(/<string>\/usr\/bin\/python3<\/string><string>([^<]+)<\/string>/)[1];
+  assert.equal(scheduled, path.join(stable, 'shared/maintenance.py'));
   fs.unlinkSync(stable);
   fs.symlinkSync(versions[1], stable);
   fs.rmSync(versions[0], { recursive: true });
   assert.ok(fs.existsSync(scheduled), 'upgrading/removing the old keg must not orphan the scheduled script');
+});
+
+test('explicit custom-root maintenance scheduling preserves the selected root (mock launchctl)', (t) => {
+  const f = fixture(t);
+  mockCleanup(f);
+  ok(f.run('cleanup', 'enable'));
+  const text = fs.readFileSync(path.join(f.home, 'Library/LaunchAgents/io.opencode-team.safe-caches.plist'), 'utf8');
+  assert.ok(text.includes(`<key>OPENCODE_TEAM_HOME</key><string>${f.team}</string>`));
 });
 
 test('cleanup refuses foreign or edited agents and propagates launchctl failures (mock launchctl)', (t) => {
@@ -254,22 +304,74 @@ test('generated BEST permissions allow authorized work while FREE and read-only 
   const f = fixture(t);
   ok(f.run('setup'));
   const rule = (action, effect, resource = '*') => ({ action, resource, effect });
-  assert.deepEqual(f.config('best').permissions, [
-    rule('external_directory', 'allow'), rule('shell', 'allow'),
-    rule('read', 'deny', '*.env'), rule('read', 'deny', '*.env.*'),
-    rule('read', 'allow', '*.env.example'),
+  const best = f.config('best');
+  assert.deepEqual(best.permissions.filter((r) => r.action === 'external_directory'), [
+    rule('external_directory', 'ask'), ...trustedExternal.map((directory) => rule('external_directory', 'allow', directory)),
   ]);
   assert.deepEqual(f.config('free').permissions, [rule('external_directory', 'ask'), rule('shell', 'ask')]);
   assert.equal(f.config('best').agents.general.permissions, undefined, 'General inherits global rules after native defaults');
   for (const id of ['plan', 'explore', 'reviewer']) {
     const rules = f.config('best').agents[id].permissions;
     assert.ok(rules.some((r) => r.action === '*' && r.effect === 'deny'));
-    assert.ok(!rules.some((r) => r.effect === 'ask'));
-    assert.ok(rules.some((r) => r.action === 'external_directory' && r.effect === 'allow'));
-    for (const action of ['shell', 'edit', 'execute', 'subagent', 'serena_replace_symbol_body']) {
+    assert.deepEqual(rules.filter((r) => r.action === 'external_directory'), best.permissions.filter((r) => r.action === 'external_directory'));
+    for (const action of ['shell', 'edit', 'subagent', 'serena_replace_symbol_body', 'serena_write_memory', 'serena_delete_memory']) {
       assert.ok(!rules.some((r) => r.action === action && r.effect === 'allow'), `${id}: ${action}`);
     }
+    for (const action of ['execute', 'serena_activate_project', 'serena_list_memories', 'serena_read_memory']) {
+      assert.ok(rules.some((r) => r.action === action && r.effect === 'allow'), `${id}: ${action}`);
+    }
     assert.ok(f.config('free').agents[id].permissions.some((r) => r.action === 'external_directory' && r.effect === 'ask'));
+  }
+});
+
+test('BEST asks for destructive shell operations and unknown directories without blocking ordinary Git or read-only MCP', (t) => {
+  const f = fixture(t);
+  ok(f.run('setup'));
+  const best = f.config('best');
+  // A fixture HOME lives inside the trusted temp root; use a non-temp HOME to
+  // check that similarly named directories do not inherit a home exception.
+  const home = '/Users/permission-fixture';
+  const evaluate = (agent, action, resource, expected) =>
+    assert.equal(permissionEffect(best, agent, action, resource, home), expected, `${agent}: ${action} ${resource}`);
+  for (const agent of ['build', 'general', 'specialist', 'plan', 'explore', 'reviewer']) {
+    const readonly = ['plan', 'explore', 'reviewer'].includes(agent);
+    for (const command of ordinaryGit) evaluate(agent, 'shell', command, readonly ? 'deny' : 'allow');
+    for (const command of approvalCommands) evaluate(agent, 'shell', command, readonly ? 'deny' : 'ask');
+    for (const directory of trustedExternal) evaluate(agent, 'external_directory', directory.replace(/^~/, home), 'allow');
+    for (const directory of ['/development/fixture/*', '/etc/*', `${home}/Sites/Github-other/*`,
+      path.join(os.tmpdir(), '*'), path.join(fs.realpathSync(os.tmpdir()), 'untrusted', '*')]) {
+      evaluate(agent, 'external_directory', directory, 'ask');
+    }
+    evaluate(agent, 'read', `${home}/Library/LaunchAgents/fixture.plist`, 'allow');
+    evaluate(agent, 'edit', `${home}/Library/LaunchAgents/fixture.plist`, 'deny');
+    evaluate(agent, 'edit', `${home}/.local/bin/fixture`, readonly ? 'deny' : 'allow');
+    for (const action of ['execute', 'serena_activate_project', 'serena_list_memories', 'serena_read_memory']) evaluate(agent, action, '*', 'allow');
+    if (readonly) {
+      for (const action of ['edit', 'subagent', 'serena_replace_symbol_body', 'serena_write_memory', 'serena_delete_memory']) evaluate(agent, action, 'fixture', 'deny');
+    }
+  }
+});
+
+test('BEST asks before editing credentials and keys while examples and read-only boundaries stay intact', (t) => {
+  const f = fixture(t);
+  ok(f.run('setup'));
+  const best = f.config('best');
+  const home = '/Users/permission-fixture';
+  const project = `${home}/Sites/Github/fixture`;
+  const protectedFiles = ['private.pem', 'private.key', '.env', '.env.production', 'settings.env', 'settings.env.local',
+    'auth.json', 'cached-auth.json.backup', 'credentials.json', 'secrets.yaml',
+    '.ssh/config', '.aws/config', '.gnupg/gpg.conf', '.netrc'];
+  for (const agent of ['build', 'general', 'specialist', 'plan', 'explore', 'reviewer']) {
+    const readonly = ['plan', 'explore', 'reviewer'].includes(agent);
+    const evaluate = (file, expected) =>
+      assert.equal(permissionEffect(best, agent, 'edit', file, home), expected, `${agent}: edit ${file}`);
+    for (const file of protectedFiles) {
+      evaluate(file, readonly ? 'deny' : 'ask');
+      evaluate(`${project}/${file}`, readonly ? 'deny' : 'ask');
+    }
+    for (const file of ['.ssh/config', '.aws/config', '.gnupg/gpg.conf', '.netrc']) evaluate(`${home}/${file}`, readonly ? 'deny' : 'ask');
+    for (const file of ['.env.example', 'settings.env.example', `${project}/.env.example`, `${project}/app.mjs`]) evaluate(file, readonly ? 'deny' : 'allow');
+    evaluate(`${home}/Library/LaunchAgents/secrets.plist`, 'deny');
   }
 });
 
@@ -307,7 +409,11 @@ test('native V2 resolves generated policies without executing shell resources', 
           { action: 'read', resource: '*.env.*', effect: 'ask' },
           { action: 'read', resource: '*.env.example', effect: 'allow' },
           ...config.permissions, ...(config.agents[agent].permissions || []),
-        ];
+        ].map((rule) => ({ ...rule,
+          // Session rules bypass config loading, where native V2 expands ~.
+          resource: ['external_directory', 'read', 'edit'].includes(rule.action)
+            ? rule.resource.replace(/^~(?=\/|$)/, f.home) : rule.resource,
+        }));
         sessions.set(agent, api(profile, 'post', '/api/session', {
           title: 'permission regression fixture', location: { directory: f.dir }, permissions,
         }));
@@ -317,19 +423,31 @@ test('native V2 resolves generated policies without executing shell resources', 
       assert.equal(result.effect, expected, `${profile}/${agent}: ${action} ${resource}`);
     };
     for (const agent of profile === 'best' ? ['build', 'general', 'specialist'] : ['build', 'general']) {
-      for (const command of commands) evaluate(agent, 'shell', command, profile === 'best' ? 'allow' : 'ask');
-      evaluate(agent, 'external_directory', '/development/fixture/*', profile === 'best' ? 'allow' : 'ask');
+      for (const command of [...commands, ...ordinaryGit]) evaluate(agent, 'shell', command, profile === 'best' ? 'allow' : 'ask');
+      for (const command of approvalCommands) evaluate(agent, 'shell', command, 'ask');
+      evaluate(agent, 'external_directory', '/development/fixture/*', 'ask');
+      for (const directory of trustedExternal) evaluate(agent, 'external_directory', directory.replace(/^~/, f.home), profile === 'best' ? 'allow' : 'ask');
+      evaluate(agent, 'read', `${f.home}/Library/LaunchAgents/fixture.plist`, 'allow');
+      evaluate(agent, 'edit', `${f.home}/Library/LaunchAgents/fixture.plist`, profile === 'best' ? 'deny' : 'allow');
+      evaluate(agent, 'edit', `${f.home}/.local/bin/fixture`, 'allow');
       for (const action of ['read', 'edit', 'skill', 'serena_replace_symbol_body']) evaluate(agent, action, 'fixture', 'allow');
       evaluate(agent, 'read', 'settings.env', profile === 'best' ? 'deny' : 'ask');
       evaluate(agent, 'read', 'settings.env.production', profile === 'best' ? 'deny' : 'ask');
       evaluate(agent, 'read', 'settings.env.example', 'allow');
     }
+    evaluate('build', 'edit', `${f.home}/Sites/Github/fixture/private.key`, profile === 'best' ? 'ask' : 'allow');
+    evaluate('build', 'edit', `${f.home}/Sites/Github/fixture/.env.example`, 'allow');
     evaluate('build', 'subagent', 'general', 'allow');
     for (const agent of ['plan', 'explore', 'reviewer']) {
-      for (const action of ['shell', 'edit', 'execute', 'subagent', 'serena_replace_symbol_body']) evaluate(agent, action, 'fixture', 'deny');
+      for (const action of ['shell', 'edit', 'subagent', 'serena_replace_symbol_body', 'serena_write_memory', 'serena_delete_memory']) evaluate(agent, action, 'fixture', 'deny');
+      for (const command of [ordinaryGit[0], approvalCommands[0]]) evaluate(agent, 'shell', command, 'deny');
+      for (const action of ['execute', 'serena_activate_project', 'serena_list_memories', 'serena_read_memory']) evaluate(agent, action, '*', profile === 'best' ? 'allow' : 'deny');
       evaluate(agent, 'serena_find_symbol', '*', 'allow');
-      evaluate(agent, 'external_directory', '/development/fixture/*', profile === 'best' ? 'allow' : 'ask');
+      evaluate(agent, 'external_directory', '/development/fixture/*', 'ask');
+      for (const directory of trustedExternal) evaluate(agent, 'external_directory', directory.replace(/^~/, f.home), profile === 'best' ? 'allow' : 'ask');
     }
+    evaluate('reviewer', 'edit', `${f.home}/Sites/Github/fixture/private.key`, 'deny');
+    evaluate('reviewer', 'edit', `${f.home}/Sites/Github/fixture/.env.example`, 'deny');
   }
 });
 
@@ -386,7 +504,7 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE stays singleton and 
     } else assert.equal(c.mcp.servers.playwright, undefined);
     const permissions = c.agents.reviewer.permissions;
     assert.ok(permissions.some((p) => p.action === '*' && p.effect === 'deny'));
-    assert.ok(!permissions.some((p) => ['shell', 'edit', 'execute', 'subagent'].includes(p.action) && p.effect === 'allow'));
+    assert.ok(!permissions.some((p) => ['shell', 'edit', 'subagent', ...(profile === 'free' ? ['execute'] : [])].includes(p.action) && p.effect === 'allow'));
     assert.ok(permissions.some((p) => p.action === 'serena_find_symbol' && p.effect === 'allow'));
   }
   assert.deepEqual(f.config('best').policies, [
@@ -424,8 +542,7 @@ test('BEST Hybrid specialist reuses general, denies only question/subagent and i
   assert.ok(specialist.description.length > 16, `specialist description must be meaningful, got ${JSON.stringify(specialist.description)}`);
   assert.ok(Array.isArray(specialist.permissions));
   // The contract is "deny question and subagent only": shell, edit, execute and
-  // external_directory must flow through the shared BEST globals, which allow
-  // shell and external_directory and deny only *.env/*.env.* secret reads.
+  // external_directory must flow through the shared BEST safety rules.
   assert.deepEqual(specialist.permissions, [
     { action: 'question', resource: '*', effect: 'deny' },
     { action: 'subagent', resource: '*', effect: 'deny' },
@@ -437,12 +554,12 @@ test('BEST Hybrid specialist reuses general, denies only question/subagent and i
   // Reviewer remains a distinct read-only role; specialist is not a rename.
   assert.equal(best.agents.reviewer.mode, 'subagent');
   assert.ok(best.agents.reviewer.permissions.some((r) => r.action === 'serena_find_symbol' && r.effect === 'allow'));
-  // 0.2.1 BEST globals: shell allow, external_directory allow, *.env read deny.
+  // BEST globals allow routine shell work and trusted external directories.
   const globals = best.permissions;
   assert.ok(globals.some((r) => r.action === 'shell' && r.effect === 'allow'),
-    '0.2.1 BEST globals still allow shell for any agent that does not deny it');
-  assert.ok(globals.some((r) => r.action === 'external_directory' && r.effect === 'allow'),
-    '0.2.1 BEST globals still allow external_directory');
+    'BEST globals allow routine shell work for any agent that does not deny it');
+  assert.ok(globals.some((r) => r.action === 'external_directory' && r.resource === '*' && r.effect === 'ask'),
+    'BEST globals ask for untrusted external directories');
   assert.ok(globals.some((r) => r.action === 'read' && r.resource === '*.env' && r.effect === 'deny'),
     '0.2.1 BEST globals still deny secret reads');
   // FREE agent roster stays exactly the documented 0-agent, no-role extras.
