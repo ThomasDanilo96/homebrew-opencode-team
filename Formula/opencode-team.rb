@@ -12,7 +12,7 @@ class OpencodeTeam < Formula
   def install
     zsh_completion.install "completions/_opencode-team"
     libexec.install "bin", "completions", "shared", "VERSION"
-    (libexec/"tests").install "tests/native-profiles.test.mjs", "tests/setup-smoke.sh"
+    (libexec/"tests").install "tests/native-profiles.test.mjs", "tests/setup-smoke.sh", "tests/test_maintenance.py"
     (bin/"opencode-team").write <<~EOS
       #!/bin/bash
       export PATH="#{formula_opt_bin("node@22")}:$PATH"
@@ -31,6 +31,7 @@ class OpencodeTeam < Formula
     refute_match(/best-ecc|best-native|opencode-daily-team/, help)
     assert_predicate bin/"opencode-team", :executable?
     assert_predicate libexec/"shared/profiles.mjs", :file?
+    assert_predicate libexec/"shared/maintenance.py", :file?
     assert_predicate libexec/"shared/instructions.md", :file?
     assert_equal "b92f181b3b748d1abbc2afd94af6aa7d8c8fca29", (libexec/"shared/ecc.lock").read.strip
     assert_predicate libexec/"tests/setup-smoke.sh", :executable?

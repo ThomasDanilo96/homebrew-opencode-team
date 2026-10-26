@@ -3,8 +3,8 @@
 Two isolated profiles on **standard OpenCode V2**, with one launcher and config
 generator (`shared/profiles.mjs`). Native V2 owns agents, tools, permissions,
 skills, MCP and sessions. No custom runtime, server, router, daemon, OmO, Codex
-bridge or mandatory fanout is installed. macOS setup also schedules the limited
-cache-cleanup script described below; it never deletes sessions.
+bridge or mandatory fanout is installed. macOS setup also schedules the safe
+maintenance described below; it never deletes sessions.
 
 | Profile | Default | Connection |
 | --- | --- | --- |
@@ -46,11 +46,40 @@ and `LICENSE` are checked out: no ECC agents, hooks, plugins or orchestrator.
 `doctor` checks local versions/dependencies/config, not auth, model requests or
 MCP connectivity.
 
-### Automatic macOS cache cleanup
+### Automatic macOS maintenance
 
 On macOS, normal `setup` registers one native LaunchAgent at **04:15 daily**.
-Setup never runs cleanup immediately. The packaged script retains only the
-original script's limited cache policy: inactive Chrome cache, local Docker
+Setup never runs maintenance immediately. Session retention is **report-only**:
+old age alone is not sufficient; pending work, execution claims, family/fork
+dependencies and uncertain state protect sessions. Counts are informational, not
+authorization to delete. No session DELETE request, table deletion or associated
+file pruning is performed, and no native maintenance server is started.
+Potential review requires a whole connected family with terminal idle outcome,
+no known pending/pinned/suspended/compacting work, and all five creation/activity/
+idle/view/archive timestamps older than 90 days. Unknown or absent timestamps
+protect the family. Idle client attachments cannot be proven absent by 2.1.4.
+
+SQLite uses consistent online backups, checked before publication, with checksums
+and bounded retention in a new owned snapshot directory. Existing recovery backups
+are never pruned. Reclaim uses only incremental auto-vacuum already configured by
+the database, small non-blocking transactions and a PASSIVE WAL checkpoint; no full
+VACUUM, conversion, forced WAL truncation or service restart. Busy databases defer
+work. Logical reclaimed pages and main/WAL file sizes are reported separately:
+neither a freelist reduction nor a checkpoint guarantees filesystem space freed.
+Private SQLite snapshots live under the Team state root's
+`maintenance/snapshots-v1/{best,free}`; retain three verified snapshots per profile,
+deduplicated by lossless logical content. Each has a `database.db` and checksum
+manifest. They are SQLite recovery copies, not exports of separate auth/config
+files or substitutes for the existing full-profile rollback backups. Before any
+manual restoration, stop all writers and independently verify the snapshot's
+SHA-256 and SQLite integrity; no live restore or session deletion is scheduled.
+
+Update checks are informational Homebrew metadata queries, with automatic metadata
+updates disabled. No package/plugin installation or automatic upgrade is performed;
+results can be stale until the operator refreshes Homebrew metadata. Time Machine
+snapshots are not thinned or deleted.
+
+The packaged script retains the original limited cache policy: inactive Chrome cache, local Docker
 Desktop build cache older than seven days, and unopened Serena `.log` files older
 than 30 days. Uncertain process/path checks skip deletion. Session data,
 credentials, configuration, persistent browser profiles, Docker images/containers/
@@ -59,6 +88,7 @@ volumes and Spotlight settings are not targets.
 ```sh
 opencode-team cleanup status
 opencode-team cleanup dry-run
+opencode-team cleanup run        # backup/reclaim/report and existing safe caches
 opencode-team cleanup disable
 opencode-team cleanup enable
 opencode-team cleanup uninstall  # run before uninstalling the package
@@ -68,10 +98,20 @@ Disable/uninstall persists across setup and login. Only the exact owned agent is
 removed; legacy user scripts/jobs are never overwritten. Playwright revisions are
 preserved: its download-capable installation command is not used for unattended
 GC. No additional daemon, runtime wrapper or dependency is installed.
+The same non-blocking maintenance lock covers manual and scheduled runs. Independent
+tasks continue after errors; the overall exit status still reports failure. Dry-run
+does not back up, reclaim, prune, check updates or delete cache data; it may create
+the private state directory and lock file. Scheduled aggregate reports go to
+`~/.local/state/opencode-team/maintenance/logs/maintenance.launchd.log`.
+WAL-mode databases defer read-only dry-run analysis/reclaim: even an ordinary
+read-only SQLite connection can modify SHM reader marks. Apply reads the live
+catalog consistently without claiming that candidates are safe to delete.
 
 Custom `HOME` or `OPENCODE_TEAM_HOME` setups skip automatic scheduling. Explicit
 `cleanup enable` requires the actual login HOME; a custom Team root stores only
-the ownership/preference receipt, not a different macOS user's schedule.
+the ownership/preference receipt and explicitly selected maintenance paths, not a
+different macOS user's schedule. Existing legacy jobs are never silently rewritten
+by setup: disable them before enabling this one if migrating an older installation.
 
 ### BEST code quality and browser checks
 
@@ -169,8 +209,21 @@ replacement. FREE does not automatically gain this shared file.
 
 Build/General implement. Plan/Explore/Reviewer have deny-by-default read-only tool
 allowlists: no shell, edits, delegation or MCP mutators. Serena read tools are
-allowed individually and Code Mode is disabled. These permissions are **not an
-OS sandbox**. Build uses Serena's `initial_instructions`, relevant skills and TDD.
+allowed individually. BEST also allows Code Mode; nested tools still enforce
+their own permissions. FREE keeps Code Mode disabled for read-only roles.
+These permissions are **not an OS sandbox**. Build uses Serena's
+`initial_instructions`, relevant skills and TDD.
+
+BEST permits external development under `~/Sites/Github/`, `~/Sites/Python/`,
+user scripts under `~/.local/bin/`, LaunchAgent reads, and OpenCode's temporary
+directory. Other external directories require approval; LaunchAgent edits are
+denied. Routine shell/Git development runs unattended; destructive Git, deletion,
+credential, database and production-management commands require approval.
+Direct edits to credential/key files and `.env` files also require approval;
+`.env.example` remains editable, and read-only roles still cannot edit anything.
+Command wildcards are conservative guardrails, not argument-aware parsing or a
+production authorization system. FREE's approvals and provider isolation are
+unchanged. Setup regenerates these native V2 rules, including agent exceptions.
 
 ## CLI and storage
 
@@ -279,7 +332,7 @@ The workflow deliberately separates candidate testing from publication. The
 following is the release procedure; completed gates are recorded in validation:
 
 1. After approval, commit and push the reviewed source to `prerelease/vVERSION`
-   using the candidate `VERSION` (currently `0.3.3`).
+   using the candidate `VERSION` (currently `0.3.6`).
    Run **Homebrew Install** manually on that branch: Phase A installs the exact
    candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
 2. Only after Phase A succeeds, authorize the immutable `vVERSION` tag on the

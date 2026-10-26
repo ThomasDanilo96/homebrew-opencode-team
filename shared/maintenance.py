@@ -274,6 +274,7 @@ def remove_retired_snapshot(directory):
         raise ValueError("unexpected-snapshot-files")
     for child in children:
         safe_path(child, private=True)
+    sync_directory(directory.parent)
     for child in children:
         child.unlink()
     sync_directory(directory)
@@ -335,7 +336,8 @@ def snapshot(path, state, profile, budget=30):
             shm.unlink()
         digest = checksum(database, deadline)
         report = {"status": "unchanged", "ignored_artifacts": ignored}
-        if not any(manifest["logical_sha256"] == logical for _, manifest in existing):
+        survivors = sorted(existing, key=lambda item: item[0].name)[-3:]
+        if not any(manifest["logical_sha256"] == logical for _, manifest in survivors):
             manifest = {"format": SNAPSHOTS, "profile": profile, "sha256": digest,
                         "logical_sha256": logical}
             receipt = temporary / "manifest.json"
@@ -361,7 +363,6 @@ def snapshot(path, state, profile, budget=30):
             safe_path(entry, directory=True, private=True)
             retired = entry.with_name(".retired-" + entry.name)
             entry.rename(retired)
-            sync_directory(directory)
             remove_retired_snapshot(retired)
         return report
     finally:

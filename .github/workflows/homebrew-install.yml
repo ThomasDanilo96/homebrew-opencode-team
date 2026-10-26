@@ -46,6 +46,7 @@ jobs:
           zsh -n completions/_opencode-team
           node --check shared/profiles.mjs
           node --test tests/*.test.mjs
+          python3 -B -m unittest discover -s tests -p test_maintenance.py
 
   release_state:
     needs: source-validation

@@ -297,6 +297,8 @@ sys.exit(int(failed))
 PY
 }
 
-browser_caches
-docker_cache
-serena_logs
+failed=0
+browser_caches || failed=1
+docker_cache || failed=1
+serena_logs || failed=1
+exit "$failed"
