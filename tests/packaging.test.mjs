@@ -48,6 +48,8 @@ formula.install
   for (const legacy of ['core', 'teams', 'benchmarks']) assert.equal(fs.existsSync(path.join(temp, 'libexec', legacy)), false);
   assert.deepEqual(fs.readdirSync(path.join(temp, 'bin')), ['opencode-team']);
   assert.ok(fs.existsSync(path.join(temp, 'share/zsh/site-functions/_opencode-team')));
+  assert.equal(fs.readFileSync(path.join(temp, 'libexec/shared/disk-cleanup.sh'), 'utf8'),
+    fs.readFileSync(path.join(root, 'shared/disk-cleanup.sh'), 'utf8'));
   assert.deepEqual(fs.readdirSync(path.join(temp, 'libexec/tests')).sort(), ['native-profiles.test.mjs', 'setup-smoke.sh']);
   assert.equal(fs.readFileSync(path.join(temp, 'libexec/shared/skills/documentation-lookup.md'), 'utf8'),
     fs.readFileSync(path.join(root, 'shared/skills/documentation-lookup.md'), 'utf8'));
