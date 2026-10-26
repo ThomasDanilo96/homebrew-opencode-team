@@ -301,3 +301,18 @@ gated publication process with no concrete blocking findings. It explicitly
 distinguishes supplied execution evidence from its own source inspection and
 does not waive Phase A, immutable-tag Phase B, stable CI, remote Gitleaks or
 installed-package verification.
+
+### Remote publication gates
+
+- Phase A dispatch [40312336831](https://github.com/ThomasDanilo96/homebrew-opencode-team/actions/runs/40312336831)
+  passed source validation and isolated Homebrew staging on exact candidate
+  `fa7688267af77683a1314ded5c8f974b90e8a4ed`, including remote Gitleaks.
+- Only afterward, immutable tag `v0.3.5` was pushed on that same commit.
+  Phase B [40312866896](https://github.com/ThomasDanilo96/homebrew-opencode-team/actions/runs/40312866896)
+  passed official archive installation/testing and Gitleaks (`no leaks found`).
+- Independently downloaded official archive SHA-256 matches Phase B:
+  `ee4928000ca6e2e35744486e246ec47ccfc8c2e002022fa2d276274afdf64f21`.
+  Stable formula URL/checksum now select that immutable archive, never the local
+  staging archive. [PR #11](https://github.com/ThomasDanilo96/homebrew-opencode-team/pull/11)
+  carries source plus formula metadata; stable clean-install, publication and
+  installed-package acceptance remain pending until recorded as completed.
