@@ -129,7 +129,9 @@ test('macOS setup schedules only an owned safe job, with persistent disable and 
   fs.writeFileSync(old, 'legacy user job');
   ok(f.run('setup'));
   const bytes = fs.readFileSync(plist, 'utf8');
-  assert.match(bytes, /--safe-caches-only/);
+  assert.match(bytes, /\/usr\/bin\/python3/);
+  assert.match(bytes, /shared\/maintenance\.py/);
+  assert.match(bytes, /<key>Hour<\/key><integer>4<\/integer><key>Minute<\/key><integer>15<\/integer>/);
   assert.doesNotMatch(bytes, /RunAtLoad|StartInterval/);
   assert.match(bytes, /StartCalendarInterval/);
   assert.equal(calls().filter((c) => c[0] === 'bootstrap').length, 1);
@@ -179,12 +181,20 @@ test('scheduled cleanup follows the stable installation symlink across upgrades'
   fs.symlinkSync(versions[0], stable);
   ok(spawnSync('bash', [path.join(stable, 'bin/opencode-team'), 'cleanup', 'enable'], { env: f.env, encoding: 'utf8' }));
   const plist = fs.readFileSync(path.join(f.home, 'Library/LaunchAgents/io.opencode-team.safe-caches.plist'), 'utf8');
-  const scheduled = plist.match(/<string>\/bin\/zsh<\/string><string>([^<]+)<\/string>/)[1];
-  assert.equal(scheduled, path.join(stable, 'shared/disk-cleanup.sh'));
+  const scheduled = plist.match(/<string>\/usr\/bin\/python3<\/string><string>([^<]+)<\/string>/)[1];
+  assert.equal(scheduled, path.join(stable, 'shared/maintenance.py'));
   fs.unlinkSync(stable);
   fs.symlinkSync(versions[1], stable);
   fs.rmSync(versions[0], { recursive: true });
   assert.ok(fs.existsSync(scheduled), 'upgrading/removing the old keg must not orphan the scheduled script');
+});
+
+test('explicit custom-root maintenance scheduling preserves the selected root (mock launchctl)', (t) => {
+  const f = fixture(t);
+  mockCleanup(f);
+  ok(f.run('cleanup', 'enable'));
+  const text = fs.readFileSync(path.join(f.home, 'Library/LaunchAgents/io.opencode-team.safe-caches.plist'), 'utf8');
+  assert.ok(text.includes(`<key>OPENCODE_TEAM_HOME</key><string>${f.team}</string>`));
 });
 
 test('cleanup refuses foreign or edited agents and propagates launchctl failures (mock launchctl)', (t) => {
