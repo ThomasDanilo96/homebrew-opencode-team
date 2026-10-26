@@ -84,6 +84,11 @@ import {syncBuiltinESMExports} from 'node:module';
 Object.defineProperty(process, 'platform', {value:'darwin'});
 if (!process.env.MOCK_REAL_HOME) os.userInfo = () => ({homedir:process.env.HOME});
 const original = cp.spawnSync;
+const rename = fs.renameSync;
+fs.renameSync = (source, target) => {
+  if (process.env.MOCK_MARKER_FAIL && target.endsWith('/cleanup.json')) throw new Error('injected cleanup receipt failure');
+  return rename(source, target);
+};
 cp.spawnSync = (bin, args, opts) => {
   if (bin !== '/bin/launchctl') return original(bin, args, opts);
   fs.appendFileSync(process.env.MOCK_LAUNCHCTL_LOG, JSON.stringify(args)+'\\n');
@@ -185,6 +190,31 @@ test('cleanup status and non-macOS commands are read-only; fake HOME cannot addr
   f.env.NODE_OPTIONS = `--import=${hook}`;
   ok(f.run('cleanup', 'enable'));
   assert.equal(fs.existsSync(path.join(f.home, 'Library/LaunchAgents')), false);
+});
+
+test('cleanup receipt failure leaves no orphan agent and a failed bootstrap is retryable (mock launchctl)', (t) => {
+  const f = fixture(t);
+  const calls = mockCleanup(f);
+  const plist = path.join(f.home, 'Library/LaunchAgents/io.opencode-team.safe-caches.plist');
+  f.env.MOCK_MARKER_FAIL = '1';
+  assert.notEqual(f.run('cleanup', 'enable').status, 0);
+  assert.equal(fs.existsSync(plist), false, 'failed ownership receipt must roll back the new agent');
+  assert.ok(!calls().some((c) => c[0] === 'bootstrap'));
+  delete f.env.MOCK_MARKER_FAIL;
+  delete f.env.OPENCODE_TEAM_HOME;
+  f.env.MOCK_LAUNCHCTL_FAIL = 'bootstrap';
+  assert.notEqual(f.run('setup').status, 0);
+  assert.match(f.run('cleanup', 'status').stdout, /not loaded/i);
+  delete f.env.MOCK_LAUNCHCTL_FAIL;
+  ok(f.run('setup'));
+  assert.equal(calls().filter((c) => c[0] === 'bootstrap').length, 2);
+  f.env.MOCK_LAUNCHCTL_FAIL = 'bootout';
+  assert.notEqual(f.run('cleanup', 'disable').status, 0);
+  assert.ok(fs.existsSync(plist));
+  assert.match(f.run('cleanup', 'status').stdout, /disabled.*loaded/i);
+  delete f.env.MOCK_LAUNCHCTL_FAIL;
+  ok(f.run('cleanup', 'uninstall'));
+  assert.equal(fs.existsSync(plist), false);
 });
 
 test('generated BEST permissions allow authorized work while FREE and read-only boundaries remain intact', (t) => {
