@@ -24,6 +24,7 @@ import uuid
 
 PROFILES = ("best", "free")
 SNAPSHOTS = "snapshots-v1"
+SNAPSHOT_NAME = r"[0-9]{20}-[a-f0-9]{32}"
 AGE_MS = 90 * 86400 * 1000
 
 
@@ -173,6 +174,8 @@ def session_report(path, dry_run=False):
                         parents[root(key)] = root(dependency)
         tables = {row[0] for row in connection.execute(
             "SELECT name FROM sqlite_schema WHERE type='table'")}
+        if not {"session_inbox", "session_pending"} <= tables:
+            raise ValueError("missing-activity-schema")
         for table in ("session_inbox", "session_pending", "session_execution_claim", "session_use"):
             if table not in tables:
                 continue
@@ -204,13 +207,31 @@ def checksum(path, deadline=None):
 
 
 def logical_checksum(connection, deadline=None):
-    """Hash the completed consistent snapshot, not main-file mtime or layout."""
+    """Hash typed rows losslessly, including NUL text, BLOBs and row identity."""
     digest = hashlib.sha256()
-    for statement in connection.iterdump():
-        if deadline is not None and time.monotonic() >= deadline:
-            raise TimeoutError("logical-checksum-deadline")
-        digest.update(statement.encode("utf-8"))
-        digest.update(b"\n")
+    schema = connection.execute(
+        "SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name").fetchall()
+    digest.update(repr(schema).encode("utf-8"))
+    for kind, name, _, _ in schema:
+        if kind != "table":
+            continue
+        quoted = '"' + name.replace('"', '""') + '"'
+        try:
+            rows = connection.execute("SELECT _rowid_,* FROM " + quoted)
+        except sqlite3.OperationalError as error:
+            if "no such column: _rowid_" not in str(error):
+                raise
+            rows = connection.execute("SELECT * FROM " + quoted)  # WITHOUT ROWID
+        hashes = []
+        for row in rows:
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("logical-checksum-deadline")
+            # SQLite returns only None/int/float/str/bytes. Their tuple repr is
+            # typed and lossless; SQL quote()/iterdump() truncates text at NUL.
+            hashes.append(hashlib.sha256(repr(row).encode("utf-8")).digest())
+        digest.update(name.encode("utf-8") + b"\0")
+        for value in sorted(hashes):
+            digest.update(value)
     return digest.hexdigest()
 
 
@@ -231,9 +252,33 @@ def verify_snapshot(directory, deadline=None):
         if deadline is not None:
             connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
         quick_check(connection)
-        if logical_checksum(connection, deadline) != manifest["logical_sha256"]:
-            raise ValueError("logical-checksum-mismatch")
     return manifest
+
+
+def sync_directory(directory):
+    fd = os.open(safe_path(directory, directory=True, private=True),
+                 os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def remove_retired_snapshot(directory):
+    """A durable retirement rename is the receipt for retrying partial removal."""
+    directory = safe_path(directory, directory=True, private=True)
+    if not re.fullmatch(r"\.retired-" + SNAPSHOT_NAME, directory.name):
+        raise ValueError("not-retired-snapshot")
+    children = list(directory.iterdir())
+    if not {child.name for child in children} <= {"database.db", "manifest.json"}:
+        raise ValueError("unexpected-snapshot-files")
+    for child in children:
+        safe_path(child, private=True)
+    for child in children:
+        child.unlink()
+    sync_directory(directory)
+    directory.rmdir()
+    sync_directory(directory.parent)
 
 
 def snapshot(path, state, profile, budget=30):
@@ -247,9 +292,14 @@ def snapshot(path, state, profile, budget=30):
     snapshots = private_directory(state / SNAPSHOTS)
     directory = private_directory(snapshots / profile)
     existing = []
+    ignored = 0
     # Only directories named by this implementation and with verified receipts.
     for entry in directory.iterdir():
-        if not re.fullmatch(r"[0-9]{20}-[a-f0-9]{32}", entry.name):
+        if re.fullmatch(r"\.retired-" + SNAPSHOT_NAME, entry.name):
+            remove_retired_snapshot(entry)
+            continue
+        if not re.fullmatch(SNAPSHOT_NAME, entry.name):
+            ignored += 1
             continue
         manifest = verify_snapshot(entry, deadline)
         if manifest["profile"] != profile:
@@ -284,31 +334,36 @@ def snapshot(path, state, profile, budget=30):
         if shm.exists():
             shm.unlink()
         digest = checksum(database, deadline)
-        if any(manifest["logical_sha256"] == logical for _, manifest in existing):
-            return {"status": "unchanged"}
-        manifest = {"format": SNAPSHOTS, "profile": profile, "sha256": digest,
-                    "logical_sha256": logical}
-        receipt = temporary / "manifest.json"
-        fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        with os.fdopen(fd, "w") as output:
-            json.dump(manifest, output)
-            output.flush()
-            os.fsync(output.fileno())
-        with database.open("rb") as output:
-            os.fsync(output.fileno())
-        verify_snapshot(temporary, deadline)
-        published = directory / (f"{time.time_ns():020d}-" + uuid.uuid4().hex)
-        temporary.rename(published)
-        # No old snapshot is touched until the new one is complete and published.
-        for entry, _ in sorted(existing, key=lambda item: item[0].name)[:-2]:
-            verify_snapshot(entry, deadline)
-            allowed = {"database.db", "manifest.json"}
-            if {child.name for child in entry.iterdir()} != allowed:
-                raise ValueError("unexpected-snapshot-files")
-            for name in allowed:
-                safe_path(entry / name, private=True).unlink()
-            entry.rmdir()
-        return {"status": "created", "snapshot_bytes": (published / "database.db").stat().st_size}
+        report = {"status": "unchanged", "ignored_artifacts": ignored}
+        if not any(manifest["logical_sha256"] == logical for _, manifest in existing):
+            manifest = {"format": SNAPSHOTS, "profile": profile, "sha256": digest,
+                        "logical_sha256": logical}
+            receipt = temporary / "manifest.json"
+            fd = os.open(receipt, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "w") as output:
+                json.dump(manifest, output)
+                output.flush()
+                os.fsync(output.fileno())
+            with database.open("rb") as output:
+                os.fsync(output.fileno())
+            sync_directory(temporary)
+            published = directory / (f"{time.time_ns():020d}-" + uuid.uuid4().hex)
+            temporary.rename(published)
+            existing.append((published, manifest))
+            report.update(status="created", snapshot_bytes=(published / "database.db").stat().st_size)
+        sync_directory(directory)
+        # Reuse this locked run's verification, including on an unchanged retry.
+        # Retire atomically before unlinking, so partial removal cannot masquerade
+        # as a damaged published snapshot and block all future backups.
+        for entry, _ in sorted(existing, key=lambda item: item[0].name)[:-3]:
+            if time.monotonic() >= deadline:
+                raise TimeoutError("snapshot-retention-deadline")
+            safe_path(entry, directory=True, private=True)
+            retired = entry.with_name(".retired-" + entry.name)
+            entry.rename(retired)
+            sync_directory(directory)
+            remove_retired_snapshot(retired)
+        return report
     finally:
         # Cleanup is restricted to this call's unpublished, exclusive artifacts.
         if temporary.exists():

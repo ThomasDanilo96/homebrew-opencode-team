@@ -142,6 +142,11 @@ class MaintenanceTests(unittest.TestCase):
         db.execute("UPDATE session_v2 SET fork_session_id='session-1' WHERE id='session-2'")
         db.commit()
         self.assertEqual(maintenance.session_report(self.db)["protected"], 2)
+        db.execute("ALTER TABLE session_inbox RENAME TO missing_inbox")
+        db.commit()
+        with self.assertRaises(ValueError):
+            maintenance.session_report(self.db)
+        db.execute("ALTER TABLE missing_inbox RENAME TO session_inbox")
         db.execute("ALTER TABLE session_pending RENAME COLUMN session_id TO unknown")
         db.commit()
         with self.assertRaises(ValueError):
@@ -214,6 +219,8 @@ class MaintenanceTests(unittest.TestCase):
 
     def test_snapshot_dedup_preserves_text_after_nul(self):
         db = self.fixture()
+        db.execute("CREATE TABLE payload (id TEXT PRIMARY KEY, value BLOB) WITHOUT ROWID")
+        db.execute("INSERT INTO payload VALUES ('fixture', ?)", (b"a\0blob",))
         db.execute("INSERT INTO history VALUES (?)", ("a\0old",))
         db.commit()
         maintenance.snapshot(self.db, self.state, "best")
@@ -223,6 +230,7 @@ class MaintenanceTests(unittest.TestCase):
         latest = sorted((self.state / maintenance.SNAPSHOTS / "best").iterdir())[-1]
         with contextlib.closing(sqlite3.connect(latest / "database.db")) as restored:
             self.assertIn(("a\0new",), list(restored.execute("SELECT value FROM history")))
+            self.assertEqual(restored.execute("SELECT value FROM payload").fetchone(), (b"a\0blob",))
         db.close()
 
     def test_interrupted_prune_retries_without_blocking_future_backups(self):
@@ -305,6 +313,77 @@ class MaintenanceTests(unittest.TestCase):
         self.assertTrue(old <= set(directory.iterdir()))
         for entry in old:
             maintenance.verify_snapshot(entry)
+        db.close()
+
+    def test_retirement_retry_syncs_parent_before_any_unlink(self):
+        db = self.fixture()
+        for i in range(3):
+            db.execute("INSERT INTO history VALUES (?)", (str(i),))
+            db.commit()
+            maintenance.snapshot(self.db, self.state, "best")
+        directory = self.state / maintenance.SNAPSHOTS / "best"
+        db.execute("INSERT INTO history VALUES ('fourth')")
+        db.commit()
+        original = maintenance.sync_directory
+        parent_syncs = []
+
+        def sync(path):
+            if path == directory:
+                parent_syncs.append(path)
+                if len(parent_syncs) == 2:
+                    raise OSError("fixture-retirement-parent-sync")
+            original(path)
+
+        with mock.patch.object(maintenance, "sync_directory", side_effect=sync):
+            with self.assertRaises(OSError):
+                maintenance.snapshot(self.db, self.state, "best")
+        retired = next(directory.glob(".retired-*"))
+        expected = {p.name: p.read_bytes() for p in retired.iterdir()}
+
+        def fail_parent(path):
+            if path == directory:
+                raise OSError("fixture-retry-parent-sync")
+            original(path)
+
+        with mock.patch.object(maintenance, "sync_directory", side_effect=fail_parent):
+            with self.assertRaises(OSError):
+                maintenance.snapshot(self.db, self.state, "best")
+        self.assertTrue(retired.exists())
+        self.assertEqual({p.name: p.read_bytes() for p in retired.iterdir()}, expected)
+        maintenance.snapshot(self.db, self.state, "best")
+        self.assertFalse(retired.exists())
+        db.close()
+
+    def test_dedup_never_prunes_the_only_snapshot_matching_current_data(self):
+        db = self.fixture()
+        for value in ("A", "B", "C"):
+            db.execute("INSERT INTO history VALUES (?)", (value,))
+            db.commit()
+            maintenance.snapshot(self.db, self.state, "best")
+        directory = self.state / maintenance.SNAPSHOTS / "best"
+        db.execute("INSERT INTO history VALUES ('D')")
+        db.commit()
+        original_rename, clock = Path.rename, time.monotonic
+        published = []
+
+        def rename(source, target):
+            result = original_rename(source, target)
+            if source.name.startswith(".pending-"):
+                published.append(target)
+            return result
+
+        with mock.patch.object(Path, "rename", rename), \
+                mock.patch.object(maintenance.time, "monotonic", side_effect=lambda: clock() + (100 if published else 0)):
+            with self.assertRaises(TimeoutError):
+                maintenance.snapshot(self.db, self.state, "best")
+        db.execute("DELETE FROM history WHERE value IN ('B','C','D')")  # fixture reverts to A
+        db.commit()
+        expected = self.rows(db)
+        self.assertEqual(maintenance.snapshot(self.db, self.state, "best")["status"], "created")
+        latest = sorted(directory.iterdir())[-1]
+        with contextlib.closing(sqlite3.connect(latest / "database.db")) as restored:
+            self.assertEqual(self.rows(restored), expected)
+        self.assertEqual(len(list(directory.iterdir())), 3)
         db.close()
 
     def test_source_authorizer_observes_no_row_mutations(self):
