@@ -88,18 +88,22 @@ function nativeBinary() {
     const directory = path.join(roots.data, p, bin);
     return fs.existsSync(directory) ? fs.realpathSync(directory) : directory;
   }));
-  const binary = override || (process.env.PATH || '').split(path.delimiter).map((directory) => {
-    const candidate = path.resolve(directory, 'opencode');
-    try {
-      if (privateBins.includes(fs.realpathSync(path.dirname(candidate)))) return;
-      const resolved = fs.realpathSync(candidate);
-      if (privateBins.some((bin) => resolved.startsWith(`${bin}${path.sep}`)) || !fs.statSync(resolved).isFile()) return;
-      fs.accessSync(resolved, fs.constants.X_OK);
-      return resolved;
-    } catch (error) {
-      if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error;
+  let binary = override;
+  if (!binary) {
+    for (const directory of (process.env.PATH || '').split(path.delimiter)) {
+      const candidate = path.resolve(directory, 'opencode');
+      try {
+        if (privateBins.includes(fs.realpathSync(path.dirname(candidate)))) continue;
+        const resolved = fs.realpathSync(candidate);
+        if (privateBins.some((bin) => resolved.startsWith(`${bin}${path.sep}`)) || !fs.statSync(resolved).isFile()) continue;
+        fs.accessSync(resolved, fs.constants.X_OK);
+        binary = resolved;
+        break;
+      } catch (error) {
+        if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error;
+      }
     }
-  }).find(Boolean);
+  }
   if (!binary) fail('OpenCode V2 executable not found on caller PATH outside profile-owned bins; install official OpenCode or set OPENCODE_TEAM_OPENCODE_BIN');
   const version = command(binary, ['--version'], { env: profileEnvironment('best') });
   if (!/^(?:opencode\s+)?v?2\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version)) fail(`OpenCode V2 required; found ${version}. Install V2 yourself; no automatic replacement.`);
