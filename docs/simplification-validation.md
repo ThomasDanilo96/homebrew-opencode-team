@@ -206,3 +206,50 @@ credential, real profile configuration or session was changed. No release or
 remote CI success is claimed. Temporary reproducibility drivers also include
 `team-launchd-acceptance.py` and `team-homebrew-acceptance.py` under the approved
 OpenCode temporary directory; they are not new product infrastructure.
+
+## Coordinated rollout — 2026-10-26
+
+The user subsequently authorized the live rollout and confirmed normal closure
+of visible BEST chats. Fresh `ps` inspection found historical PIDs 48734, 48739
+and 48768 absent; exact `lsof` checks found no BEST database/WAL/SHM holders.
+No signal was necessary. The standard official service and separate source
+runtime were left untouched. The two pre-existing untracked evaluation documents
+remain outside the release.
+
+Fresh candidate acceptance passed real official PTY Home/response, transcript
+resume, `run` and Mini for both BEST and FREE, all interactive exits normal.
+The deterministic local model used disposable profiles, not real credentials.
+Separate default-discovery acceptance completed two native children (General and
+Explore) and parent continuation for each profile, despite the private fork
+sentinel. These checks certify actual runtime behavior, not subscription access.
+`doctor` and both profile `--version` commands resolve official v2.1.4.
+
+The private full backup, full restore rehearsal, live transition, independent
+review and remote release gates must be recorded below only after completion.
+Version 0.3.5 is reserved locally; no publication is implied by this preparation.
+
+The independent backup/harness review requested one acceptance fix: assert the
+PTY child's decoded exit code, rather than merely printing its wait status.
+The private harness now rejects nonzero exits and has no SIGKILL fallback;
+timeouts send SIGTERM and fail the gate. No product code changed for this.
+An initial concurrent setup-smoke run failed the mock SIGINT test's two-second
+child-start wait while backup and multiple suites ran. This failure is retained
+as evidence; publication remains blocked pending isolated reproduction and a
+successful complete rerun, without weakening the test.
+
+The isolated unchanged SIGINT regression subsequently passed (exit 0). The first
+full coverage run passed 43 tests, skipped two opt-ins, and failed packaging when
+preparing VERSION 0.3.5: its immutable-publication baseline still pinned 0.3.3,
+although the actual stable archive was already 0.3.4. Updated only that baseline
+version/checksum to the published 0.3.4 pair, independently re-downloaded and
+SHA-256 verified (`47bdbeeca4451af507613ff90bbcfd23c8b0066bc758b811d85dc03cc53c3bab`).
+All three packaging tests then passed. The stable formula and existing tags were
+not changed. A fresh full suite is still required before publication.
+
+The subsequent full coverage rerun passed: 44 passed, two opt-in skips, zero
+failures; launcher line/branch/function coverage remains 98.90/82.82/98.11%.
+The native permission opt-in separately passed against official 2.1.4 (one test,
+no skips). The complete setup-smoke rerun also passed (33 passed, one opt-in skip).
+Workflow scenarios, actionlint, JS/Bash/Zsh/Ruby syntax and safe cleanup dry-run
+passed. Dry-run reclaimed no bytes and did not execute cleanup. Gitleaks is still
+unavailable locally; no local Gitleaks PASS is claimed.
