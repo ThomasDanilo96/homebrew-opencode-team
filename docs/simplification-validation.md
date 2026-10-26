@@ -316,3 +316,43 @@ installed-package verification.
   staging archive. [PR #11](https://github.com/ThomasDanilo96/homebrew-opencode-team/pull/11)
   carries source plus formula metadata; stable clean-install, publication and
   installed-package acceptance remain pending until recorded as completed.
+
+### Completed delivery
+
+- PR #11 merged as `e270a501afb57682b15246838c759250acdc3469`.
+  Stable clean-install [40313574245](https://github.com/ThomasDanilo96/homebrew-opencode-team/actions/runs/40313574245)
+  passed, including formula test/audit, installed smoke and Gitleaks.
+  Official publication dispatch [40314099143](https://github.com/ThomasDanilo96/homebrew-opencode-team/actions/runs/40314099143)
+  passed after rechecking immutable-tag Phase B and stable CI evidence.
+  [Release v0.3.5](https://github.com/ThomasDanilo96/homebrew-opencode-team/releases/tag/v0.3.5)
+  is public, non-draft and non-prerelease.
+- The clean local tap fast-forwarded to the reviewed metadata. Upgrade dry-run
+  requested only Team 0.3.4 → 0.3.5; the real upgrade and sandboxed `brew test
+  --force` both passed. No dependency upgrade or automatic cleanup occurred.
+  Team 0.3.3/0.3.4 kegs and retention binaries remain available for rollback.
+  Unrelated existing ngrok deprecation and untrusted `local/recovery` tap warnings
+  were reported, not suppressed or repaired by changing unrelated configuration.
+- Installed `opencode-team version` reports **0.3.5**. `doctor` resolves official
+  **OpenCode 2.1.4**, managed Serena 1.7.0 and the unchanged ECC pin. The installed
+  launcher passed actual BEST/FREE `/api/info` probes with exit zero and no
+  executable override. All table rows/schema again matched the private backup,
+  including all **641 BEST V2 sessions**, 155 BEST legacy sessions, six FREE V2
+  sessions, two FREE legacy sessions, credentials and durable recovery records.
+- Repeated installed-package default-discovery PTY tests passed Home/response,
+  transcript resume, `run` and Mini for both profiles; all interactive exits were
+  zero. Installed native delegation tests passed two actual children and parent
+  continuation for each profile, including a failing private-fork PATH sentinel.
+  Prompt tests remained deterministic local fixtures: no subscription-entitlement
+  claim or historical-session prompt/resume is implied.
+- Installed safe-only macOS job `io.opencode-team.safe-caches` is loaded at 04:15,
+  points to the stable Homebrew opt path and has **zero runs**. Installed cleanup
+  dry-run passed with zero reclaimed bytes. The old BEST retention label remains
+  persistently disabled/unloaded; original scripts/plist and profile configuration
+  are preserved. No live cleanup apply, source-claim clearing, credential migration,
+  SIGKILL or unrelated service intervention occurred.
+
+No rollout blocker remains. The 16 suspended claims and four recovery records
+remain deliberately unchanged; this rollout did not execute their historical
+work. The two original untracked evaluation documents remain untouched.
+The independent final closeout review approved delivery with no blocking findings,
+again distinguishing inspected source/documentation from supplied execution results.
