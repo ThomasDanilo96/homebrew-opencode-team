@@ -63,6 +63,14 @@ test('native discovery ignores profile-local OpenCode while BEST keeps private t
     if (profile === 'best') assert.ok(capture.env.PATH.startsWith(`${privateBin}:`));
   }
   assert.match(fs.readFileSync(fork, 'utf8'), /profile-local fork/);
+  // A profile bin may contain a symlink to a fork outside the profile tree.
+  const externalFork = path.join(f.dir, 'retention-fork');
+  fs.renameSync(fork, externalFork);
+  fs.symlinkSync(externalFork, fork);
+  const alias = path.join(f.dir, 'private-bin-alias');
+  fs.symlinkSync(privateBin, alias);
+  f.env.PATH = `${alias}:${f.env.PATH}`;
+  ok(f.run('best', 'run', 'official through alias'));
 });
 
 function mockCleanup(f) {
@@ -74,7 +82,7 @@ import os from 'node:os';
 import cp from 'node:child_process';
 import {syncBuiltinESMExports} from 'node:module';
 Object.defineProperty(process, 'platform', {value:'darwin'});
-os.userInfo = () => ({homedir:process.env.HOME});
+if (!process.env.MOCK_REAL_HOME) os.userInfo = () => ({homedir:process.env.HOME});
 const original = cp.spawnSync;
 cp.spawnSync = (bin, args, opts) => {
   if (bin !== '/bin/launchctl') return original(bin, args, opts);
@@ -162,6 +170,21 @@ test('cleanup refuses foreign or edited agents and propagates launchctl failures
   assert.notEqual(f.run('cleanup', 'uninstall').status, 0);
   assert.match(fs.readFileSync(plist, 'utf8'), /user edit/);
   assert.equal(calls().length, before);
+});
+
+test('cleanup status and non-macOS commands are read-only; fake HOME cannot address the real GUI domain', (t) => {
+  const f = fixture(t);
+  const calls = mockCleanup(f);
+  ok(f.run('cleanup', 'status'));
+  assert.equal(fs.existsSync(f.team), false);
+  f.env.MOCK_REAL_HOME = '1';
+  assert.notEqual(f.run('cleanup', 'enable').status, 0);
+  assert.deepEqual(calls(), []);
+  const hook = path.join(f.dir, 'not-macos.mjs');
+  fs.writeFileSync(hook, "Object.defineProperty(process, 'platform', {value:'linux'});");
+  f.env.NODE_OPTIONS = `--import=${hook}`;
+  ok(f.run('cleanup', 'enable'));
+  assert.equal(fs.existsSync(path.join(f.home, 'Library/LaunchAgents')), false);
 });
 
 test('generated BEST permissions allow authorized work while FREE and read-only boundaries remain intact', (t) => {
