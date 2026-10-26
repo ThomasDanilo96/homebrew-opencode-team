@@ -125,6 +125,7 @@ test('macOS setup schedules only an owned safe job, with persistent disable and 
   ok(f.run('setup'));
   assert.equal(calls().filter((c) => c[0] === 'bootstrap').length, 1);
   ok(f.run('cleanup', 'disable'));
+  assert.equal(fs.existsSync(plist), false, 'disabled jobs must not be rediscovered at the next login');
   ok(f.run('setup'));
   assert.match(f.run('cleanup', 'status').stdout, /disabled/i);
   assert.equal(calls().filter((c) => c[0] === 'bootstrap').length, 1);

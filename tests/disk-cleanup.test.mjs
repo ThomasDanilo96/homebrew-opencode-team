@@ -104,7 +104,7 @@ else console.log('local cache');
   assert.equal(run().status, 1, 'prune failure must not report success');
 });
 
-test('Playwright native inspection never invokes a download-capable install', (t) => {
+test('unsupported Playwright GC preserves revisions without executing registered package code', (t) => {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'safe-playwright-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const bin = path.join(dir, 'bin');
@@ -132,6 +132,6 @@ for (const target of ${JSON.stringify(targets)}) console.log('  Install location
   });
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /download-capable install disabled/);
-  assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n').map(JSON.parse), [['install', '--dry-run', 'chromium']]);
+  assert.equal(fs.existsSync(log), false, 'a skipped cleanup must not execute a registered package');
   assert.ok(targets.every((target) => fs.existsSync(path.join(target, 'INSTALLATION_COMPLETE'))));
 });
