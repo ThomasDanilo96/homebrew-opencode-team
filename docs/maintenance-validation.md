@@ -268,3 +268,28 @@ reviews and final isolated Homebrew acceptance remain applicable; no executable
 source changed. Staged whitespace validation passed. The two original untracked
 evaluation documents remain excluded. Remote gates and stable installation are
 not implied by these local results and must complete separately.
+
+### Remote archive gates and stable formula promotion
+
+Candidate commit `6fea24f6c153d9098eef8520f5eaff73b7d0252a` was committed with
+the originally denied message after the user's administrative review; no policy
+was edited in this publication continuation. PR #13 tracks the release.
+
+- Phase A workflow-dispatch [40335876323](https://github.com/ThomasDanilo96/homebrew-opencode-team/actions/runs/40335876323)
+  succeeded on that exact SHA, including `prepublication-staging`.
+- Only afterward was immutable `v0.3.6` published on the same commit.
+- Tag-push Phase B [40336878356](https://github.com/ThomasDanilo96/homebrew-opencode-team/actions/runs/40336878356)
+  succeeded on that SHA, including `official-archive-validation`.
+- Independent official archive download matches all 42 tagged files byte-for-byte.
+  Its SHA-256, also confirmed in Phase B, is
+  `3f3fb7be10d4dd116307b264ed315dbe146409ed770072f82dd18e17c1847f0d`.
+  Stable formula URL/checksum promotion uses this official digest, never a local
+  staging archive. The immutable tag still contains its original formula metadata.
+
+The subsequent master-push clean-install, explicit stable publication and real
+local stable upgrade/setup are separate remaining gates; this metadata commit
+does not itself claim those results. A fresh private pre-upgrade native baseline
+records 258 standard, 651 BEST and six FREE session IDs plus auth-list digests.
+No session content or credential values were exported. Standard global config
+and effective standard/BEST/FREE policy digests were also recorded for final
+preservation checks.
