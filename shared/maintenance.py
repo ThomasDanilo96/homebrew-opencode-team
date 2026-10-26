@@ -23,7 +23,7 @@ import uuid
 
 
 PROFILES = ("best", "free")
-SNAPSHOTS = "snapshots-v035"
+SNAPSHOTS = "snapshots-v1"
 AGE_MS = 90 * 86400 * 1000
 
 
@@ -48,7 +48,7 @@ def safe_path(path, directory=False, private=False):
                 raise ValueError("not-owned")
             if private and info.st_mode & 0o077:
                 raise ValueError("not-private")
-            if not directory and info.st_mode & 0o022:
+            if info.st_mode & 0o022:
                 raise ValueError("writable-by-others")
     return path
 
@@ -68,7 +68,9 @@ def private_directory(path):
 
 @contextlib.contextmanager
 def locked(state):
-    state = private_directory(state)
+    state = safe_path(state, directory=True)
+    if not state.exists():
+        state = private_directory(state)
     path = safe_path(state / "maintenance.lock", private=True)
     fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
     try:
@@ -132,7 +134,7 @@ def session_report(path, dry_run=False):
         connection.execute("BEGIN")
         required = ("id", "parent_id", "fork_session_id", "time_created", "time_updated", "time_idle",
                     "time_viewed", "time_archived", "idle_outcome", "time_suspended",
-                    "compacting", "resume_attempts")
+                    "time_compacting", "resume_attempts")
         available = columns(connection, "session_v2")
         if not set(required) <= available:
             raise ValueError("unknown-session-schema")
@@ -157,11 +159,11 @@ def session_report(path, dry_run=False):
             timestamps = [row[name] for name in times]
             if (any(not isinstance(value, (int, float)) or value <= 0 or value >= cutoff
                     for value in timestamps)
-                    or row["idle_outcome"] != "completed"
+                    or row["idle_outcome"] not in ("succeeded", "failed", "interrupted")
                     or row["time_suspended"] is not None
                     or row.get("pinned", 0) != 0
-                    or any(row[name] != 0 for name in
-                           ("compacting", "resume_attempts"))):
+                    or row["time_compacting"] is not None
+                    or row["resume_attempts"] != 0):
                 protected.add(key)
             for dependency in (row["parent_id"], row.get("fork_session_id")):
                 if dependency is not None:
@@ -241,7 +243,7 @@ def snapshot(path, state, profile, budget=30):
         return {"status": "missing"}
     if profile not in PROFILES:
         raise ValueError("unknown-profile")
-    state = private_directory(state)
+    state = safe_path(state, directory=True)
     snapshots = private_directory(state / SNAPSHOTS)
     directory = private_directory(snapshots / profile)
     existing = []
@@ -361,9 +363,11 @@ def reclaim(path, dry_run=False):
                 connection.set_progress_handler(None, 0)
                 if connection.in_transaction:
                     connection.rollback()
-                if str(error) != "interrupted":
+                message = str(error).lower()
+                if not any(value in message for value in ("interrupted", "locked", "busy")):
                     raise
                 result["status"] = "deferred"
+                result["reason"] = "busy" if "locked" in message or "busy" in message else "deadline"
             finally:
                 connection.set_progress_handler(None, 0)
             if time.monotonic() >= deadline:

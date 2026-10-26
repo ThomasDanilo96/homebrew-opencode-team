@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import stat
 import subprocess
 import sys
 import tempfile
@@ -115,6 +116,20 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(maintenance.session_report(missing)["status"], "missing")
         self.assertFalse(missing.exists())
 
+    def test_existing_035_state_directory_is_reused_without_chmod(self):
+        db = self.fixture()
+        self.state.mkdir(parents=True, mode=0o755)
+        self.state.chmod(0o755)
+        with maintenance.locked(self.state):
+            self.assertEqual(maintenance.snapshot(self.db, self.state, "best")["status"], "created")
+        self.assertEqual(self.state.stat().st_mode & 0o777, 0o755)
+        self.assertEqual((self.state / maintenance.SNAPSHOTS).stat().st_mode & 0o777, 0o700)
+        self.state.chmod(0o777)
+        with self.assertRaises(ValueError):
+            with maintenance.locked(self.state):
+                self.fail("writable state accepted")
+        db.close()
+
     def test_native_schema_without_optional_pin_or_claim_table(self):
         db = self.fixture()
         db.execute("ALTER TABLE session_v2 RENAME TO old_session")
@@ -141,7 +156,7 @@ class MaintenanceTests(unittest.TestCase):
         unrelated.write_bytes(b"leave-alone")
         first = maintenance.snapshot(self.db, self.state, "best")
         self.assertEqual(first["status"], "created")
-        snapshots = self.state / "snapshots-v035/best"
+        snapshots = self.state / maintenance.SNAPSHOTS / "best"
         saved = next(snapshots.glob("*/database.db"))
         self.assertEqual(saved.stat().st_mode & 0o777, 0o600)
         manifest = json.loads((saved.parent / "manifest.json").read_text())
@@ -168,7 +183,7 @@ class MaintenanceTests(unittest.TestCase):
         db = self.fixture()
         with self.assertRaises(TimeoutError):
             maintenance.snapshot(self.db, self.state, "best", budget=0)
-        snapshots = self.state / "snapshots-v035/best"
+        snapshots = self.state / maintenance.SNAPSHOTS / "best"
         self.assertEqual(list(snapshots.iterdir()), [])
         maintenance.snapshot(self.db, self.state, "best")
         db.execute("INSERT INTO history VALUES ('second-good-snapshot')")
@@ -195,6 +210,101 @@ class MaintenanceTests(unittest.TestCase):
         self.assertEqual(set(snapshots.iterdir()), before)
         for good in before - {saved.parent}:
             maintenance.verify_snapshot(good)
+        db.close()
+
+    def test_snapshot_dedup_preserves_text_after_nul(self):
+        db = self.fixture()
+        db.execute("INSERT INTO history VALUES (?)", ("a\0old",))
+        db.commit()
+        maintenance.snapshot(self.db, self.state, "best")
+        db.execute("UPDATE history SET value=? WHERE value=?", ("a\0new", "a\0old"))
+        db.commit()
+        self.assertEqual(maintenance.snapshot(self.db, self.state, "best")["status"], "created")
+        latest = sorted((self.state / maintenance.SNAPSHOTS / "best").iterdir())[-1]
+        with contextlib.closing(sqlite3.connect(latest / "database.db")) as restored:
+            self.assertIn(("a\0new",), list(restored.execute("SELECT value FROM history")))
+        db.close()
+
+    def test_interrupted_prune_retries_without_blocking_future_backups(self):
+        db = self.fixture()
+        for i in range(3):
+            db.execute("INSERT INTO history VALUES (?)", (str(i),))
+            db.commit()
+            maintenance.snapshot(self.db, self.state, "best")
+        directory = self.state / maintenance.SNAPSHOTS / "best"
+        db.execute("INSERT INTO history VALUES ('fourth')")
+        db.commit()
+        original = Path.unlink
+        calls = []
+
+        def interrupted(path, *args, **kwargs):
+            if path.parent.parent == directory and not path.parent.name.startswith(".pending-"):
+                calls.append(path)
+                if len(calls) == 2:
+                    raise OSError("fixture-prune-interruption")
+            return original(path, *args, **kwargs)
+
+        with mock.patch.object(Path, "unlink", interrupted):
+            with self.assertRaises(OSError):
+                maintenance.snapshot(self.db, self.state, "best")
+        maintenance.snapshot(self.db, self.state, "best")
+        published = [entry for entry in directory.iterdir() if not entry.name.startswith(".")]
+        self.assertEqual(len(published), 3)
+        self.assertFalse(any(entry.name.startswith(".retired-") for entry in directory.iterdir()))
+        for entry in published:
+            maintenance.verify_snapshot(entry)
+        db.close()
+
+    def test_unchanged_retry_finishes_retention_after_post_publication_timeout(self):
+        db = self.fixture()
+        for i in range(3):
+            db.execute("INSERT INTO history VALUES (?)", (str(i),))
+            db.commit()
+            maintenance.snapshot(self.db, self.state, "best")
+        directory = self.state / maintenance.SNAPSHOTS / "best"
+        db.execute("INSERT INTO history VALUES ('fourth')")
+        db.commit()
+        original_rename, original_clock = Path.rename, time.monotonic
+        published = []
+
+        def rename(source, target):
+            result = original_rename(source, target)
+            if source.name.startswith(".pending-"):
+                published.append(target)
+            return result
+
+        with mock.patch.object(Path, "rename", rename), \
+                mock.patch.object(maintenance.time, "monotonic", side_effect=lambda: original_clock() + (100 if published else 0)):
+            with self.assertRaises(TimeoutError):
+                maintenance.snapshot(self.db, self.state, "best")
+        self.assertEqual(len(list(directory.iterdir())), 4)
+        self.assertEqual(maintenance.snapshot(self.db, self.state, "best")["status"], "unchanged")
+        self.assertEqual(len(list(directory.iterdir())), 3)
+        db.close()
+
+    def test_directory_sync_failure_never_prunes_recovery_copies(self):
+        db = self.fixture()
+        for i in range(3):
+            db.execute("INSERT INTO history VALUES (?)", (str(i),))
+            db.commit()
+            maintenance.snapshot(self.db, self.state, "best")
+        directory = self.state / maintenance.SNAPSHOTS / "best"
+        old = set(directory.iterdir())
+        db.execute("INSERT INTO history VALUES ('fourth')")
+        db.commit()
+        original = os.fsync
+
+        def fsync(fd):
+            if stat.S_ISDIR(os.fstat(fd).st_mode):
+                raise OSError("fixture-directory-sync")
+            original(fd)
+
+        with mock.patch.object(maintenance.os, "fsync", fsync):
+            with self.assertRaises(OSError):
+                maintenance.snapshot(self.db, self.state, "best")
+        self.assertTrue(old <= set(directory.iterdir()))
+        for entry in old:
+            maintenance.verify_snapshot(entry)
         db.close()
 
     def test_source_authorizer_observes_no_row_mutations(self):
@@ -334,7 +444,7 @@ class MaintenanceTests(unittest.TestCase):
         db = self.fixture()
         db.close()
         self.state.mkdir(parents=True, mode=0o700)
-        snapshots = self.state / "snapshots-v035"
+        snapshots = self.state / maintenance.SNAPSHOTS
         snapshots.mkdir(mode=0o755)
         with self.assertRaises(ValueError):
             maintenance.snapshot(self.db, self.state, "best")
@@ -424,7 +534,7 @@ except BlockingIOError:
         self.assertEqual({name: hashlib.sha256(data).hexdigest() for name, data in before.items()},
                          {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
                           for p in self.db.parent.iterdir()})
-        self.assertFalse((self.state / "snapshots-v035").exists())
+        self.assertFalse((self.state / maintenance.SNAPSHOTS).exists())
         self.assertEqual(command.call_count, 1)
         self.assertIn("--dry-run", command.call_args.args[0])
         self.assertIn("would-check", output.getvalue())
