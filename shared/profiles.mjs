@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
+import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
 
 const packageRoot = path.resolve(import.meta.dirname, '..');
@@ -81,7 +82,29 @@ function command(executable, args, options = {}) {
 function nativeBinary() {
   const override = process.env.OPENCODE_TEAM_OPENCODE_BIN;
   if (override && !path.isAbsolute(override)) fail('OPENCODE_TEAM_OPENCODE_BIN must be an absolute executable path');
-  const binary = override || 'opencode';
+  // BEST's private tools remain on the child PATH, but must never select the
+  // native runtime (including a historical retention fork) for either profile.
+  const privateBins = profiles.flatMap((p) => ['bin', 'quality/node_modules/.bin'].map((bin) => {
+    const directory = path.join(roots.data, p, bin);
+    return fs.existsSync(directory) ? fs.realpathSync(directory) : directory;
+  }));
+  let binary = override;
+  if (!binary) {
+    for (const directory of (process.env.PATH || '').split(path.delimiter)) {
+      const candidate = path.resolve(directory, 'opencode');
+      try {
+        if (privateBins.includes(fs.realpathSync(path.dirname(candidate)))) continue;
+        const resolved = fs.realpathSync(candidate);
+        if (privateBins.some((bin) => resolved.startsWith(`${bin}${path.sep}`)) || !fs.statSync(resolved).isFile()) continue;
+        fs.accessSync(resolved, fs.constants.X_OK);
+        binary = resolved;
+        break;
+      } catch (error) {
+        if (!['ENOENT', 'ENOTDIR', 'EACCES'].includes(error.code)) throw error;
+      }
+    }
+  }
+  if (!binary) fail('OpenCode V2 executable not found on caller PATH outside profile-owned bins; install official OpenCode or set OPENCODE_TEAM_OPENCODE_BIN');
   const version = command(binary, ['--version'], { env: profileEnvironment('best') });
   if (!/^(?:opencode\s+)?v?2\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(version)) fail(`OpenCode V2 required; found ${version}. Install V2 yourself; no automatic replacement.`);
   return { binary, version };
@@ -269,6 +292,85 @@ function locked(action) {
   try { fs.writeFileSync(fd, String(process.pid)); recover(); action(); }
   finally { fs.closeSync(fd); fs.unlinkSync(lock); }
 }
+function cleanup(action, automatic = false) {
+  if (!['enable', 'disable', 'uninstall', 'status', 'dry-run'].includes(action)) fail('Expected cleanup enable, disable, uninstall, status or dry-run');
+  if (process.platform !== 'darwin') { console.log('Cleanup skipped: macOS only.'); return; }
+  if (action === 'dry-run') {
+    console.log(command('/bin/zsh', [path.join(packageRoot, 'shared/disk-cleanup.sh'), '--safe-caches-only', '--dry-run']));
+    return;
+  }
+  // launchctl targets the login user, not $HOME. Isolated setup fixtures must
+  // never register jobs in that user's real GUI domain.
+  if (path.resolve(home) !== path.resolve(os.userInfo().homedir) || (automatic && teamHome)) {
+    if (automatic || action === 'status') { console.log('Cleanup not installed: custom HOME/root; scheduling skipped.'); return; }
+    fail('Cleanup scheduling requires the login user HOME; custom OPENCODE_TEAM_HOME needs explicit cleanup enable');
+  }
+  const label = 'io.opencode-team.safe-caches';
+  const plist = path.join(home, 'Library/LaunchAgents', `${label}.plist`);
+  const marker = path.join(roots.state, 'cleanup.json');
+  const uid = process.getuid();
+  for (const file of [plist, marker]) {
+    safe(file);
+    if (fs.existsSync(file) && fs.statSync(file).uid !== uid) fail(`Refusing cleanup file not owned by this user: ${file}`);
+  }
+  const state = fs.existsSync(marker) ? JSON.parse(fs.readFileSync(marker, 'utf8')) : null;
+  if (fs.existsSync(marker) && (!state || typeof state.enabled !== 'boolean' || (state.plist !== null && typeof state.plist !== 'string'))) fail('Invalid cleanup ownership marker');
+  if (fs.existsSync(plist) && (!state?.plist || fs.readFileSync(plist, 'utf8') !== state.plist)) fail(`Refusing unowned or modified cleanup agent: ${plist}`);
+  if (automatic && state?.enabled === false) { console.log('Cleanup disabled; preserving your preference.'); return; }
+  if (action === 'status' && !state) {
+    console.log('Cleanup not installed.');
+    return;
+  }
+  const target = `gui/${uid}/${label}`;
+  const result = spawnSync('/bin/launchctl', ['print', target], { encoding: 'utf8', timeout: 15000 });
+  if (result.error || (result.status !== 0 && !(result.status === 113 && /Could not find service/.test(result.stderr)))) fail(`launchctl print failed: ${result.error?.message || result.stderr || result.status}`);
+  const loaded = result.status === 0;
+  if (loaded && (!state?.plist || !fs.existsSync(plist) || !result.stdout.split('\n').some((line) => line.trim() === `path = ${plist}`))) fail('Refusing cleanup label already loaded without exact owned agent');
+  if (action === 'status') {
+    console.log(`Cleanup ${state.enabled ? 'enabled' : 'disabled'} (preference); agent ${loaded ? 'loaded' : 'not loaded'}.`);
+    return;
+  }
+  if (action === 'disable' || action === 'uninstall') {
+    // Persist the user's choice even if bootout fails; report that failure and
+    // retain the owned plist so the operation can safely be retried.
+    atomicWrite(marker, json({ enabled: false, plist: state?.plist || null }));
+    if (loaded) command('/bin/launchctl', ['bootout', target], { timeout: 15000 });
+    // An unloaded plist in LaunchAgents is automatically loaded at next login.
+    if (fs.existsSync(plist)) fs.unlinkSync(plist);
+    if (action === 'uninstall') {
+      atomicWrite(marker, json({ enabled: false, plist: null }));
+    }
+    console.log(`Cleanup ${action === 'disable' ? 'disabled' : 'uninstalled'}; profile data and legacy jobs untouched.`);
+    return;
+  }
+  const xml = (value) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;');
+  // argv retains the launcher's stable Homebrew opt path; import.meta resolves the versioned Cellar path.
+  const bytes = `<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>Label</key><string>${label}</string>
+<key>ProgramArguments</key><array><string>/bin/zsh</string><string>${xml(path.resolve(path.dirname(process.argv[1]), 'disk-cleanup.sh'))}</string><string>--safe-caches-only</string></array>
+<key>EnvironmentVariables</key><dict><key>HOME</key><string>${xml(home)}</string><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
+<key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>15</integer></dict>
+<key>ProcessType</key><string>Background</string>
+</dict></plist>
+`;
+  const changed = state?.plist !== bytes;
+  if (loaded && changed) command('/bin/launchctl', ['bootout', target], { timeout: 15000 });
+  if (changed || !fs.existsSync(plist)) {
+    // The exact previous plist is the ownership receipt, not just a filename.
+    const previous = fs.existsSync(plist) ? fs.readFileSync(plist) : null;
+    atomicWrite(plist, bytes);
+    try { atomicWrite(marker, json({ enabled: true, plist: bytes })); }
+    catch (error) {
+      if (previous) atomicWrite(plist, previous);
+      else fs.unlinkSync(plist);
+      throw error;
+    }
+  } else if (!state.enabled) atomicWrite(marker, json({ enabled: true, plist: bytes }));
+  if (!loaded || changed) command('/bin/launchctl', ['bootstrap', `gui/${uid}`, plist], { timeout: 15000 });
+  console.log('Cleanup enabled: daily safe caches at 04:15; no cleanup run during setup.');
+}
 function setup() {
   nativeBinary();
   preflight();
@@ -282,6 +384,7 @@ function setup() {
     for (const p of profiles) for (const directory of [path.join(roots.config, p, 'v2/xdg-config/opencode'),
       path.join(roots.data, p, 'data/opencode'), path.join(roots.state, p, 'serena'), path.join(roots.cache, p)]) mkdir(directory);
     transaction(updates);
+    cleanup('enable', true);
   });
   console.log('BEST and FREE configured for native OpenCode V2. No auth imported; connect Go and OpenAI independently inside BEST with /connect.');
   console.log('Existing sessions keep their selected model; use /models or start a new session to adopt the configured coordinator.');
@@ -331,7 +434,7 @@ function launch(profile, args) {
   });
 }
 function help() {
-  console.log(`OpenCode Team: native V2 profiles\n\n  opencode-team best|free [native OpenCode arguments]\n  opencode-team start best|free [native OpenCode arguments]\n  opencode-team setup\n  opencode-team doctor\n  opencode-team config best|free\n  opencode-team rollback BACKUP_ID\n  opencode-team version\n\nBEST: OpenAI coordinator + Go workers; connect both subscriptions with /connect.\nFREE: anonymous MiMo only; no paid fallback.\nResume natively: opencode-team best -s SESSION_ID\nNative CLI arguments are preserved, with --standalone added in command scope.\nSee README for migration, backup and security boundaries.`);
+  console.log(`OpenCode Team: native V2 profiles\n\n  opencode-team best|free [native OpenCode arguments]\n  opencode-team start best|free [native OpenCode arguments]\n  opencode-team setup\n  opencode-team doctor\n  opencode-team config best|free\n  opencode-team rollback BACKUP_ID\n  opencode-team cleanup enable|disable|uninstall|status|dry-run\n  opencode-team version\n\nBEST: OpenAI coordinator + Go workers; connect both subscriptions with /connect.\nFREE: anonymous MiMo only; no paid fallback.\nmacOS setup schedules safe caches daily; disable/uninstall persist across setup.\nCustom HOME/root skips automatic scheduling; explicit enable requires the login HOME.\nResume natively: opencode-team best -s SESSION_ID\nNative CLI arguments are preserved, with --standalone added in command scope.\nSee README for migration, backup and security boundaries.`);
 }
 try {
   const [action = 'help', ...args] = process.argv.slice(2);
@@ -341,6 +444,10 @@ try {
   else if (action === 'version' || action === '--version') console.log(`OpenCode Team ${fs.readFileSync(path.join(packageRoot, 'VERSION'), 'utf8').trim()}`);
   else if (action === 'setup' && !args.length) setup();
   else if (action === 'doctor' && !args.length) doctor();
+  else if (action === 'cleanup' && args.length === 1) {
+    if (process.platform !== 'darwin' || ['status', 'dry-run'].includes(args[0])) cleanup(args[0]);
+    else locked(() => cleanup(args[0]));
+  }
   else if (action === 'config' && args.length === 1) { validateProfile(args[0]); console.log(configFile(args[0])); }
   else if (action === 'rollback' && args.length === 1) { preflight(); locked(() => transaction(readManifest(args[0]))); }
   else fail(`Unknown command or arguments: ${action}. Use --help; only best/free profiles are supported.`);

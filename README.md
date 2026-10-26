@@ -2,16 +2,18 @@
 
 Two isolated profiles on **standard OpenCode V2**, with one launcher and config
 generator (`shared/profiles.mjs`). Native V2 owns agents, tools, permissions,
-skills, MCP and sessions. No custom server, router, daemon, OmO, Codex bridge,
-mandatory fanout or background maintenance is installed.
+skills, MCP and sessions. No custom runtime, server, router, daemon, OmO, Codex
+bridge or mandatory fanout is installed. macOS setup also schedules the limited
+cache-cleanup script described below; it never deletes sessions.
 
 | Profile | Default | Connection |
 | --- | --- | --- |
 | `best` | OpenAI Sol coordinator + Go workers | Connect OpenAI and Go independently inside BEST |
 | `free` | `team-free/mimo-v2.6-flash-free` | Anonymous; no paid credentials |
 
-**Version 0.3.3.** The stable formula selects the official, checksum-verified
-`v0.3.3` archive. Tags are immutable; formula metadata follows on `master`.
+The stable formula selects a checksum-verified release archive; `opencode-team
+version` prints the installed version. Tags are immutable; formula metadata
+follows on `master`.
 See [Hybrid validation](docs/best-hybrid-validation.md) for comparison and release evidence.
 
 ## Setup
@@ -19,6 +21,15 @@ See [Hybrid validation](docs/best-hybrid-validation.md) for comparison and relea
 Install OpenCode **V2** yourself; V1 and unknown major versions are rejected.
 Setup never installs/replaces OpenCode or changes its shared service settings.
 Requirements: Node.js 22.16+ (Homebrew uses `node@22`), Git and uv.
+
+The retention fork is not required. Historical compatibility and the safe
+transition constraint are documented in
+[the simplification evidence](docs/simplification-validation.md). **Disable old
+automatic session-retention jobs before using official OpenCode with a database
+previously maintained by the fork.** Keep existing binaries, backups and the extra
+ownership table for recovery; do not delete or rewrite historical sessions.
+Finish pending work and close the old profile hosts normally before the first
+official launch; do not run both runtimes against the same active profile.
 
 ```sh
 opencode-team setup
@@ -34,6 +45,33 @@ root. ECC comes from `https://github.com/affaan-m/ECC.git`, pinned by
 and `LICENSE` are checked out: no ECC agents, hooks, plugins or orchestrator.
 `doctor` checks local versions/dependencies/config, not auth, model requests or
 MCP connectivity.
+
+### Automatic macOS cache cleanup
+
+On macOS, normal `setup` registers one native LaunchAgent at **04:15 daily**.
+Setup never runs cleanup immediately. The packaged script retains only the
+original script's limited cache policy: inactive Chrome cache, local Docker
+Desktop build cache older than seven days, and unopened Serena `.log` files older
+than 30 days. Uncertain process/path checks skip deletion. Session data,
+credentials, configuration, persistent browser profiles, Docker images/containers/
+volumes and Spotlight settings are not targets.
+
+```sh
+opencode-team cleanup status
+opencode-team cleanup dry-run
+opencode-team cleanup disable
+opencode-team cleanup enable
+opencode-team cleanup uninstall  # run before uninstalling the package
+```
+
+Disable/uninstall persists across setup and login. Only the exact owned agent is
+removed; legacy user scripts/jobs are never overwritten. Playwright revisions are
+preserved: its download-capable installation command is not used for unattended
+GC. No additional daemon, runtime wrapper or dependency is installed.
+
+Custom `HOME` or `OPENCODE_TEAM_HOME` setups skip automatic scheduling. Explicit
+`cleanup enable` requires the actual login HOME; a custom Team root stores only
+the ownership/preference receipt, not a different macOS user's schedule.
 
 ### BEST code quality and browser checks
 

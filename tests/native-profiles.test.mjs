@@ -47,6 +47,209 @@ esac
 }
 const ok = (result) => assert.equal(result.status, 0, result.stderr + result.stdout);
 
+test('native discovery ignores profile-local OpenCode while BEST keeps private tools on PATH', (t) => {
+  const f = fixture(t);
+  const privateBin = path.join(f.team, 'data/best/bin');
+  fs.mkdirSync(privateBin, { recursive: true });
+  const fork = path.join(privateBin, 'opencode');
+  fs.writeFileSync(fork, '#!/bin/sh\necho "profile-local fork must not run" >&2\nexit 95\n', { mode: 0o755 });
+  delete f.env.OPENCODE_TEAM_OPENCODE_BIN;
+  f.env.PATH = `${privateBin}:${f.dir}:${f.env.PATH}`;
+  ok(f.run('setup'));
+  for (const profile of ['best', 'free']) {
+    ok(f.run(profile, 'run', 'official native'));
+    const capture = JSON.parse(fs.readFileSync(f.env.MOCK_CAPTURE));
+    assert.equal(capture.args[1], 'official native');
+    if (profile === 'best') assert.ok(capture.env.PATH.startsWith(`${privateBin}:`));
+  }
+  assert.match(fs.readFileSync(fork, 'utf8'), /profile-local fork/);
+  // A profile bin may contain a symlink to a fork outside the profile tree.
+  const externalFork = path.join(f.dir, 'retention-fork');
+  fs.renameSync(fork, externalFork);
+  fs.symlinkSync(externalFork, fork);
+  const alias = path.join(f.dir, 'private-bin-alias');
+  fs.symlinkSync(privateBin, alias);
+  f.env.PATH = `${alias}:${f.env.PATH}`;
+  ok(f.run('best', 'run', 'official through alias'));
+  const denied = path.join(f.dir, 'denied-path');
+  const hook = path.join(f.dir, 'deny-unused-path.mjs');
+  fs.writeFileSync(hook, `import fs from 'node:fs';
+const original = fs.realpathSync;
+fs.realpathSync = function(file, ...args) {
+  if (file === ${JSON.stringify(denied)}) throw Object.assign(new Error('unused PATH access denied'), {code:'EPERM'});
+  return original.call(this, file, ...args);
+};
+`);
+  f.env.NODE_OPTIONS = `--import=${hook}`;
+  f.env.PATH += `${path.delimiter}${denied}`;
+  ok(f.run('best', 'run', 'do not inspect unused PATH entries'));
+});
+
+function mockCleanup(f) {
+  const hook = path.join(f.dir, 'launchctl-mock.mjs');
+  f.env.MOCK_LAUNCHCTL_LOG = path.join(f.dir, 'launchctl.log');
+  f.env.MOCK_LAUNCHCTL_STATE = path.join(f.dir, 'launchctl-state');
+  fs.writeFileSync(hook, `import fs from 'node:fs';
+import os from 'node:os';
+import cp from 'node:child_process';
+import {syncBuiltinESMExports} from 'node:module';
+Object.defineProperty(process, 'platform', {value:'darwin'});
+if (!process.env.MOCK_REAL_HOME) os.userInfo = () => ({homedir:process.env.HOME});
+const original = cp.spawnSync;
+const rename = fs.renameSync;
+fs.renameSync = (source, target) => {
+  if (process.env.MOCK_MARKER_FAIL && target.endsWith('/cleanup.json')) throw new Error('injected cleanup receipt failure');
+  return rename(source, target);
+};
+cp.spawnSync = (bin, args, opts) => {
+  if (bin !== '/bin/launchctl') return original(bin, args, opts);
+  fs.appendFileSync(process.env.MOCK_LAUNCHCTL_LOG, JSON.stringify(args)+'\\n');
+  const state = process.env.MOCK_LAUNCHCTL_STATE;
+  if (process.env.MOCK_LAUNCHCTL_FAIL === args[0]) return {status:5,stderr:'injected launchctl failure',stdout:''};
+  if (args[0] === 'print') return fs.existsSync(state)
+    ? {status:0,stderr:'',stdout:'path = '+fs.readFileSync(state,'utf8')+'\\n'}
+    : {status:113,stderr:'Could not find service',stdout:''};
+  if (args[0] === 'bootstrap') fs.writeFileSync(state,args[2]);
+  if (args[0] === 'bootout') fs.unlinkSync(state);
+  return {status:0,stderr:'',stdout:''};
+};
+syncBuiltinESMExports();`);
+  f.env.NODE_OPTIONS = `--import=${hook}`;
+  return () => fs.existsSync(f.env.MOCK_LAUNCHCTL_LOG)
+    ? fs.readFileSync(f.env.MOCK_LAUNCHCTL_LOG, 'utf8').trim().split('\n').map(JSON.parse) : [];
+}
+
+test('macOS setup schedules only an owned safe job, with persistent disable and scoped uninstall (mock launchctl)', (t) => {
+  const f = fixture(t);
+  const calls = mockCleanup(f);
+  delete f.env.OPENCODE_TEAM_HOME;
+  const plist = path.join(f.home, 'Library/LaunchAgents/io.opencode-team.safe-caches.plist');
+  const old = path.join(f.home, 'Library/LaunchAgents/local.disk-cleanup.plist');
+  fs.mkdirSync(path.dirname(old), { recursive: true });
+  fs.writeFileSync(old, 'legacy user job');
+  ok(f.run('setup'));
+  const bytes = fs.readFileSync(plist, 'utf8');
+  assert.match(bytes, /--safe-caches-only/);
+  assert.doesNotMatch(bytes, /RunAtLoad|StartInterval/);
+  assert.match(bytes, /StartCalendarInterval/);
+  assert.equal(calls().filter((c) => c[0] === 'bootstrap').length, 1);
+  assert.ok(!calls().some((c) => c[0] === 'kickstart'));
+  ok(f.run('setup'));
+  assert.equal(calls().filter((c) => c[0] === 'bootstrap').length, 1);
+  ok(f.run('cleanup', 'disable'));
+  assert.equal(fs.existsSync(plist), false, 'disabled jobs must not be rediscovered at the next login');
+  ok(f.run('setup'));
+  assert.match(f.run('cleanup', 'status').stdout, /disabled/i);
+  assert.equal(calls().filter((c) => c[0] === 'bootstrap').length, 1);
+  ok(f.run('cleanup', 'enable'));
+  ok(f.run('cleanup', 'uninstall'));
+  assert.equal(fs.existsSync(plist), false);
+  ok(f.run('setup'));
+  assert.equal(fs.existsSync(plist), false, 'uninstall stays disabled across setup');
+  assert.equal(fs.readFileSync(old, 'utf8'), 'legacy user job');
+  assert.ok(calls().every((c) => c.every((arg) => !arg.includes('local.disk-cleanup'))));
+});
+
+test('custom homes never schedule automatically and explicit enable escapes plist values (mock launchctl)', (t) => {
+  const f = fixture(t);
+  const calls = mockCleanup(f);
+  ok(f.run('setup'));
+  assert.deepEqual(calls(), []);
+  assert.match(f.run('cleanup', 'status').stdout, /not installed/i);
+  const oddHome = path.join(f.dir, 'home & <test>');
+  fs.renameSync(f.home, oddHome);
+  f.env.HOME = oddHome;
+  ok(f.run('cleanup', 'enable'));
+  const plist = path.join(oddHome, 'Library/LaunchAgents/io.opencode-team.safe-caches.plist');
+  const text = fs.readFileSync(plist, 'utf8');
+  assert.ok(text.includes('home &amp; &lt;test&gt;'));
+  const parsed = spawnSync('/usr/bin/plutil', ['-lint', plist], { encoding: 'utf8' });
+  if (process.platform === 'darwin') ok(parsed);
+});
+
+test('scheduled cleanup follows the stable installation symlink across upgrades', (t) => {
+  const f = fixture(t);
+  mockCleanup(f);
+  const versions = ['old-keg', 'new-keg'].map((name) => path.join(f.dir, name));
+  for (const directory of versions) {
+    fs.mkdirSync(directory);
+    for (const asset of ['bin', 'shared']) fs.cpSync(path.join(root, asset), path.join(directory, asset), { recursive: true });
+  }
+  const stable = path.join(f.dir, 'opt-opencode-team');
+  fs.symlinkSync(versions[0], stable);
+  ok(spawnSync('bash', [path.join(stable, 'bin/opencode-team'), 'cleanup', 'enable'], { env: f.env, encoding: 'utf8' }));
+  const plist = fs.readFileSync(path.join(f.home, 'Library/LaunchAgents/io.opencode-team.safe-caches.plist'), 'utf8');
+  const scheduled = plist.match(/<string>\/bin\/zsh<\/string><string>([^<]+)<\/string>/)[1];
+  assert.equal(scheduled, path.join(stable, 'shared/disk-cleanup.sh'));
+  fs.unlinkSync(stable);
+  fs.symlinkSync(versions[1], stable);
+  fs.rmSync(versions[0], { recursive: true });
+  assert.ok(fs.existsSync(scheduled), 'upgrading/removing the old keg must not orphan the scheduled script');
+});
+
+test('cleanup refuses foreign or edited agents and propagates launchctl failures (mock launchctl)', (t) => {
+  const f = fixture(t);
+  const calls = mockCleanup(f);
+  const plist = path.join(f.home, 'Library/LaunchAgents/io.opencode-team.safe-caches.plist');
+  fs.mkdirSync(path.dirname(plist), { recursive: true });
+  fs.writeFileSync(plist, 'foreign job');
+  assert.notEqual(f.run('cleanup', 'enable').status, 0);
+  assert.equal(fs.readFileSync(plist, 'utf8'), 'foreign job');
+  assert.deepEqual(calls(), []);
+  fs.unlinkSync(plist);
+  f.env.MOCK_LAUNCHCTL_FAIL = 'bootstrap';
+  const result = f.run('cleanup', 'enable');
+  assert.notEqual(result.status, 0);
+  assert.match(result.stderr, /injected launchctl failure/);
+  delete f.env.MOCK_LAUNCHCTL_FAIL;
+  ok(f.run('cleanup', 'enable'));
+  fs.appendFileSync(plist, '<!-- user edit -->');
+  const before = calls().length;
+  assert.notEqual(f.run('cleanup', 'uninstall').status, 0);
+  assert.match(fs.readFileSync(plist, 'utf8'), /user edit/);
+  assert.equal(calls().length, before);
+});
+
+test('cleanup status and non-macOS commands are read-only; fake HOME cannot address the real GUI domain', (t) => {
+  const f = fixture(t);
+  const calls = mockCleanup(f);
+  ok(f.run('cleanup', 'status'));
+  assert.equal(fs.existsSync(f.team), false);
+  f.env.MOCK_REAL_HOME = '1';
+  assert.notEqual(f.run('cleanup', 'enable').status, 0);
+  assert.deepEqual(calls(), []);
+  const hook = path.join(f.dir, 'not-macos.mjs');
+  fs.writeFileSync(hook, "Object.defineProperty(process, 'platform', {value:'linux'});");
+  f.env.NODE_OPTIONS = `--import=${hook}`;
+  ok(f.run('cleanup', 'enable'));
+  assert.equal(fs.existsSync(path.join(f.home, 'Library/LaunchAgents')), false);
+});
+
+test('cleanup receipt failure leaves no orphan agent and a failed bootstrap is retryable (mock launchctl)', (t) => {
+  const f = fixture(t);
+  const calls = mockCleanup(f);
+  const plist = path.join(f.home, 'Library/LaunchAgents/io.opencode-team.safe-caches.plist');
+  f.env.MOCK_MARKER_FAIL = '1';
+  assert.notEqual(f.run('cleanup', 'enable').status, 0);
+  assert.equal(fs.existsSync(plist), false, 'failed ownership receipt must roll back the new agent');
+  assert.ok(!calls().some((c) => c[0] === 'bootstrap'));
+  delete f.env.MOCK_MARKER_FAIL;
+  delete f.env.OPENCODE_TEAM_HOME;
+  f.env.MOCK_LAUNCHCTL_FAIL = 'bootstrap';
+  assert.notEqual(f.run('setup').status, 0);
+  assert.match(f.run('cleanup', 'status').stdout, /not loaded/i);
+  delete f.env.MOCK_LAUNCHCTL_FAIL;
+  ok(f.run('setup'));
+  assert.equal(calls().filter((c) => c[0] === 'bootstrap').length, 2);
+  f.env.MOCK_LAUNCHCTL_FAIL = 'bootout';
+  assert.notEqual(f.run('cleanup', 'disable').status, 0);
+  assert.ok(fs.existsSync(plist));
+  assert.match(f.run('cleanup', 'status').stdout, /disabled.*loaded/i);
+  delete f.env.MOCK_LAUNCHCTL_FAIL;
+  ok(f.run('cleanup', 'uninstall'));
+  assert.equal(fs.existsSync(plist), false);
+});
+
 test('generated BEST permissions allow authorized work while FREE and read-only boundaries remain intact', (t) => {
   const f = fixture(t);
   ok(f.run('setup'));
