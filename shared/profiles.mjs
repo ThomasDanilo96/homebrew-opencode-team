@@ -340,11 +340,12 @@ function cleanup(action, automatic = false) {
     return;
   }
   const xml = (value) => value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;');
+  // argv retains the launcher's stable Homebrew opt path; import.meta resolves the versioned Cellar path.
   const bytes = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
 <key>Label</key><string>${label}</string>
-<key>ProgramArguments</key><array><string>/bin/zsh</string><string>${xml(path.join(packageRoot, 'shared/disk-cleanup.sh'))}</string><string>--safe-caches-only</string></array>
+<key>ProgramArguments</key><array><string>/bin/zsh</string><string>${xml(path.resolve(path.dirname(process.argv[1]), 'disk-cleanup.sh'))}</string><string>--safe-caches-only</string></array>
 <key>EnvironmentVariables</key><dict><key>HOME</key><string>${xml(home)}</string><key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string></dict>
 <key>StartCalendarInterval</key><dict><key>Hour</key><integer>4</integer><key>Minute</key><integer>15</integer></dict>
 <key>ProcessType</key><string>Background</string>

@@ -1,4 +1,4 @@
 #!/usr/bin/env bash
 set -euo pipefail
-PACKAGE_ROOT="$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+PACKAGE_ROOT="$(cd -L "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -L)"
 exec node "$PACKAGE_ROOT/shared/profiles.mjs" "$@"
