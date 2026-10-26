@@ -71,6 +71,18 @@ test('native discovery ignores profile-local OpenCode while BEST keeps private t
   fs.symlinkSync(privateBin, alias);
   f.env.PATH = `${alias}:${f.env.PATH}`;
   ok(f.run('best', 'run', 'official through alias'));
+  const denied = path.join(f.dir, 'denied-path');
+  const hook = path.join(f.dir, 'deny-unused-path.mjs');
+  fs.writeFileSync(hook, `import fs from 'node:fs';
+const original = fs.realpathSync;
+fs.realpathSync = function(file, ...args) {
+  if (file === ${JSON.stringify(denied)}) throw Object.assign(new Error('unused PATH access denied'), {code:'EPERM'});
+  return original.call(this, file, ...args);
+};
+`);
+  f.env.NODE_OPTIONS = `--import=${hook}`;
+  f.env.PATH += `${path.delimiter}${denied}`;
+  ok(f.run('best', 'run', 'do not inspect unused PATH entries'));
 });
 
 function mockCleanup(f) {
