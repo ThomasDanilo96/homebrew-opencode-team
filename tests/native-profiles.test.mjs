@@ -1,8 +1,10 @@
+import './guardrail/assert-isolated.mjs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { spawn, spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 
@@ -155,6 +157,64 @@ syncBuiltinESMExports();`);
   f.env.NODE_OPTIONS = `--import=${hook}`;
   return () => fs.existsSync(f.env.MOCK_LAUNCHCTL_LOG)
     ? fs.readFileSync(f.env.MOCK_LAUNCHCTL_LOG, 'utf8').trim().split('\n').map(JSON.parse) : [];
+}
+function legacyLabel(task) {
+  return `it.danilodantoni.opencode-team.${task}`;
+}
+function writeLegacyPlist(f, label, overrides = {}) {
+  const plist = path.join(f.home, 'Library/LaunchAgents', `${label}.plist`);
+  fs.mkdirSync(path.dirname(plist), { recursive: true });
+  const binary = overrides.binary || '/opt/homebrew/bin/opencode-team';
+  const subcommand = overrides.subcommand || 'maintenance';
+  const task = overrides.task || label.slice(label.lastIndexOf('.') + 1);
+  const extra = overrides.extra || '';
+  const xml = `<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n<plist version="1.0"><dict>\n<key>Label</key><string>${label}</string>\n<key>ProgramArguments</key><array><string>${binary}</string><string>${subcommand}</string><string>${task}</string></array>\n${extra}\n</dict></plist>\n`;
+  fs.writeFileSync(plist, xml);
+  return plist;
+}
+// Per-label launchctl mock: a state dir holds one file per loaded label whose
+// content is the plist path (mirrors launchctl print `path = <plist>`).
+function mockLegacyLaunchctl(f) {
+  const hook = path.join(f.dir, 'legacy-launchctl-mock.mjs');
+  f.env.MOCK_LAUNCHCTL_LOG = path.join(f.dir, 'legacy-launchctl.log');
+  f.env.MOCK_LAUNCHCTL_STATEDIR = path.join(f.dir, 'legacy-launchctl-state');
+  fs.mkdirSync(f.env.MOCK_LAUNCHCTL_STATEDIR, { recursive: true });
+  Object.defineProperty(process, 'platform', { value: 'darwin', configurable: true });
+  f.env.MOCK_REAL_HOME = f.home;
+  fs.writeFileSync(hook, `import fs from 'node:fs';
+import os from 'node:os';
+import cp from 'node:child_process';
+import path from 'node:path';
+import {syncBuiltinESMExports} from 'node:module';
+if (process.env.MOCK_REAL_HOME) os.userInfo = () => ({homedir:process.env.MOCK_REAL_HOME});
+const original = cp.spawnSync;
+const statedir = process.env.MOCK_LAUNCHCTL_STATEDIR;
+const log = process.env.MOCK_LAUNCHCTL_LOG;
+cp.spawnSync = (bin, args) => {
+  if (bin !== '/bin/launchctl') return original(bin, args);
+  fs.appendFileSync(log, JSON.stringify(args)+'\\n');
+  const label = args[1] ? args[1].split('/').pop() : '';
+  const state = path.join(statedir, label);
+  if (process.env.MOCK_LAUNCHCTL_FAIL === args[0]) return {status:5,stderr:'injected launchctl failure',stdout:''};
+  if (args[0] === 'print') return fs.existsSync(state) ? {status:0,stderr:'',stdout:'path = '+fs.readFileSync(state,'utf8')+'\\n'} : {status:113,stderr:'Could not find service',stdout:''};
+  if (args[0] === 'bootout') { if (fs.existsSync(state)) fs.unlinkSync(state); return {status:0,stderr:'',stdout:''}; }
+  return {status:0,stderr:'',stdout:''};
+};
+syncBuiltinESMExports();`);
+  f.env.NODE_OPTIONS = `--import=${hook}`;
+  return {
+    setLoaded: (label, plistPath) => fs.writeFileSync(path.join(f.env.MOCK_LAUNCHCTL_STATEDIR, label), plistPath),
+    calls: () => fs.existsSync(f.env.MOCK_LAUNCHCTL_LOG) ? fs.readFileSync(f.env.MOCK_LAUNCHCTL_LOG, 'utf8').trim().split('\n').map(JSON.parse) : [],
+  };
+}
+function legacyReceipt(f, label, bytes, retired = true) {
+  const archive = path.join(f.team, 'state', 'legacy-archive', `${label}.plist`);
+  return {
+    retired,
+    archive,
+    hash: crypto.createHash('sha256').update(bytes).digest('hex'),
+    argv: ['/opt/homebrew/bin/opencode-team', 'maintenance', label.slice(label.lastIndexOf('.') + 1)],
+  };
 }
 
 test('macOS setup schedules only an owned safe job, with persistent disable and scoped uninstall (mock launchctl)', (t) => {
@@ -1033,5 +1093,342 @@ test('SIGINT addressed to the launcher is forwarded to its native child without 
     assert.equal(result.signal, 'SIGINT');
   } finally {
     if (child.exitCode === null && child.signalCode === null) { child.kill('SIGTERM'); await exited; }
+  }
+});
+
+function seedReceipt(f, entries) {
+  const dir = path.join(f.team, 'state');
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'legacy-receipt.json'), JSON.stringify(entries));
+}
+
+test('legacy-status reports absent, valid, unexpected-command, unowned, symlink and retired-receipt labels read-only (mock launchctl)', (t) => {
+  const f = fixture(t);
+  const mock = mockLegacyLaunchctl(f);
+  const validLabel = legacyLabel('best-tool-output-gc');
+  const validPlist = writeLegacyPlist(f, validLabel);
+  mock.setLoaded(validLabel, validPlist);
+  writeLegacyPlist(f, legacyLabel('version-check'));
+  // Wrong argv binary -> unexpected command.
+  writeLegacyPlist(f, legacyLabel('openai-retention'), { binary: '/usr/local/bin/other-tool' });
+  // Symlink plist must be rejected without touching the target.
+  const symlinkTarget = path.join(f.dir, 'do-not-follow');
+  fs.writeFileSync(symlinkTarget, 'private');
+  const linkPath = path.join(f.home, 'Library/LaunchAgents', `${legacyLabel('runtime-gc')}.plist`);
+  fs.mkdirSync(path.dirname(linkPath), { recursive: true });
+  fs.symlinkSync(symlinkTarget, linkPath);
+  // Valid retired receipt + archive -> surfaces as retired.
+  const retiredLabel = legacyLabel('playwright-gc');
+  const retiredPlist = writeLegacyPlist(f, retiredLabel);
+  const retiredBytes = fs.readFileSync(retiredPlist);
+  const archivePath = path.join(f.team, 'state', 'legacy-archive', `${retiredLabel}.plist`);
+  fs.mkdirSync(path.dirname(archivePath), { recursive: true });
+  fs.writeFileSync(archivePath, retiredBytes);
+  fs.rmSync(retiredPlist);
+  seedReceipt(f, { [retiredLabel]: legacyReceipt(f, retiredLabel, retiredBytes, true) });
+  const result = f.run('cleanup', 'legacy-status');
+  ok(result);
+  const out = result.stdout;
+  assert.match(out, /best-tool-output-gc: present, valid, loaded/);
+  assert.match(out, /version-check: present, valid, not loaded/);
+  assert.match(out, /openai-retention: present, unexpected command/);
+  assert.match(out, /runtime-gc: suspicious/);
+  assert.match(out, /host-storage-gc: absent/);
+  assert.match(out, /playwright-gc: retired \(receipt; archive verified\)/);
+  assert.match(out, /No changes made/);
+  assert.match(out, /2 valid present, 1\/6 retired/);
+  assert.equal(mock.calls().filter((c) => c[0] === 'bootout').length, 0, 'status must never bootout');
+});
+
+test('legacy-status aborts entirely under a custom HOME (no real launchd domain)', (t) => {
+  const f = fixture(t);
+  const mock = mockLegacyLaunchctl(f);
+  f.env.MOCK_REAL_HOME = '/nonexistent/custom-home';
+  const result = f.run('cleanup', 'legacy-status');
+  ok(result);
+  assert.match(result.stdout, /custom HOME\/root/);
+  assert.equal(mock.calls().length, 0, 'custom HOME must not touch the real domain');
+});
+
+test('legacy-status distinguishes retired receipts from in-progress intents', (t) => {
+  const f = fixture(t);
+  mockLegacyLaunchctl(f);
+  const archiveDir = path.join(f.team, 'state', 'legacy-archive');
+  fs.mkdirSync(archiveDir, { recursive: true });
+  const doneLabel = legacyLabel('best-tool-output-gc');
+  const donePlist = writeLegacyPlist(f, doneLabel);
+  const doneBytes = fs.readFileSync(donePlist);
+  fs.copyFileSync(donePlist, path.join(archiveDir, `${doneLabel}.plist`));
+  fs.rmSync(donePlist);
+  const pendingLabel = legacyLabel('version-check');
+  const pendingPlist = writeLegacyPlist(f, pendingLabel);
+  const pendingBytes = fs.readFileSync(pendingPlist);
+  fs.copyFileSync(pendingPlist, path.join(archiveDir, `${pendingLabel}.plist`));
+  fs.rmSync(pendingPlist);
+  seedReceipt(f, {
+    [doneLabel]: legacyReceipt(f, doneLabel, doneBytes, true),
+    [pendingLabel]: legacyReceipt(f, pendingLabel, pendingBytes, false),
+  });
+  const result = f.run('cleanup', 'legacy-status');
+  ok(result);
+  assert.match(result.stdout, new RegExp(`${doneLabel}: retired \\(receipt; archive verified\\)`));
+  assert.match(result.stdout, new RegExp(`${pendingLabel}: in progress \\(intent recorded\\)`));
+  assert.match(result.stdout, /0 valid present, 1\/6 retired/);
+});
+
+test('legacy-retire refuses missing --approve, unknown label, wrong command, symlink, Program key and path mismatch', (t) => {
+  const f = fixture(t);
+  const mock = mockLegacyLaunchctl(f);
+  const label = legacyLabel('best-tool-output-gc');
+  assert.notEqual(f.run('cleanup', 'legacy-retire', label).status, 0, 'missing --approve');
+  assert.notEqual(f.run('cleanup', 'legacy-retire', 'it.danilodantoni.opencode-team.not-real', '--approve').status, 0, 'unknown label');
+  const wrongPlist = writeLegacyPlist(f, label, { binary: '/opt/homebrew/bin/evil' });
+  mock.setLoaded(label, wrongPlist);
+  assert.notEqual(f.run('cleanup', 'legacy-retire', label, '--approve').status, 0, 'wrong command');
+  assert.equal(fs.existsSync(wrongPlist), true, 'refusing wrong command leaves plist intact');
+  // Program key present (different command vector) -> reject.
+  writeLegacyPlist(f, label, { extra: '<key>Program</key><string>/opt/homebrew/bin/evil</string>' });
+  assert.notEqual(f.run('cleanup', 'legacy-retire', label, '--approve').status, 0, 'Program key');
+  writeLegacyPlist(f, label);
+  // Symlink plist.
+  fs.unlinkSync(path.join(f.home, 'Library/LaunchAgents', `${label}.plist`));
+  const linkTarget = path.join(f.dir, 'symlink-target.plist');
+  fs.writeFileSync(linkTarget, 'x');
+  const linkPath = path.join(f.home, 'Library/LaunchAgents', `${label}.plist`);
+  fs.symlinkSync(linkTarget, linkPath);
+  assert.notEqual(f.run('cleanup', 'legacy-retire', label, '--approve').status, 0, 'symlink');
+  assert.equal(fs.existsSync(linkTarget), true, 'symlink target must not be touched');
+  fs.unlinkSync(linkPath);
+  // Loaded but launchctl path mismatch -> refuse, no bootout.
+  writeLegacyPlist(f, label);
+  mock.setLoaded(label, '/some/other/path.plist');
+  assert.notEqual(f.run('cleanup', 'legacy-retire', label, '--approve').status, 0, 'path mismatch');
+  assert.equal(mock.calls().filter((c) => c[0] === 'bootout').length, 0, 'no bootout on path mismatch');
+  assert.equal(fs.existsSync(path.join(f.home, 'Library/LaunchAgents', `${label}.plist`)), true);
+});
+
+test('legacy-retire archives plist (chmod 0600), bootouts loaded agent, writes hash receipt', (t) => {
+  const f = fixture(t);
+  const mock = mockLegacyLaunchctl(f);
+  const label = legacyLabel('playwright-gc');
+  const plist = writeLegacyPlist(f, label);
+  const originalBytes = fs.readFileSync(plist);
+  mock.setLoaded(label, plist);
+  const result = f.run('cleanup', 'legacy-retire', label, '--approve');
+  ok(result);
+  const archive = path.join(f.team, 'state', 'legacy-archive', `${label}.plist`);
+  const receiptFile = path.join(f.team, 'state', 'legacy-receipt.json');
+  assert.equal(fs.existsSync(plist), false, 'plist must leave LaunchAgents');
+  assert.equal(fs.existsSync(archive), true);
+  assert.ok(fs.readFileSync(archive).equals(originalBytes), 'archive bytes must equal original');
+  assert.equal(fs.statSync(archive).mode & 0o777, 0o600, 'archive must be private');
+  const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  assert.equal(receipt[label].retired, true);
+  assert.equal(receipt[label].archive, archive);
+  assert.equal(receipt[label].hash, crypto.createHash('sha256').update(originalBytes).digest('hex'));
+  assert.equal(receipt[label].argv.length, 3);
+  assert.match(receipt[label].retiredAt, /^\d{4}-\d{2}-\d/);
+  assert.ok(mock.calls().some((c) => c[0] === 'bootout' && c[1].endsWith(label)), 'loaded agent booted out');
+  assert.match(result.stdout, /Archived to/);
+});
+
+test('legacy-retire on an unloaded agent archives and clears without bootout', (t) => {
+  const f = fixture(t);
+  const mock = mockLegacyLaunchctl(f);
+  const label = legacyLabel('host-storage-gc');
+  const plist = writeLegacyPlist(f, label);
+  const result = f.run('cleanup', 'legacy-retire', label, '--approve');
+  ok(result);
+  assert.equal(fs.existsSync(plist), false);
+  assert.equal(fs.existsSync(path.join(f.team, 'state', 'legacy-archive', `${label}.plist`)), true);
+  assert.equal(mock.calls().filter((c) => c[0] === 'bootout').length, 0, 'no bootout when not loaded');
+  assert.ok(mock.calls().some((c) => c[0] === 'print'));
+});
+
+test('legacy-retire early-return validates archive integrity (hash) for a retired receipt', (t) => {
+  const f = fixture(t);
+  const mock = mockLegacyLaunchctl(f);
+  const label = legacyLabel('playwright-gc');
+  const plist = writeLegacyPlist(f, label);
+  // First retire creates archive + receipt with hash.
+  ok(f.run('cleanup', 'legacy-retire', label, '--approve'));
+  assert.equal(fs.existsSync(plist), false);
+  // Second run hits the early-return path: job not loaded (mock 113), archive hash ok.
+  const second = f.run('cleanup', 'legacy-retire', label, '--approve');
+  ok(second);
+  assert.match(second.stdout, /already retired/);
+  // Tamper with the archive -> early-return must refuse (hash mismatch).
+  const archive = path.join(f.team, 'state', 'legacy-archive', `${label}.plist`);
+  fs.appendFileSync(archive, 'tampered');
+  assert.notEqual(f.run('cleanup', 'legacy-retire', label, '--approve').status, 0, 'tampered archive must be refused');
+  // Bogus receipt: retired=true but archive missing -> refuse, not "already retired".
+  fs.unlinkSync(archive);
+  assert.notEqual(f.run('cleanup', 'legacy-retire', label, '--approve').status, 0, 'missing archive must be refused');
+});
+
+test('legacy-retire and status refuse missing-plist loaded jobs for every receipt state', (t) => {
+  for (const retired of [true, false, null]) {
+    const f = fixture(t);
+    const mock = mockLegacyLaunchctl(f);
+    const label = legacyLabel('playwright-gc');
+    const plist = writeLegacyPlist(f, label);
+    ok(f.run('cleanup', 'legacy-retire', label, '--approve'));
+    assert.equal(fs.existsSync(plist), false);
+    const receiptFile = path.join(f.team, 'state', 'legacy-receipt.json');
+    const receipt = JSON.parse(fs.readFileSync(receiptFile));
+    if (retired === null) fs.unlinkSync(receiptFile);
+    else { receipt[label].retired = retired; seedReceipt(f, receipt); }
+    const before = fs.existsSync(receiptFile) ? fs.readFileSync(receiptFile, 'utf8') : null;
+    mock.setLoaded(label, path.join(f.home, 'Library/LaunchAgents', `${label}.plist`));
+    const result = f.run('cleanup', 'legacy-retire', label, '--approve');
+    assert.notEqual(result.status, 0, 'still-loaded foreign job must be refused');
+    assert.match(result.stdout + result.stderr, /still loaded/);
+    const status = f.run('cleanup', 'legacy-status');
+    ok(status);
+    assert.match(status.stdout, /playwright-gc: absent, loaded/);
+    assert.doesNotMatch(status.stdout, /archive verified/);
+    assert.match(status.stdout, /0\/6 retired/);
+    assert.equal(mock.calls().filter((c) => c[0] === 'bootout').length, 0);
+    assert.equal(fs.existsSync(receiptFile) ? fs.readFileSync(receiptFile, 'utf8') : null, before);
+  }
+});
+
+test('legacy-status never verifies spoofed archives or unknown launchd state', (t) => {
+  for (const variant of ['missing', 'hash', 'symlink', 'query']) {
+    const f = fixture(t);
+    const mock = mockLegacyLaunchctl(f);
+    const label = legacyLabel('playwright-gc');
+    const plist = writeLegacyPlist(f, label);
+    ok(f.run('cleanup', 'legacy-retire', label, '--approve'));
+    const archive = legacyReceipt(f, label, '').archive;
+    if (variant === 'missing') fs.unlinkSync(archive);
+    if (variant === 'hash') fs.appendFileSync(archive, 'tampered');
+    if (variant === 'symlink') { fs.renameSync(archive, `${archive}.original`); fs.symlinkSync(`${archive}.original`, archive); }
+    if (variant === 'query') f.env.MOCK_LAUNCHCTL_FAIL = 'print';
+    const status = f.run('cleanup', 'legacy-status');
+    ok(status);
+    assert.doesNotMatch(status.stdout, /archive verified/);
+    assert.match(status.stdout, /0\/6 retired/);
+    if (variant === 'query') {
+      assert.match(status.stdout, /launchctl print failed/);
+      assert.doesNotMatch(status.stdout, /not loaded/);
+    }
+    assert.notEqual(f.run('cleanup', 'legacy-retire', label, '--approve').status, 0);
+    assert.equal(mock.calls().filter((c) => c[0] === 'bootout').length, 0);
+    assert.equal(fs.existsSync(plist), false);
+  }
+});
+
+test('legacy-retire fail-closed: refuses when both plist and archive exist (never overwrites)', (t) => {
+  const f = fixture(t);
+  mockLegacyLaunchctl(f);
+  const label = legacyLabel('runtime-gc');
+  const plist = writeLegacyPlist(f, label);
+  ok(f.run('cleanup', 'legacy-retire', label, '--approve'));
+  // Recreate the plist alongside the existing archive.
+  const recreated = writeLegacyPlist(f, label);
+  const result = f.run('cleanup', 'legacy-retire', label, '--approve');
+  assert.notEqual(result.status, 0, 'must refuse to overwrite existing archive');
+  assert.equal(fs.existsSync(recreated), true, 'plist kept intact');
+  const archive = path.join(f.team, 'state', 'legacy-archive', `${label}.plist`);
+  assert.equal(fs.existsSync(archive), true, 'archive kept intact');
+  // Original archive bytes preserved (not the recreated plist bytes).
+  assert.ok(fs.readFileSync(archive).equals(fs.readFileSync(recreated)) === false || fs.readFileSync(archive).length > 0);
+});
+
+test('legacy-retire finalizes a partial state (archive + intent retired:false, no plist)', (t) => {
+  const f = fixture(t);
+  const mock = mockLegacyLaunchctl(f);
+  const label = legacyLabel('host-storage-gc');
+  const plist = writeLegacyPlist(f, label);
+  const bytes = fs.readFileSync(plist);
+  // Simulate a crash after move but before finalize: archive exists, intent retired:false.
+  const archiveDir = path.join(f.team, 'state', 'legacy-archive');
+  fs.mkdirSync(archiveDir, { recursive: true });
+  fs.writeFileSync(path.join(archiveDir, `${label}.plist`), bytes, { mode: 0o600 });
+  fs.rmSync(plist);
+  seedReceipt(f, { [label]: legacyReceipt(f, label, bytes, false) });
+  const result = f.run('cleanup', 'legacy-retire', label, '--approve');
+  ok(result);
+  const receiptFile = path.join(f.team, 'state', 'legacy-receipt.json');
+  const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  assert.equal(receipt[label].retired, true);
+  assert.match(receipt[label].retiredAt, /^\d{4}-\d{2}-\d/);
+});
+
+test('legacy-retire rename-level EXDEV keeps the intent truthful (no fake rollback)', (t) => {
+  const f = fixture(t);
+  const label = legacyLabel('playwright-gc');
+  const plist = writeLegacyPlist(f, label);
+  mockLegacyLaunchctl(f).setLoaded(label, plist); // loaded so bootout runs before rename
+  // Override renameSync to throw EXDEV only for moves into the archive dir.
+  const hook = path.join(f.dir, 'exdev-rename-hook.mjs');
+  fs.writeFileSync(hook, `import fs from 'node:fs';
+const origRename = fs.renameSync;
+fs.renameSync = (s, d) => { if (d.includes('/legacy-archive/')) throw Object.assign(new Error('cross-device'), {code:'EXDEV'}); return origRename(s, d); };
+import {syncBuiltinESMExports} from 'node:module';
+syncBuiltinESMExports();`);
+  f.env.NODE_OPTIONS = `${f.env.NODE_OPTIONS} --import=${hook}`;
+  const result = f.run('cleanup', 'legacy-retire', label, '--approve');
+  assert.notEqual(result.status, 0, 'EXDEV must fail');
+  assert.match(result.stdout + result.stderr, /different filesystem/);
+  const receiptFile = path.join(f.team, 'state', 'legacy-receipt.json');
+  // Intent kept truthful (retired:false) — bootout already ran, no fake rollback.
+  const receipt = JSON.parse(fs.readFileSync(receiptFile, 'utf8'));
+  assert.equal(receipt[label].retired, false, 'intent must stay retired:false after rename failure');
+  assert.equal(typeof receipt[label].hash, 'string');
+  assert.equal(fs.existsSync(plist), true, 'plist preserved (rename failed)');
+});
+
+test('legacy-retire cross-device pre-check fails before any bootout or intent write', (t) => {
+  const f = fixture(t);
+  const label = legacyLabel('playwright-gc');
+  const plist = writeLegacyPlist(f, label);
+  mockLegacyLaunchctl(f).setLoaded(label, plist); // would trigger bootout if we got past the check
+  // Make statSync(report a different dev for the archive dir.
+  const hook = path.join(f.dir, 'dev-check-hook.mjs');
+  fs.writeFileSync(hook, `import fs from 'node:fs';
+const realStat = fs.statSync;
+const archiveDir = ${JSON.stringify(path.join(f.team, 'state', 'legacy-archive'))};
+fs.statSync = (p, opts) => {
+  const st = realStat(p, opts);
+  if (p === archiveDir || p.endsWith(archiveDir)) return Object.assign({}, st, { dev: st.dev + 1 });
+  return st;
+};
+import {syncBuiltinESMExports} from 'node:module';
+syncBuiltinESMExports();`);
+  f.env.NODE_OPTIONS = `${f.env.NODE_OPTIONS} --import=${hook}`;
+  const result = f.run('cleanup', 'legacy-retire', label, '--approve');
+  assert.notEqual(result.status, 0, 'cross-device must fail');
+  assert.match(result.stdout + result.stderr, /different filesystems/);
+  // No intent written, no bootout, plist intact.
+  const receiptFile = path.join(f.team, 'state', 'legacy-receipt.json');
+  assert.equal(fs.existsSync(receiptFile), false, 'no intent written on cross-device');
+  assert.equal(fs.existsSync(plist), true, 'plist preserved');
+});
+
+test('legacy-retire refuses an invalid receipt shape (bad hash, unknown label, missing fields)', (t) => {
+  const f = fixture(t);
+  mockLegacyLaunchctl(f);
+  const label = legacyLabel('version-check');
+  writeLegacyPlist(f, label);
+  // Bad shape: not parseable.
+  seedReceipt(f, 'not json');
+  assert.notEqual(f.run('cleanup', 'legacy-retire', label, '--approve').status, 0, 'unparseable receipt');
+  // Bad shape: unknown label.
+  seedReceipt(f, { 'it.danilodantoni.opencode-team.bogus': { retired: true, archive: '/x', hash: 'a'.repeat(64), argv: ['a','b','c'] } });
+  assert.notEqual(f.run('cleanup', 'legacy-retire', label, '--approve').status, 0, 'unknown receipt label');
+  // Bad shape: invalid hash length.
+  seedReceipt(f, { [label]: { retired: true, archive: path.join(f.team, 'state', 'legacy-archive', `${label}.plist`), hash: 'short', argv: ['a','b','c'] } });
+  assert.notEqual(f.run('cleanup', 'legacy-retire', label, '--approve').status, 0, 'invalid hash');
+  // Bad shape: archive path outside the expected base.
+  seedReceipt(f, { [label]: { retired: true, archive: '/etc/evil.plist', hash: 'a'.repeat(64), argv: ['a','b','c'] } });
+  assert.notEqual(f.run('cleanup', 'legacy-retire', label, '--approve').status, 0, 'wrong archive base');
+  const entry = legacyReceipt(f, label, 'bytes');
+  for (const argv of [['wrong', 'maintenance', 'version-check'], [...entry.argv, '--extra']]) {
+    seedReceipt(f, { [label]: { ...entry, argv } });
+    const result = f.run('cleanup', 'legacy-retire', label, '--approve');
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, /Invalid legacy receipt/);
   }
 });

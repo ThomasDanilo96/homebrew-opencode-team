@@ -6,12 +6,14 @@ are not disk bytes: WAL, filesystem allocation and open readers differ.
 """
 
 import argparse
+import codecs
 import contextlib
+import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
-from pathlib import Path
 import re
 import shutil
 import signal
@@ -20,12 +22,54 @@ import stat
 import subprocess
 import time
 import uuid
-
+from datetime import datetime, timezone
+from pathlib import Path
 
 PROFILES = ("best", "free")
 SNAPSHOTS = "snapshots-v1"
 SNAPSHOT_NAME = r"[0-9]{20}-[a-f0-9]{32}"
 AGE_MS = 90 * 86400 * 1000
+
+
+def reason_label(error):
+    """Controlled reason tag; never leak arbitrary exception strings."""
+    if len(error.args) == 1 and error.args[0] in (
+            "backup-deadline", "checksum-deadline", "logical-checksum-deadline",
+            "snapshot-publish-deadline", "snapshot-retention-deadline",
+            "snapshot-recovery-deadline",
+            "integrity-check-failed", "invalid-manifest", "checksum-mismatch",
+            "profile-mismatch", "rowid-fully-shadowed", "insufficient-space",
+            "symlink", "not-directory", "not-safe-regular-file", "not-owned",
+            "not-private", "writable-by-others", "unknown-profile",
+            "not-retired-snapshot", "unexpected-snapshot-files"):
+        return error.args[0]
+    name = type(error).__name__
+    if isinstance(error, TimeoutError):
+        return "deadline"
+    if isinstance(error, sqlite3.Error):
+        code = getattr(error, "sqlite_errorcode", None)
+        if code is not None:
+            # Extended codes retain the primary code in the low byte; Python
+            # 3.9 has neither these exception attributes nor SQLITE_* constants.
+            return {5: "busy", 6: "busy", 9: "deadline", 10: "io-error",
+                    13: "insufficient-space"}.get(code & 255, "database")
+        message = str(error)
+        if message in ("database is locked", "database table is locked",
+                       "database schema is locked", "database is busy") or message.startswith(
+                           ("database table is locked: ", "database schema is locked: ")):
+            return "busy"
+        if message == "interrupted":
+            return "deadline"
+        return "database"
+    if isinstance(error, OSError):
+        if error.errno == errno.ENOSPC:
+            return "insufficient-space"
+        if error.errno == errno.EIO:
+            return "io-error"
+        return "os-error"
+    if isinstance(error, ValueError):
+        return "invalid"
+    return name
 
 
 def safe_path(path, directory=False, private=False):
@@ -174,7 +218,8 @@ def session_report(path, dry_run=False):
                         parents[root(key)] = root(dependency)
         tables = {row[0] for row in connection.execute(
             "SELECT name FROM sqlite_schema WHERE type='table'")}
-        if not {"session_inbox", "session_pending"} <= tables:
+        # OpenCode migration 20261025154125 removes session_pending.
+        if "session_inbox" not in tables:
             raise ValueError("missing-activity-schema")
         for table in ("session_inbox", "session_pending", "session_execution_claim", "session_use"):
             if table not in tables:
@@ -216,19 +261,45 @@ def logical_checksum(connection, deadline=None):
         if kind != "table":
             continue
         quoted = '"' + name.replace('"', '""') + '"'
-        try:
-            rows = connection.execute("SELECT _rowid_,* FROM " + quoted)
-        except sqlite3.OperationalError as error:
-            if "no such column: _rowid_" not in str(error):
-                raise
-            rows = connection.execute("SELECT * FROM " + quoted)  # WITHOUT ROWID
+        cols = {row[1].lower() for row in connection.execute(f"PRAGMA table_info({quoted})")}
+        # rowid aliases can be shadowed by actual columns; pick one that isn't.
+        rowid_alias = None
+        for candidate in ("rowid", "_rowid_", "oid"):
+            if candidate not in cols:
+                rowid_alias = candidate
+                break
+        # index_info accepts a WITHOUT ROWID table name and returns its PK.
+        without_rowid = connection.execute(f"PRAGMA index_info({quoted})").fetchone() is not None
+        if rowid_alias is None and not without_rowid:
+            raise ValueError("rowid-fully-shadowed")
+        selected = "*" if without_rowid else f"{rowid_alias},*"
+        rows = connection.execute(f"SELECT {selected} FROM " + quoted)
         hashes = []
         for row in rows:
             if deadline is not None and time.monotonic() >= deadline:
                 raise TimeoutError("logical-checksum-deadline")
-            # SQLite returns only None/int/float/str/bytes. Their tuple repr is
-            # typed and lossless; SQL quote()/iterdump() truncates text at NUL.
-            hashes.append(hashlib.sha256(repr(row).encode("utf-8")).digest())
+            # Preserve rc2's exact tuple repr without allocating a second full
+            # BLOB representation. bytes repr selects double quotes only when
+            # single quotes occur and double quotes do not.
+            row_digest = hashlib.sha256(b"(")
+            for index, value in enumerate(row):
+                if index:
+                    row_digest.update(b", ")
+                if isinstance(value, bytes):
+                    escaped = codecs.escape_encode(value)[0]
+                    if b"'" in value and b'"' not in value:
+                        row_digest.update(b'b"')
+                        row_digest.update(escaped.replace(b"\\'", b"'"))
+                        row_digest.update(b'"')
+                    else:
+                        row_digest.update(b"b'")
+                        row_digest.update(escaped)
+                        row_digest.update(b"'")
+                    del escaped
+                else:
+                    row_digest.update(repr(value).encode("utf-8"))
+            row_digest.update(b",)" if len(row) == 1 else b")")
+            hashes.append(row_digest.digest())
         digest.update(name.encode("utf-8") + b"\0")
         for value in sorted(hashes):
             digest.update(value)
@@ -283,34 +354,57 @@ def remove_retired_snapshot(directory):
 
 
 def snapshot(path, state, profile, budget=30):
-    deadline = time.monotonic() + budget
-    path = database_path(path)
-    if not path.exists():
-        return {"status": "missing"}
-    if profile not in PROFILES:
-        raise ValueError("unknown-profile")
-    state = safe_path(state, directory=True)
-    snapshots = private_directory(state / SNAPSHOTS)
-    directory = private_directory(snapshots / profile)
-    existing = []
-    ignored = 0
-    # Only directories named by this implementation and with verified receipts.
-    for entry in directory.iterdir():
-        if re.fullmatch(r"\.retired-" + SNAPSHOT_NAME, entry.name):
-            remove_retired_snapshot(entry)
-            continue
-        if not re.fullmatch(SNAPSHOT_NAME, entry.name):
-            ignored += 1
-            continue
-        manifest = verify_snapshot(entry, deadline)
-        if manifest["profile"] != profile:
-            raise ValueError("profile-mismatch")
-        existing.append((entry, manifest))
-    temporary = directory / (".pending-" + uuid.uuid4().hex)
-    temporary.mkdir(mode=0o700)
-    database = temporary / "database.db"
+    started = time.monotonic()
+    deadline = started + budget
+    published = False
+    phase = "verify"
+    timing: dict[str, float] = {}
+    t0 = started
+    temporary = None
+    primary_error = None
     try:
+        path = database_path(path)
+        if not path.exists():
+            return {"status": "missing"}
+        if profile not in PROFILES:
+            raise ValueError("unknown-profile")
+        state = safe_path(state, directory=True)
+        snapshots = private_directory(state / SNAPSHOTS)
+        directory = private_directory(snapshots / profile)
+        existing = []
+        ignored = 0
+        # Only directories named by this implementation and with verified receipts.
+        for entry in directory.iterdir():
+            if re.fullmatch(r"\.retired-" + SNAPSHOT_NAME, entry.name):
+                phase = "retired-recovery"
+                verify_started = t0
+                t0 = time.monotonic()
+                if t0 >= deadline:
+                    raise TimeoutError("snapshot-recovery-deadline")
+                remove_retired_snapshot(entry)
+                timing["retired_recovery_ms"] = timing.get("retired_recovery_ms", 0) + round(
+                    (time.monotonic() - t0) * 1000, 3)
+                t0 = verify_started
+                phase = "verify"
+                continue
+            if not re.fullmatch(SNAPSHOT_NAME, entry.name):
+                ignored += 1
+                continue
+            manifest = verify_snapshot(entry, deadline)
+            if manifest["profile"] != profile:
+                raise ValueError("profile-mismatch")
+            existing.append((entry, manifest))
+        timing["verify_existing_ms"] = round((time.monotonic() - t0) * 1000, 3)
+        pending = directory / (".pending-" + uuid.uuid4().hex)
+        pending.mkdir(mode=0o700)
+        temporary = pending
+        database = temporary / "database.db"
+        phase = "backup"
+        t0 = time.monotonic()
         with connect(path) as source:
+            # Pin the WAL read view so concurrent commits cannot restart every
+            # backup step indefinitely; this transaction is read-only.
+            source.execute("BEGIN")
             size = source.execute("PRAGMA page_count").fetchone()[0]
             size *= source.execute("PRAGMA page_size").fetchone()[0]
             if shutil.disk_usage(directory).free < size + 1024 * 1024:
@@ -324,20 +418,35 @@ def snapshot(path, state, profile, budget=30):
 
             with contextlib.closing(sqlite3.connect(database)) as target:
                 source.backup(target, pages=128, progress=progress, sleep=0.01)
+                source.rollback()
                 # Backup inherits WAL mode; published snapshots are standalone.
                 target.execute("PRAGMA journal_mode=DELETE").fetchall()
                 target.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
+                timing["backup_ms"] = round((time.monotonic() - t0) * 1000, 3)
+                phase = "integrity"
+                t0 = time.monotonic()
                 quick_check(target)
+                timing["integrity_ms"] = round((time.monotonic() - t0) * 1000, 3)
+                phase = "logical"
+                t0 = time.monotonic()
                 logical = logical_checksum(target, deadline)
+        timing["logical_ms"] = round((time.monotonic() - t0) * 1000, 3)
         # Some SQLite builds leave an orphaned SHM after leaving WAL mode.
         # This is our unpublished target, closed and confirmed in DELETE mode.
         shm = safe_path(Path(str(database) + "-shm"), private=True)
         if shm.exists():
             shm.unlink()
+        phase = "checksum"
+        t0 = time.monotonic()
         digest = checksum(database, deadline)
+        timing["checksum_ms"] = round((time.monotonic() - t0) * 1000, 3)
         report = {"status": "unchanged", "ignored_artifacts": ignored}
         survivors = sorted(existing, key=lambda item: item[0].name)[-3:]
         if not any(manifest["logical_sha256"] == logical for _, manifest in survivors):
+            phase = "publish"
+            t0 = time.monotonic()
+            if time.monotonic() >= deadline:
+                raise TimeoutError("snapshot-publish-deadline")
             manifest = {"format": SNAPSHOTS, "profile": profile, "sha256": digest,
                         "logical_sha256": logical}
             receipt = temporary / "manifest.json"
@@ -349,10 +458,14 @@ def snapshot(path, state, profile, budget=30):
             with database.open("rb") as output:
                 os.fsync(output.fileno())
             sync_directory(temporary)
-            published = directory / (f"{time.time_ns():020d}-" + uuid.uuid4().hex)
-            temporary.rename(published)
-            existing.append((published, manifest))
-            report.update(status="created", snapshot_bytes=(published / "database.db").stat().st_size)
+            final = directory / (f"{time.time_ns():020d}-" + uuid.uuid4().hex)
+            temporary.rename(final)
+            existing.append((final, manifest))
+            published = True
+            report.update(status="created", snapshot_bytes=(final / "database.db").stat().st_size)
+            timing["publish_ms"] = round((time.monotonic() - t0) * 1000, 3)
+        phase = "retention"
+        t0 = time.monotonic()
         sync_directory(directory)
         # Reuse this locked run's verification, including on an unchanged retry.
         # Retire atomically before unlinking, so partial removal cannot masquerade
@@ -364,16 +477,36 @@ def snapshot(path, state, profile, budget=30):
             retired = entry.with_name(".retired-" + entry.name)
             entry.rename(retired)
             remove_retired_snapshot(retired)
+        timing["retention_ms"] = round((time.monotonic() - t0) * 1000, 3)
+        report["timing_ms"] = timing
         return report
+    except Exception as error:
+        primary_error = error
+        timing[("verify_existing" if phase == "verify" else phase.replace("-", "_")) + "_ms"] = round(
+            (time.monotonic() - t0) * 1000, 3)
+        error.__dict__.update(phase=phase, published=published,
+                              snapshot_reason=reason_label(error), timing_ms=timing)
+        raise
     finally:
         # Cleanup is restricted to this call's unpublished, exclusive artifacts.
-        if temporary.exists():
-            for name in ("database.db", "database.db-journal", "database.db-wal",
-                         "database.db-shm", "manifest.json"):
-                artifact = safe_path(temporary / name)
-                if artifact.exists():
-                    artifact.unlink()
-            temporary.rmdir()
+        cleanup_started = time.monotonic()
+        try:
+            if temporary is not None and temporary.exists():
+                for name in ("database.db", "database.db-journal", "database.db-wal",
+                             "database.db-shm", "manifest.json"):
+                    artifact = safe_path(temporary / name)
+                    if artifact.exists():
+                        artifact.unlink()
+                temporary.rmdir()
+        except Exception as error:
+            timing["cleanup_ms"] = round((time.monotonic() - cleanup_started) * 1000, 3)
+            if primary_error is not None:
+                primary_error.__dict__.update(cleanup_error_type=type(error).__name__,
+                                              cleanup_reason=reason_label(error))
+            else:
+                error.__dict__.update(phase="cleanup", published=published,
+                                      snapshot_reason=reason_label(error), timing_ms=timing)
+                raise
 
 
 def file_bytes(path):
@@ -393,52 +526,57 @@ def reclaim(path, dry_run=False):
     deadline = time.monotonic() + 0.25
     result: dict[str, object] = {"file_bytes_before": file_bytes(path),
                                "wal_bytes_before": file_bytes(Path(str(path) + "-wal"))}
-    with connect(path, "ro" if dry_run else "rw", immutable=dry_run) as connection:
-        result["page_size"] = connection.execute("PRAGMA page_size").fetchone()[0]
-        result["freelist_before"] = connection.execute("PRAGMA freelist_count").fetchone()[0]
-        auto = connection.execute("PRAGMA auto_vacuum").fetchone()[0]
-        result["status"] = "dry-run" if dry_run else "not-configured" if auto != 2 else "ok"
-        if not dry_run and auto == 2:
-            connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
-            try:
-                while committed_pages < 16384 and time.monotonic() < deadline:
-                    connection.execute("BEGIN IMMEDIATE")
-                    before = connection.execute("PRAGMA freelist_count").fetchone()[0]
-                    if before == 0:
-                        connection.rollback()
-                        break
-                    pages = min(64, 16384 - committed_pages)
-                    connection.execute(f"PRAGMA incremental_vacuum({pages})").fetchall()
-                    after = connection.execute("PRAGMA freelist_count").fetchone()[0]
-                    connection.commit()
-                    committed_pages += max(0, before - after)
-                    if before == after:
-                        break
-                    time.sleep(0.001)
-            except sqlite3.OperationalError as error:
-                connection.set_progress_handler(None, 0)
-                if connection.in_transaction:
-                    connection.rollback()
-                message = str(error).lower()
-                if not any(value in message for value in ("interrupted", "locked", "busy")):
-                    raise
-                result["status"] = "deferred"
-                result["reason"] = "busy" if "locked" in message or "busy" in message else "deadline"
-            finally:
-                connection.set_progress_handler(None, 0)
-            if time.monotonic() >= deadline:
-                result["status"] = "deferred"
-        result["freelist_after"] = connection.execute("PRAGMA freelist_count").fetchone()[0]
-        if not dry_run:
-            # PASSIVE never waits for readers/writers or truncates WAL. Defer a
-            # large checkpoint rather than let it exceed this run's page budget.
-            wal = file_bytes(Path(str(path) + "-wal"))
-            page_size = connection.execute("PRAGMA page_size").fetchone()[0]
-            if time.monotonic() >= deadline or wal > 32 + 16384 * (page_size + 24):
-                result["checkpoint_status"] = "deferred"
-            else:
-                result["checkpoint"] = list(connection.execute(
-                    "PRAGMA wal_checkpoint(PASSIVE)").fetchone())
+    try:
+        with connect(path, "ro" if dry_run else "rw", immutable=dry_run) as connection:
+            result["page_size"] = connection.execute("PRAGMA page_size").fetchone()[0]
+            result["freelist_before"] = connection.execute("PRAGMA freelist_count").fetchone()[0]
+            auto = connection.execute("PRAGMA auto_vacuum").fetchone()[0]
+            result["status"] = "dry-run" if dry_run else "not-configured" if auto != 2 else "ok"
+            if not dry_run and auto == 2:
+                connection.set_progress_handler(lambda: int(time.monotonic() >= deadline), 100)
+                try:
+                    while committed_pages < 16384 and time.monotonic() < deadline:
+                        # In rollback mode, acquire the commit lock before doing work;
+                        # otherwise a reader can force rollback after vacuuming pages.
+                        connection.execute("BEGIN EXCLUSIVE")
+                        before = connection.execute("PRAGMA freelist_count").fetchone()[0]
+                        if before == 0:
+                            connection.rollback()
+                            break
+                        pages = min(64, 16384 - committed_pages)
+                        connection.execute(f"PRAGMA incremental_vacuum({pages})").fetchall()
+                        after = connection.execute("PRAGMA freelist_count").fetchone()[0]
+                        connection.commit()
+                        committed_pages += max(0, before - after)
+                        if before == after:
+                            break
+                        time.sleep(0.001)
+                finally:
+                    connection.set_progress_handler(None, 0)
+                if time.monotonic() >= deadline:
+                    result["status"] = "deferred"
+                    result["reason"] = "deadline"
+            result["freelist_after"] = connection.execute("PRAGMA freelist_count").fetchone()[0]
+            if not dry_run:
+                # PASSIVE never waits for readers/writers or truncates WAL. Defer a
+                # large checkpoint rather than let it exceed this run's page budget.
+                wal = file_bytes(Path(str(path) + "-wal"))
+                page_size = connection.execute("PRAGMA page_size").fetchone()[0]
+                if time.monotonic() >= deadline:
+                    result["checkpoint_status"] = "deferred"
+                    result["checkpoint_reason"] = "deadline"
+                elif wal > 32 + 16384 * (page_size + 24):
+                    result["checkpoint_status"] = "deferred"
+                    result["checkpoint_reason"] = "page-budget"
+                else:
+                    result["checkpoint"] = list(connection.execute(
+                        "PRAGMA wal_checkpoint(PASSIVE)").fetchone())
+    except sqlite3.OperationalError as error:
+        reason = reason_label(error)
+        if reason not in ("busy", "deadline"):
+            raise
+        result["status"] = "deferred"
+        result["reason"] = reason
     result["file_bytes_after"] = file_bytes(path)
     result["wal_bytes_after"] = file_bytes(Path(str(path) + "-wal"))
     result["committed_pages"] = committed_pages
@@ -494,17 +632,40 @@ def update_check(dry_run):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--timeout", type=float, default=120,
+                        help="backup budget in seconds (default %(default)s)")
     args = parser.parse_args(argv)
+    if not math.isfinite(args.timeout) or args.timeout <= 0:
+        parser.error("--timeout must be finite and positive")
     failed = False
+    script = Path(__file__).resolve()
+    identity = {"run_id": uuid.uuid4().hex,
+                "version": (script.parent.parent / "VERSION").read_text().strip(),
+                "script_sha256": hashlib.sha256(script.read_bytes()).hexdigest()}
 
-    def task(name, function, *values):
+    def task(name, function, *values, snapshot=False):
         nonlocal failed
+        started = time.monotonic()
+        started_at = datetime.now(timezone.utc).isoformat()
         try:
             report = function(*values)
         except Exception as error:
             failed = True
             report = {"status": "error", "type": type(error).__name__}
-        print(json.dumps({"task": name, **report}, sort_keys=True))
+            if snapshot:
+                report["error_type"] = type(error).__name__
+                report["phase"] = getattr(error, "phase", "unknown")
+                report["reason"] = getattr(error, "snapshot_reason", reason_label(error))
+                report["published"] = getattr(error, "published", False)
+                report["elapsed_ms"] = round((time.monotonic() - started) * 1000, 3)
+                report["budget_ms"] = round(args.timeout * 1000, 3)
+                report["timing_ms"] = getattr(error, "timing_ms", {})
+                if hasattr(error, "cleanup_error_type"):
+                    report["cleanup_error_type"] = error.cleanup_error_type
+                    report["cleanup_reason"] = error.cleanup_reason
+        print(json.dumps({"task": name, **report, **identity, "started_at": started_at,
+                          "finished_at": datetime.now(timezone.utc).isoformat()}, sort_keys=True),
+              flush=True)
 
     try:
         home = Path(os.environ["HOME"])
@@ -518,7 +679,8 @@ def main(argv=None):
                 if args.dry_run:
                     task(profile + ".snapshot", lambda: {"status": "dry-run"})
                 else:
-                    task(profile + ".snapshot", snapshot, database, state, profile)
+                    task(profile + ".snapshot", snapshot, database, state, profile, args.timeout,
+                         snapshot=True)
                 task(profile + ".reclaim", reclaim, database, args.dry_run)
             task("caches", cache_cleanup, args.dry_run)
             task("updates", update_check, args.dry_run)

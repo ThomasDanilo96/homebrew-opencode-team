@@ -1,42 +1,58 @@
-# Tests
+# Isolated tests
 
 ```sh
-node --test tests/*.test.mjs
-node --test --experimental-test-coverage tests/*.test.mjs
-bash tests/setup-smoke.sh
-bash tests/homebrew-workflow.test.sh
-python3 -B -m unittest discover -s tests -p test_maintenance.py
-# Optional integration with an installed V2 binary (no models or database calls):
-OPENCODE_TEAM_NATIVE_TEST_BIN="$(command -v opencode)" node --test --test-name-pattern='native V2 resolves' tests/native-profiles.test.mjs
-# Optional audit of real Hybrid native session exports (not a config mock):
-OPENCODE_TEAM_HYBRID_EXPORT_PREFIX=/path/to/evidence/candidate4 node --test tests/hybrid-evidence.test.mjs
+bash tests/guardrail/runner.sh        # complete local mock suite
+bash tests/guardrail/runner.sh smoke  # installed candidate smoke
 ```
 
-- Node tests cover native launcher/config/migration behavior, a Homebrew install
-  **Ruby DSL mock**, staging safety and real Zsh completion evaluation.
-- Setup smoke exercises installed-package layout with mock native executables,
-  disposable HOME/roots, no auth/model traffic or real dependency installation.
-- Workflow tests retain immutable archive/staging/install/release gates and run
-  actionlint when available. Local PASS is not a remote GitHub Actions result.
-- Permission tests inspect generated JSON, not source regexes. The optional native
-  integration supplies the documented base plus generated rules as session rules
-  to the real permission API. The standalone API host does not register CLI agents;
-  this checks native rule evaluation, not CLI agent registration or shell scanning.
-  Shell command resources (including the MySQL reproducer) are never executed.
+The runner requires macOS `/usr/bin/sandbox-exec`; absence is a nonzero failure,
+not permission to run without isolation. No credentials, native model traffic,
+network provisioning, real cleanup or real LaunchAgent actions are required.
 
-Mocks are passed by absolute path. Disk errors use temporary Node preloads, not
-production test hooks. Tests verify the Sol low coordinator/native effort setting,
-optional medium Plan/Reviewer, Go role split, read-only allowlists, singleton FREE,
-original shared AGENTS.md reference without copying/mutation, explicit missing-rule
-errors, classic bytes/mtime/mode preservation, data persistence, rollback/recovery,
-locking, argument/resume/exit/signal forwarding and credential-environment isolation.
-Legacy runtime/OmO/router/benchmark tests were removed with those implementations,
-not weakened to make retained behavior pass.
+## Boundaries
 
-Live Go/OpenAI authentication, anonymous FREE responses, real Serena/ECC use,
-native model exports, coding and resume were independently exercised in disposable
-profiles. They are **not part of this mock suite**, nor proof of an installed
-formula's auth state. A keg-only Homebrew candidate was installed and `brew test`
-passed separately. Phase A, official-archive and stable-tap remote CI also passed;
-publication-timeout recovery has separate behavioral coverage. See
-[recorded results and pending checks](../docs/validation.md).
+- Copies the current `bin`, `shared`, `tests`, `Formula`, `completions`, `.github`
+  and `VERSION` into a fresh staging directory outside the user's HOME.
+- Runs children with an environment allowlist. HOME, OPENCODE_TEAM_HOME, TMPDIR
+  and zsh TMPPREFIX point into staging; ambient provider credentials, native test
+  binaries, export paths, XDG overrides, NODE_OPTIONS and Docker endpoints are
+  not inherited.
+- Kernel profile permits writes only inside staging and to standard output
+  devices; denies reads of the real HOME, inherited external team root and the
+  external sentinel fixture. TCP/UDP connections are denied. Unix socket bind is
+  permitted for the disposable Docker socket mock, not outbound connections.
+- Launchctl/brew/docker entry points are denied. These are additional guards,
+  not a claim that every alias to every installed executable is enumerated.
+- Broad read access to system/toolchain files and `mach-lookup` remain necessary
+  for macOS/Node. This is a tested containment boundary for this suite, not a
+  general-purpose sandbox for malicious programs or a proof against all IPC.
+- Negative controls run **before** functional suites. They use only an external
+  temporary sentinel, never live DBs, and assert EPERM rather than treating any
+  failed connection as isolation. A failed negative control aborts the run.
+
+Python, Node and shell suite entry points reject direct execution outside staged
+context. Python additionally confines maintenance paths and SQLite arguments
+(including file URIs, bytes and symlinks) to an exclusively owned session root;
+unmocked maintenance subprocess calls fail closed. Its cached tempfile root
+survives environment clearing inside tests. The subprocess lock regression runs
+only beneath the inherited OS sandbox.
+
+Profile path literals are escaped during generation. Generated profiles and all
+fixtures are removed only from the runner's own temporary directories.
+
+## Coverage and interpretation
+
+- Python: snapshots, restoration, WAL/reader/writer contention, filesystem and
+  SQLite errors, phase/deadline reporting, retention recovery, JSON/exit codes.
+- Node: native launcher/config/migration mocks, scoped LaunchAgent lifecycle,
+  cache cleanup against fixture files, packaging via a Homebrew Ruby DSL mock,
+  completion and staged-formula installation.
+- Shell: installed-package smoke and release workflow contracts/mock scenarios.
+- Optional native permission evaluation and real Hybrid session exports remain
+  skipped without explicitly supplied evidence. The default runner deliberately
+  does not inherit these opt-ins; skips are not PASS.
+
+The stable formula still references immutable 0.3.6. The staging renderer adds
+the candidate's guarded test surface and invokes the installed runner's `smoke`
+target. Local Ruby DSL tests are **not** a real `brew install`/`brew test`, remote
+CI result, model/auth check or verification of the scheduled 04:15 execution.

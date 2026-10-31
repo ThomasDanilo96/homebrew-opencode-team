@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+: "${OPENCODE_TEAM_STAGING_ROOT:?Run tests/guardrail/runner.sh instead}"
 ROOT="${OPENCODE_TEAM_PACKAGE_ROOT:-$(cd -P "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 bash -n "$ROOT/bin/opencode-team"
 node --check "$ROOT/shared/profiles.mjs"

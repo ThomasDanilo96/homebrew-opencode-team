@@ -2,6 +2,7 @@
 # Workflow assertions below intentionally match literal $variables, not expansions.
 # shellcheck disable=SC2016
 set -euo pipefail
+: "${OPENCODE_TEAM_STAGING_ROOT:?Run tests/guardrail/runner.sh instead}"
 
 workflow="${1:-.github/workflows/homebrew-install.yml}"
 expected_version="$(tr -d '[:space:]' < VERSION)"
@@ -40,7 +41,6 @@ grep -Fq 'brew update' "$workflow"
 grep -Fq 'timeout-minutes: 60' "$workflow"
 grep -Fq 'brew install --verbose ThomasDanilo96/opencode-team/opencode-team' "$workflow"
 grep -Fq 'runs-on: macos-26' "$workflow"
-grep -Fq 'node --test tests/*.test.mjs' "$workflow"
 grep -Fq 'shared/profiles.mjs' "$workflow"
 grep -Fq 'prepublication-staging:' "$workflow"
 grep -Fq "if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/prerelease/') && needs.release_state.outputs.published == 'false'" "$workflow"
@@ -70,6 +70,16 @@ prepublication = text.split("  clean-install:", 1)[0]
 if "brew tap ThomasDanilo96/opencode-team" in prepublication:
     raise SystemExit("prepublication/official archive validation must not tap the stable formula")
 
+source_validation = text.split("  source-validation:\n", 1)[1].split("  release_state:\n", 1)[0]
+if "bash tests/guardrail/runner.sh" not in source_validation:
+    raise SystemExit("source-validation must use the guardrail runner instead of raw suite calls")
+if "bash tests/homebrew-workflow.test.sh" in source_validation:
+    raise SystemExit("source-validation must not call the workflow test directly (use guardrail runner)")
+if "node --test tests/*.test.mjs" in source_validation:
+    raise SystemExit("source-validation must not call node tests directly (use guardrail runner)")
+if "python3 -B -m unittest" in source_validation:
+    raise SystemExit("source-validation must not call python tests directly (use guardrail runner)")
+
 staging = text.split("  prepublication-staging:\n", 1)[1].split("  official-archive-validation:\n", 1)[0]
 staging_gate = "if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/prerelease/') && needs.release_state.outputs.published == 'false'"
 if staging_gate not in staging or staging.count("    if:") != 1:
@@ -86,6 +96,10 @@ if "start-docker-desktop.sh" in staging or "brew install --cask docker" in stagi
     raise SystemExit("Phase A Homebrew package validation must not provision Docker or run Docker runtime tests")
 if 'tests/native-profiles.test.mjs' not in Path("tests/setup-smoke.sh").read_text():
     raise SystemExit("Phase A must test native profile isolation from the installed candidate package")
+if 'bash "$package_root/tests/guardrail/runner.sh" smoke' not in staging:
+    raise SystemExit("Phase A must use the guardrail runner smoke target instead of raw setup-smoke.sh")
+if 'bash "$package_root/tests/setup-smoke.sh"' in staging:
+    raise SystemExit("Phase A must not call installed setup-smoke.sh directly (use guardrail runner)")
 
 official = text.split("  official-archive-validation:\n", 1)[1].split("  clean-install:\n", 1)[0]
 if "github.event_name == 'push' && github.ref_type == 'tag'" not in official or 'archive_url="https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v$version.tar.gz"' not in official:
@@ -94,6 +108,12 @@ if "start-docker-desktop.sh" in official or "brew install --cask docker" in offi
     raise SystemExit("official archive packaging validation must not provision Docker Desktop")
 if "gh run list" not in official or "prepublication-staging" not in official or 'test "$tag_commit" = "$GITHUB_SHA"' not in official:
     raise SystemExit("Phase B must prove Phase A succeeded for the exact tagged candidate commit")
+if 'bash "$package_root/tests/guardrail/runner.sh" smoke' not in official:
+    raise SystemExit("Phase B must use the guardrail runner smoke target instead of raw native/setup-smoke")
+if 'bash "$package_root/tests/setup-smoke.sh"' in official:
+    raise SystemExit("Phase B must not call installed setup-smoke.sh directly (use guardrail runner)")
+if 'node --test "$package_root/tests/native-profiles.test.mjs"' in official:
+    raise SystemExit("Phase B must not call installed native test directly (use guardrail runner)")
 
 clean_install = text.split("  clean-install:\n", 1)[1].split("  publish-stable-release:\n", 1)[0]
 if "start-docker-desktop.sh" in clean_install or "brew install --cask docker" in clean_install or "opencode-team setup" in clean_install or "deep-audit-runtime-smoke.sh" in clean_install:
@@ -178,3 +198,49 @@ print(json.dumps({'tagName': 'v0.1.66' if scenario == 'wrong-tag' else 'v0.2.0',
             assert not (root / 'create-called').exists(), 'existing release must never invoke create'
         print('Release scenario PASS:', scenario)
 PY
+
+# ---------------------------------------------------------------------------
+# Behavioral regression: homebrew-isolated.sh receipt verification.
+# The script is source-guarded (returns when sourced), exposing
+# verify_receipt() for direct testing. The original bug used
+# [[ -f "$cellar/"*/INSTALL_RECEIPT.json ]] which never expands globs and
+# always failed -> permanent BLOCKED. The fix uses a for-loop glob with
+# [ -f ]. We verify both outcomes: receipt present -> success, receipt
+# absent -> failure (BLOCKED).
+#
+# Full install-flow PASS/BLOCKED cannot be tested here: it requires real
+# brew + network (bottle fetch), which the sandbox denies by design. These
+# tests cover the in-script verification logic that was actually buggy.
+# ---------------------------------------------------------------------------
+source tests/homebrew-isolated.sh
+# Mock brew script: responds to --cellar with a path we control.
+mock_brew="$(mktemp "$TMPDIR/hb-mock-brew.XXXXXXXX")"
+cat > "$mock_brew" <<'MOCKEOF'
+#!/usr/bin/env bash
+if [[ "$1" == "--cellar" ]]; then
+  printf '%s' "${MOCK_CELLAR:-}"
+  exit 0
+fi
+exit 0
+MOCKEOF
+chmod +x "$mock_brew"
+brew="$mock_brew"
+verify_one() {
+  local expect_rc="$1" rc=0
+  verify_receipt "some-formula" || rc=$?
+  [[ "$rc" == "$expect_rc" ]] || { echo "FAIL: verify_receipt expected rc=$expect_rc got rc=$rc" >&2; exit 1; }
+}
+# Case: receipt present -> verify_receipt succeeds (PASS path).
+# Mimics real layout: $CELLAR/<formula>/<version>/INSTALL_RECEIPT.json
+cell_dir="$(mktemp -d "$TMPDIR/hb-rcpt.XXXXXXXX")"
+mkdir -p "$cell_dir/0.3.0"
+touch "$cell_dir/0.3.0/INSTALL_RECEIPT.json"
+MOCK_CELLAR="$cell_dir" verify_one 0
+# Case: cellar exists but no receipt -> verify_receipt fails (BLOCKED path).
+empty_dir="$(mktemp -d "$TMPDIR/hb-empty.XXXXXXXX")"
+mkdir -p "$empty_dir/0.3.0"
+MOCK_CELLAR="$empty_dir" verify_one 1
+# Case: cellar dir missing entirely -> verify_receipt fails (BLOCKED path).
+MOCK_CELLAR="$empty_dir/nonexistent" verify_one 1
+rm -rf "$cell_dir" "$empty_dir" "$mock_brew"
+echo "homebrew-isolated verify_receipt behavioral regression PASS"

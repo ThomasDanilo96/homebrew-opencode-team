@@ -27,7 +27,7 @@ _opencode-team() {
     argument)
       case "$words[2]" in
         cleanup)
-          cleanup_actions=('enable:Schedule maintenance daily' 'disable:Stop scheduling and persist the preference' 'uninstall:Remove only the owned agent' 'status:Show scheduling preference' 'run:Run non-deleting session maintenance and safe caches' 'dry-run:Inspect maintenance without data changes')
+          cleanup_actions=('enable:Schedule maintenance daily' 'disable:Stop scheduling and persist the preference' 'uninstall:Remove only the owned agent' 'status:Show scheduling preference' 'run:Run non-deleting session maintenance and safe caches' 'dry-run:Inspect maintenance without data changes' 'legacy-status:Inspect exact legacy jobs without changes' 'legacy-retire:Archive one recognized legacy job with explicit approval')
           _describe 'cleanup action' cleanup_actions
           ;;
         start|config) _describe 'profile' profiles ;;

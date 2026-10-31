@@ -16,6 +16,7 @@
 // Run:
 //   node --test tests/hybrid-evidence.test.mjs
 
+import './guardrail/assert-isolated.mjs';
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import fs from 'node:fs';

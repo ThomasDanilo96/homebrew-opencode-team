@@ -113,6 +113,27 @@ the ownership/preference receipt and explicitly selected maintenance paths, not 
 different macOS user's schedule. Existing legacy jobs are never silently rewritten
 by setup: disable them before enabling this one if migrating an older installation.
 
+#### 0.3.7 candidate changes (not a published stable release)
+
+- Logical checksums retain rc2 compatibility with lower BLOB serialization cost;
+  online backup pins a read-only WAL view to prevent restart starvation.
+  Thirty consecutive representative snapshots passed, including concurrent WAL
+  and CPU/I/O load; this is qualification evidence, not a production guarantee.
+- Snapshot errors include phase/reason, per-phase timings and publication state;
+  the Python script accepts `--timeout SECONDS` (operational default 120, cooperative;
+  see the measured budget in `docs/maintenance/timeout-benchmark.md`).
+- Each task carries a run ID, code version/hash and UTC start/finish timestamps.
+- `opencode-team cleanup legacy-status` inspects six recognized obsolete jobs;
+  `cleanup legacy-retire LABEL --approve` explicitly archives one verified plist
+  and unloads only that exact owned label. Setup never performs this migration.
+  Logs, session data and historical backups are not targets; archives are never
+  overwritten. Approval is required separately for each real service change.
+- `shared/maintenance_evidence.py` captures read-only baselines and verifies new
+  logs/snapshot integrity. A calendar match is not proof of a scheduled launch.
+
+See [release readiness and controlled deployment](docs/maintenance/opencode-team-037-final-release-readiness.md)
+for blocked Homebrew checks, preserved incident evidence and the code-only rollback.
+
 ### BEST code quality and browser checks
 
 BEST alone configures official `@playwright/mcp@0.0.83` over native V2
@@ -332,7 +353,7 @@ The workflow deliberately separates candidate testing from publication. The
 following is the release procedure; completed gates are recorded in validation:
 
 1. After approval, commit and push the reviewed source to `prerelease/vVERSION`
-   using the candidate `VERSION` (currently `0.3.6`).
+   using the candidate `VERSION` (currently `0.3.7`).
    Run **Homebrew Install** manually on that branch: Phase A installs the exact
    candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
 2. Only after Phase A succeeds, authorize the immutable `vVERSION` tag on the

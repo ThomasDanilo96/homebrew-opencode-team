@@ -1,0 +1,53 @@
+; sandbox-exec profile for the mock-only test suite (macOS).
+; Placeholders are replaced with escaped string literals by the runner.
+;
+; CONTAINMENT MODEL (verified by negative controls before running suites):
+;   Reads:   real user HOME and the OUTSIDE_ROOT sentinel dir are DENIED;
+;            everything else (system + staging) is allowed.
+;   Writes:  ONLY staging root + /dev/null + /dev/stderr + /dev/stdout.
+;            Global temp is NOT writable (proves staging-only containment).
+;   Process: any binary may exec EXCEPT maintenance tools (launchctl, brew, docker).
+;   Network: unix domain socket bind allowed (mock docker.sock); all else denied.
+;   Temp:    all temp ops stay in staging because tempfile.tempdir is cached to
+;            $STAGING_ROOT/tmp by the Python guard at import time.
+
+(version 1)
+
+; --- DENY dangerous maintenance tool binaries ---
+(deny process-exec (literal "/bin/launchctl"))
+(deny process-exec (literal "/usr/bin/launchctl"))
+(deny process-exec (literal "/opt/homebrew/bin/brew"))
+(deny process-exec (literal "/usr/local/bin/brew"))
+(deny process-exec (literal "/usr/bin/docker"))
+(deny process-exec (literal "/usr/local/bin/docker"))
+(deny process-exec (literal "/opt/homebrew/bin/docker"))
+
+; --- ALLOW process management ---
+(allow process-exec*)
+(allow process-fork)
+(allow signal)
+
+; --- ALLOW system information (Node/libuv requirement — broad, documented) ---
+(allow sysctl-read)
+(allow mach-lookup)
+
+; --- FILE READS: deny HOME + outside sentinel FIRST, then allow everything ---
+(deny file-read* (subpath @REAL_HOME@))
+(deny file-read* (subpath @REAL_TEAM@))
+(deny file-read* (subpath @OUTSIDE_ROOT@))
+(allow file-read*)
+
+; --- FILE WRITES: ONLY staging root + dev outputs + zsh heredoc temp dir ---
+; TMPPREFIX dir lets zsh create heredoc temp files inside staging (default
+; /tmp/zsh would escape staging). Set by the runner via env TMPPREFIX.
+(allow file-write* (subpath @STAGING_ROOT@))
+(allow file-write* (literal "/dev/null"))
+(allow file-write* (literal "/dev/stderr"))
+(allow file-write* (literal "/dev/stdout"))
+
+; --- NETWORK: unix bind only (mock docker.sock); everything else denied ---
+(allow network-bind)
+(deny network*)
+
+; --- DEFAULT DENY ---
+(deny default)

@@ -26,6 +26,173 @@ const sharedRulesFile = path.resolve(process.env.OPENCODE_TEAM_RULES_FILE || pat
 const managed = profiles.flatMap((p) => [configFile(p), instructionFile(p)]);
 const json = (value) => `${JSON.stringify(value, null, 2)}\n`;
 const fail = (message) => { throw new Error(message); };
+// Only exact dispatcher-backed legacy labels are eligible, never retired by setup.
+// best-retention has a separate lifecycle and is deliberately excluded.
+const LEGACY_NAMESPACE = 'it.danilodantoni.opencode-team.';
+const LEGACY_RETIRE_LABELS = [
+  'best-tool-output-gc', 'host-storage-gc', 'openai-retention',
+  'playwright-gc', 'runtime-gc', 'version-check',
+].map((task) => `${LEGACY_NAMESPACE}${task}`);
+const PRODUCT_BINARY = '/opt/homebrew/bin/opencode-team';
+const PRODUCT_SUBCOMMAND = 'maintenance';
+// Parse a plist via the native plutil tool (macOS). Returns the decoded JSON.
+function parsePlist(plist) {
+  const result = spawnSync('/usr/bin/plutil', ['-convert', 'json', '-o', '-', plist], { encoding: 'utf8' });
+  if (result.error || result.status !== 0) fail(`Refusing unparseable plist: ${plist}`);
+  try { return JSON.parse(result.stdout); } catch (error) { fail(`Refusing plist with invalid JSON: ${plist}`); }
+}
+function legacyArchivePath(label) {
+  return path.join(roots.state, 'legacy-archive', `${label}.plist`);
+}
+// True if the login HOME matches $HOME (launchd GUI domain). On mismatch, status
+// logs a notice and returns false (caller returns); retire fails.
+function legacyHomeGuard(statusOnly) {
+  const ok = path.resolve(home) === path.resolve(os.userInfo().homedir);
+  if (ok) return true;
+  if (statusOnly) { console.log('Legacy status: custom HOME/root; real LaunchAgents not addressed.'); return false; }
+  fail('Legacy retire requires the login user HOME; custom HOME/root cannot address the real launchd GUI domain.');
+}
+function readLegacyReceipt(receiptFile, uid) {
+  if (!fs.existsSync(receiptFile)) return {};
+  safe(receiptFile);
+  const stat = fs.statSync(receiptFile);
+  if (stat.uid !== uid || stat.nlink !== 1 || (stat.mode & 0o022)) fail(`Refusing unsafe legacy receipt: ${receiptFile}`);
+  let parsed;
+  try { parsed = JSON.parse(fs.readFileSync(receiptFile, 'utf8')); } catch (error) { fail('Invalid legacy receipt'); }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) fail('Invalid legacy receipt');
+  for (const label of Object.keys(parsed)) {
+    if (!LEGACY_RETIRE_LABELS.includes(label)) fail('Invalid legacy receipt');
+    const entry = parsed[label];
+    if (!entry || typeof entry !== 'object' || typeof entry.retired !== 'boolean') fail('Invalid legacy receipt');
+    if (entry.archive !== legacyArchivePath(label)) fail('Invalid legacy receipt');
+    if (typeof entry.hash !== 'string' || !/^[0-9a-f]{64}$/.test(entry.hash)) fail('Invalid legacy receipt');
+    const expected = [PRODUCT_BINARY, PRODUCT_SUBCOMMAND, label.slice(LEGACY_NAMESPACE.length)];
+    if (!Array.isArray(entry.argv) || entry.argv.length !== 3 || entry.argv.some((arg, i) => arg !== expected[i])) fail('Invalid legacy receipt');
+  }
+  return parsed;
+}
+function legacyLaunchState(label, uid) {
+  const result = spawnSync('/bin/launchctl', ['print', `gui/${uid}/${label}`], { encoding: 'utf8', timeout: 15000 });
+  if (result.error || (result.status !== 0 && !(result.status === 113 && /Could not find service/.test(result.stderr)))) fail(`launchctl print failed: ${result.error?.message || result.stderr || result.status}`);
+  return { loaded: result.status === 0, output: result.stdout };
+}
+function legacyStatus() {
+  if (process.platform !== 'darwin') { console.log('Legacy cleanup: macOS only.'); return; }
+  if (!legacyHomeGuard(true)) return;
+  const uid = process.getuid();
+  const launchAgents = path.join(home, 'Library/LaunchAgents');
+  let valid = 0;
+  let retired = 0;
+  const lines = [];
+  let receipt;
+  try { receipt = readLegacyReceipt(path.join(roots.state, 'legacy-receipt.json'), uid); }
+  catch (error) { lines.push(`  receipt: invalid (${error.message})`); receipt = {}; }
+  for (const label of LEGACY_RETIRE_LABELS) {
+    const plist = path.join(launchAgents, `${label}.plist`);
+    try {
+      const { loaded } = legacyLaunchState(label, uid);
+      safe(plist);
+      if (!fs.existsSync(plist)) {
+        lines.push(`  ${label}: absent, ${loaded ? 'loaded (plist missing)' : 'not loaded'}`);
+        const entry = receipt[label];
+        if (entry) {
+          if (loaded) continue;
+          safe(entry.archive);
+          if (!fs.existsSync(entry.archive) || fs.statSync(entry.archive).uid !== uid) fail('archive missing or not owned');
+          if (crypto.createHash('sha256').update(fs.readFileSync(entry.archive)).digest('hex') !== entry.hash) fail('archive content hash differs');
+          if (entry.retired) { lines.push(`  ${label}: retired (receipt; archive verified)`); retired++; }
+          else lines.push(`  ${label}: in progress (intent recorded)`);
+        }
+        continue;
+      }
+      if (fs.statSync(plist).uid !== uid) { lines.push(`  ${label}: present, NOT OWNED (uid ${fs.statSync(plist).uid}); skipped`); continue; }
+      const parsed = parsePlist(plist);
+      if (parsed.Label !== label) { lines.push(`  ${label}: present, Label mismatch; skipped`); continue; }
+      const task = label.slice(LEGACY_NAMESPACE.length);
+      const expected = [PRODUCT_BINARY, PRODUCT_SUBCOMMAND, task];
+      const argv = parsed.ProgramArguments;
+      if (!Array.isArray(argv) || argv.length !== 3 || argv[0] !== expected[0] || argv[1] !== expected[1] || argv[2] !== expected[2]) {
+        lines.push(`  ${label}: present, unexpected command; skipped`); continue;
+      }
+      if (parsed.Program !== undefined) { lines.push(`  ${label}: present, unexpected Program key; skipped`); continue; }
+      lines.push(`  ${label}: present, valid, ${loaded ? 'loaded' : 'not loaded'}`);
+      valid++;
+    } catch (error) {
+      lines.push(`  ${label}: suspicious (${error.message})`);
+    }
+  }
+  console.log('Legacy LaunchAgents status (read-only):');
+  for (const line of lines) console.log(line);
+  console.log(`${LEGACY_NAMESPACE}best-retention: not managed here (preserved for rollback per docs).`);
+  console.log(`No changes made. ${valid} valid present, ${retired}/${LEGACY_RETIRE_LABELS.length} retired. Use 'opencode-team cleanup legacy-retire LABEL --approve' after inspection.`);
+}
+function legacyRetire(label) {
+  if (!LEGACY_RETIRE_LABELS.includes(label)) fail(`Refusing unknown label: ${label}`);
+  if (process.platform !== 'darwin') fail('Legacy retire: macOS only.');
+  if (!legacyHomeGuard(false)) return;
+  const uid = process.getuid();
+  const plist = path.join(home, 'Library/LaunchAgents', `${label}.plist`);
+  const archivePath = legacyArchivePath(label);
+  const archiveDir = path.dirname(archivePath);
+  const receiptFile = path.join(roots.state, 'legacy-receipt.json');
+  for (const file of [plist, archiveDir, archivePath, receiptFile]) safe(file, file === archiveDir);
+  const receipt = readLegacyReceipt(receiptFile, uid);
+  const task = label.slice(LEGACY_NAMESPACE.length);
+  const expectedArgv = [PRODUCT_BINARY, PRODUCT_SUBCOMMAND, task];
+  const prior = receipt[label];
+  const { loaded, output } = legacyLaunchState(label, uid);
+  if (!fs.existsSync(plist) && loaded) fail(`Refusing retire: ${label} is still loaded by launchd but its plist is missing; resolve before re-approving.`);
+  // Fail-closed: never overwrite an existing archive, even with a matching receipt.
+  if (fs.existsSync(plist) && fs.existsSync(archivePath)) fail(`Refusing retire: both plist and archive exist for ${label}; will not overwrite the archive.`);
+  if (fs.existsSync(plist)) {
+    const stat = fs.statSync(plist);
+    if (stat.uid !== uid) fail(`Refusing plist not owned by this user: ${plist}`);
+    if (stat.nlink !== 1) fail(`Refusing plist with unexpected link count: ${plist}`);
+    if (stat.mode & 0o022) fail(`Refusing plist writable by group or other: ${plist}`);
+    const parsed = parsePlist(plist);
+    if (parsed.Label !== label) fail(`Refusing plist with unexpected Label: ${plist}`);
+    const argv = parsed.ProgramArguments;
+    if (!Array.isArray(argv) || argv.length !== 3 || argv[0] !== expectedArgv[0] || argv[1] !== expectedArgv[1] || argv[2] !== expectedArgv[2]) fail(`Refusing plist with unexpected command: ${plist}`);
+    if (parsed.Program !== undefined) fail(`Refusing plist with unexpected Program key: ${plist}`);
+    const target = `gui/${uid}/${label}`;
+    if (loaded && !output.split('\n').some((line) => line.trim() === `path = ${plist}`)) fail(`Refusing retire: ${label} loaded but launchctl reports a different path.`);
+    // Cross-device guard before any destructive step: fail fast, no intent/bootout.
+    mkdir(archiveDir);
+    const archiveStat = fs.statSync(archiveDir);
+    if (archiveStat.uid !== uid || (archiveStat.mode & 0o077)) fail(`Refusing unsafe legacy archive directory: ${archiveDir}`);
+    if (stat.dev !== archiveStat.dev) fail(`Refusing retire: ${label} LaunchAgents and archive are on different filesystems (${plist}); colocate them and re-approve.`);
+    const bytes = fs.readFileSync(plist);
+    const hash = crypto.createHash('sha256').update(bytes).digest('hex');
+    // Record intent + hash before destructive steps so a crash is recoverable.
+    receipt[label] = { retired: false, archive: archivePath, hash, argv: expectedArgv };
+    atomicWrite(receiptFile, json(receipt));
+    if (loaded) command('/bin/launchctl', ['bootout', target], { timeout: 15000 });
+    if (fs.existsSync(archivePath)) fail(`Refusing retire: archive already exists at ${archivePath}.`);
+    try {
+      fs.renameSync(plist, archivePath);
+    } catch (error) {
+      // EXDEV at rename time (paranoid: pre-check above should have caught it): keep
+      // the intent truthful rather than faking a rollback, since bootout already ran.
+      if (error.code === 'EXDEV') fail(`Refusing retire: ${label} could not be moved to the archive (different filesystem); colocate them and re-approve.`);
+      throw error;
+    }
+    fs.chmodSync(archivePath, 0o600);
+    if (crypto.createHash('sha256').update(fs.readFileSync(archivePath)).digest('hex') !== hash) fail(`Refusing retire: archived bytes hash mismatch for ${label}.`);
+  } else if (!prior || !fs.existsSync(archivePath)) {
+    fail(`Refusing retire: no plist and no prior archive for ${label}; nothing to do.`);
+  } else {
+    const st = fs.statSync(archivePath);
+    if (st.uid !== uid) fail(`Refusing retire: archive not owned by this user: ${archivePath}`);
+    if (crypto.createHash('sha256').update(fs.readFileSync(archivePath)).digest('hex') !== prior.hash) fail(`Refusing retire: archive content hash differs from intent for ${label}.`);
+    if (prior.retired) {
+      console.log(`${label}: already retired; archive verified at ${archivePath}. No changes.`);
+      return;
+    }
+  }
+  receipt[label] = { retired: true, archive: archivePath, hash: receipt[label].hash, argv: expectedArgv, retiredAt: new Date().toISOString() };
+  atomicWrite(receiptFile, json(receipt));
+  console.log(`${label}: retired. Archived to ${archivePath}; LaunchAgents cleared; logs, state, and data untouched.`);
+}
 
 // Reject links in every existing ancestor, including dangling links. Never walk
 // historical profile trees recursively: only boundaries used by native V2.
@@ -465,7 +632,10 @@ function launch(profile, args) {
   });
 }
 function help() {
-  console.log(`OpenCode Team: native V2 profiles\n\n  opencode-team best|free [native OpenCode arguments]\n  opencode-team start best|free [native OpenCode arguments]\n  opencode-team setup\n  opencode-team doctor\n  opencode-team config best|free\n  opencode-team rollback BACKUP_ID\n  opencode-team cleanup enable|disable|uninstall|status|run|dry-run\n  opencode-team version\n\nBEST: OpenAI coordinator + Go workers; connect both subscriptions with /connect.\nFREE: anonymous MiMo only; no paid fallback.\nmacOS setup schedules safe maintenance daily; session deletion is disabled.\nDisable/uninstall persist across setup.\nCustom HOME/root skips automatic scheduling; explicit enable requires the login HOME.\nResume natively: opencode-team best -s SESSION_ID\nNative CLI arguments are preserved, with --standalone added in command scope.\nSee README for migration, backup and security boundaries.`);
+  console.log(`OpenCode Team: native V2 profiles\n\n  opencode-team best|free [native OpenCode arguments]\n  opencode-team start best|free [native OpenCode arguments]\n  opencode-team setup\n  opencode-team doctor\n  opencode-team config best|free\n  opencode-team rollback BACKUP_ID\n  opencode-team cleanup enable|disable|uninstall|status|run|dry-run
+  opencode-team cleanup legacy-status
+  opencode-team cleanup legacy-retire LABEL --approve
+  opencode-team version\n\nBEST: OpenAI coordinator + Go workers; connect both subscriptions with /connect.\nFREE: anonymous MiMo only; no paid fallback.\nmacOS setup schedules safe maintenance daily; session deletion is disabled.\nDisable/uninstall persist across setup.\nCustom HOME/root skips automatic scheduling; explicit enable requires the login HOME.\nResume natively: opencode-team best -s SESSION_ID\nNative CLI arguments are preserved, with --standalone added in command scope.\nSee README for migration, backup and security boundaries.`);
 }
 try {
   const [action = 'help', ...args] = process.argv.slice(2);
@@ -475,10 +645,18 @@ try {
   else if (action === 'version' || action === '--version') console.log(`OpenCode Team ${fs.readFileSync(path.join(packageRoot, 'VERSION'), 'utf8').trim()}`);
   else if (action === 'setup' && !args.length) setup();
   else if (action === 'doctor' && !args.length) doctor();
-  else if (action === 'cleanup' && args.length === 1) {
-    if (process.platform !== 'darwin' || ['status', 'dry-run'].includes(args[0])) cleanup(args[0]);
-    else if (args[0] === 'run') cleanup(args[0]);
-    else locked(() => cleanup(args[0]));
+  else if (action === 'cleanup') {
+    if (args[0] === 'legacy-status' && args.length === 1) legacyStatus();
+    else if (args[0] === 'legacy-retire' && args.length === 3 && args[2] === '--approve') {
+      if (process.platform !== 'darwin') fail('Legacy retire: macOS only.');
+      locked(() => legacyRetire(args[1]));
+    }
+    else if (args.length === 1) {
+      if (process.platform !== 'darwin' || ['status', 'dry-run'].includes(args[0])) cleanup(args[0]);
+      else if (args[0] === 'run') cleanup(args[0]);
+      else locked(() => cleanup(args[0]));
+    }
+    else fail(`Unknown cleanup subcommand: cleanup ${args.join(' ')}. Use --help for supported subcommands.`);
   }
   else if (action === 'config' && args.length === 1) { validateProfile(args[0]); console.log(configFile(args[0])); }
   else if (action === 'rollback' && args.length === 1) { preflight(); locked(() => transaction(readManifest(args[0]))); }

@@ -39,14 +39,12 @@ jobs:
           [[ "$expected_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           brew install actionlint
           actionlint .github/workflows/homebrew-install.yml
-          bash tests/homebrew-workflow.test.sh
+          bash tests/guardrail/runner.sh
           ruby -c Formula/opencode-team.rb
           ruby -c .github/scripts/render-staging-formula.rb
           bash -n bin/opencode-team tests/setup-smoke.sh
           zsh -n completions/_opencode-team
           node --check shared/profiles.mjs
-          node --test tests/*.test.mjs
-          python3 -B -m unittest discover -s tests -p test_maintenance.py
 
   release_state:
     needs: source-validation
@@ -146,8 +144,7 @@ jobs:
           test -f "$package_root/shared/profiles.mjs"
           test -f "$package_root/shared/ecc.lock"
           gitleaks dir "$package_root"
-          CI=true \
-            OPENCODE_TEAM_PACKAGE_ROOT="$package_root" bash "$package_root/tests/setup-smoke.sh"
+          bash "$package_root/tests/guardrail/runner.sh" smoke
 
   official-archive-validation:
     needs: [source-validation, release_state]
@@ -231,10 +228,8 @@ jobs:
           package_root="$(brew --prefix opencode-team/staging/opencode-team-official)/libexec"
           test "$(command -v opencode-team)" = "$(brew --prefix)/bin/opencode-team"
           test "$(cd "$RUNNER_TEMP" && opencode-team version)" = "OpenCode Team $version"
-          node --test "$package_root/tests/native-profiles.test.mjs"
           gitleaks dir "$package_root"
-          CI=true \
-            OPENCODE_TEAM_PACKAGE_ROOT="$package_root" bash "$package_root/tests/setup-smoke.sh"
+          bash "$package_root/tests/guardrail/runner.sh" smoke
 
   clean-install:
     needs: release_state
