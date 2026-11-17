@@ -638,10 +638,10 @@ function cleanState(value, now) {
           result.configuration[key] = value;
         }
         for (const key of ['registeredAt', 'unloadedAt']) if (entry[key] !== undefined) result[key] = iso(timestamp(entry[key]));
-        for (const name of ['model.request', 'http.request', 'experimental.ws.handshake', 'heartbeat']) {
+        for (const name of ['model.request', 'http.request', 'experimental.ws.handshake', 'heartbeat', 'prompt']) {
           const callback = entry.callbacks[name];
           if (callback === undefined) continue;
-          if (!object(callback) || !['MONITOR_OBSERVED', 'PASSED', 'BLOCKED', 'ERROR'].includes(callback.outcome)
+          if (!object(callback) || !['MONITOR_OBSERVED', 'PASSED', 'BLOCKED', 'ERROR', 'APPLIED', 'SKIPPED'].includes(callback.outcome)
               || !['monitor', 'active', 'disabled'].includes(callback.mode)
               || typeof callback.liveSubscription !== 'boolean') throw new Error('invalid runtime callback receipt');
           result.callbacks[name] = { at: iso(timestamp(callback.at)), outcome: callback.outcome,
@@ -724,6 +724,10 @@ function cleanState(value, now) {
     if (entry.estimatedTaskPercent !== undefined) {
       decision.estimatedTaskPercent = entry.estimatedTaskPercent === null ? null : number(entry.estimatedTaskPercent, 'estimated task percent', 0, 100);
     }
+    if (entry.applied != null) {
+      if (typeof entry.applied !== 'string' || !/^[a-z0-9-]+\/[a-z0-9.+#-]+$/i.test(entry.applied) || entry.applied.length > 200) throw new Error('invalid applied model');
+      decision.applied = entry.applied;
+    } else if (entry.applied === null) decision.applied = null;
     return decision;
   }).filter(recent).sort((a, b) => timestamp(a.at) - timestamp(b.at)).slice(-MAX_ENTRIES);
   state.usage = value.usage.map(cleanUsage).filter(recent).sort((a, b) => timestamp(a.at) - timestamp(b.at)).slice(-MAX_ENTRIES);

@@ -302,6 +302,73 @@ export async function setupGovernor(ctx, dependencies = {}) {
         mode: observation.mode, liveSubscription: Boolean(liveSubscription) } } });
     }
   });
+  // Regulation must reach the request, not only the record. This native prompt
+  // hook runs before the runner resolves the turn's model, so switching the
+  // session here is what the turn actually runs on. A subagent child was
+  // already routed when it was dispatched; re-routing it would fight
+  // execute.before and count its budget twice.
+  await ctx.session.hook('prompt', guarded(async event => {
+    let mode = readQuotaState(file).policy?.mode ?? 'monitor';
+    let outcome = 'SKIPPED';
+    try {
+      const session = await ctx.session.get({ sessionID: event.sessionID });
+      if (!session || session.parentID || !kinds[session.agent]) return;
+      const configured = await configuredModel(session.agent);
+      if (!configured) return;
+      const models = [candidate(session.agent, configured)];
+      // The same bounded cross-provider choice a new delegation gets: only
+      // General may leave its configured provider, and only toward OpenAI.
+      if (session.agent === 'general') {
+        const alternative = await configuredModel('specialist');
+        if (alternative?.startsWith('openai/')) models.push(candidate(session.agent, alternative));
+      }
+      const leaseID = randomUUID();
+      const { state, decision } = await choose(session.agent, models, leaseID);
+      mode = state.policy?.mode ?? mode;
+      // Prompt routing decides, it does not dispatch: its capacity lease ends
+      // with the decision so parallel prompts can never starve each other.
+      // Admission still reserves the real percent at model.request.
+      await updateQuotaState(file, current => ({ ...current,
+        leases: (current.leases ?? []).filter(lease => lease.id !== leaseID) }));
+      if (decision.blocked) {
+        // Monitor keeps observing without refusing work. Active has no
+        // admissible route left for this agent, so the turn stops before an
+        // unregulated request can be queued.
+        if (active(state)) blocked(decision.reason);
+        outcome = 'MONITOR_OBSERVED';
+        return;
+      }
+      const applied = decision.candidate.model;
+      const effective = session.model
+        ? `${session.model.providerID}/${session.model.id}${session.model.variant ? `#${session.model.variant}` : ''}`
+        : configured;
+      if (active(state)) {
+        if (effective !== applied) {
+          const [head, variant] = applied.split('#');
+          const slash = head.indexOf('/');
+          await ctx.session.switchModel({ sessionID: event.sessionID, model: {
+            providerID: head.slice(0, slash), id: head.slice(slash + 1),
+            ...(variant ? { variant } : {}) } });
+        }
+        // The applied model is the evidence the report reads, so it is written
+        // onto the very decision that recommended it — only when this turn
+        // will really run on that recommendation.
+        await updateQuotaState(file, current => {
+          const index = current.decisions.findLastIndex(entry => entry.scope === 'routing'
+            && entry.at === decision.at && entry.candidate?.model === applied && entry.applied === undefined);
+          if (index >= 0) current.decisions[index].applied = applied;
+          return current;
+        });
+        outcome = 'APPLIED';
+      } else outcome = 'MONITOR_OBSERVED';
+    } catch (error) {
+      outcome = error.message?.includes('BEST_QUOTA_BLOCKED') ? 'BLOCKED' : 'ERROR';
+      throw error;
+    } finally {
+      await attest({ callbacks: { prompt: { at: new Date().toISOString(), outcome,
+        mode, liveSubscription: false } } });
+    }
+  }));
   await ctx.session.hook('model.request', observedRequest('model.request', true, false));
   // Native retries may reuse an already prepared request. Inspect the final
   // HTTP attempt and WebSocket handshake as well, without changing either.

@@ -245,6 +245,38 @@ test('runtime coverage admits an idle location through its heartbeat and never w
   'http.request': { at: at(now - 30000), outcome: 'PASSED', mode: 'active', liveSubscription: true } }), 'PASS');
 });
 
+test('status reports whether the OpenAI/Go routing choice was applied automatically', async t => {
+  const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'quota-routing-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'state.json');
+  const at = new Date().toISOString();
+  const decision = (extra = {}) => ({ at, kind: 'coding', blocked: false, scope: 'routing', enforced: true,
+    candidate: { agent: 'general', provider: 'openai', model: 'openai/gpt-6.1-sol#medium' }, ...extra });
+  await updateQuotaState(file, state => ({ ...state, policy: { mode: 'active' },
+    decisions: [decision({ applied: 'openai/gpt-6.1-sol#medium' })] }));
+  let report = await quotaCLI(['status'], file);
+  assert.equal(report.routing.automatic, 'PASS');
+  assert.equal(report.routing.recommended, 'openai/gpt-6.1-sol#medium');
+  assert.equal(report.routing.applied, 'openai/gpt-6.1-sol#medium');
+  assert.equal(report.routing.enforced, true);
+  assert.equal(report.routing.decisions, 1);
+  // A recommendation that was recorded but never applied must not read as PASS.
+  await updateQuotaState(file, state => { state.decisions.push(decision()); return state; });
+  report = await quotaCLI(['status'], file);
+  assert.equal(report.routing.automatic, 'FAIL');
+  assert.equal(report.routing.applied, null, 'no model is claimed when none was applied');
+  // Monitor mode never enforces, whatever the recorded decision says.
+  await updateQuotaState(file, state => {
+    state.decisions.push(decision({ applied: 'openai/gpt-6.1-sol#medium' }));
+    state.policy = { mode: 'monitor' };
+    return state;
+  });
+  report = await quotaCLI(['status'], file);
+  assert.equal(report.routing.automatic, 'FAIL');
+  assert.equal(report.routing.mode, 'monitor');
+  assert.equal(report.routing.applied, 'openai/gpt-6.1-sol#medium', 'the record itself is still reported honestly');
+});
+
 test('heartbeat receipt survives state validation as liveness-only proof', async t => {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'quota-heartbeat-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));

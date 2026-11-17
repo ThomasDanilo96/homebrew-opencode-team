@@ -222,6 +222,24 @@ export async function quotaCLI(args, file, scope) {
       ...(state.policy ?? { mode: 'monitor' }) }, runtime: state.runtime ?? null,
     days, models, recommended: decideQuota({ kind: 'coding', candidates, forecast: prediction,
       previous: state.decisions.at(-1), options: state.policy }),
+    routing: (() => {
+      const last = state.decisions.filter(d => d.scope === 'routing').at(-1);
+      const applied = Boolean((state.policy?.mode ?? 'monitor') === 'active'
+        && last?.enforced === true && last?.applied && last?.candidate?.model === last.applied);
+      return {
+        // PASS only when the last routing decision was enforced at dispatch
+        // time and the model recorded as applied is the one recommended.
+        // Monitor mode never enforces, so it honestly reports FAIL.
+        automatic: applied ? 'PASS' : 'FAIL',
+        mode: state.policy?.mode ?? 'monitor',
+        recommended: last?.candidate?.model ?? null,
+        applied: last?.applied ?? null,
+        at: last?.at ?? null,
+        enforced: last?.enforced === true,
+        decisions: state.decisions.filter(d => d.scope === 'routing').length,
+        appliedDecisions: state.decisions.filter(d => d.scope === 'routing' && d.applied).length,
+      };
+    })(),
     effective: state.decisions.filter(d => d.enforced === true).slice(-20),
     simulated: state.decisions.filter(d => d.enforced !== true).slice(-20),
     collectionStartedAt: state.usage[0]?.at ?? null,

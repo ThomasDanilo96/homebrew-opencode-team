@@ -1072,3 +1072,76 @@ finestre `EXHAUSTED`/`UNKNOWN` e i campioni non freschi continuano a bloccare;
 `visual` resta senza candidato idoneo quando Go è esaurito (comportamento
 atteso, non un blocco delle chat); `GO_EXTRA_USAGE_CONFIRMATION_EXPIRED`
 resta l'unico ostacolo alla dichiarazione ACTIVE.
+
+## Sezione 13 — 17 novembre 2026: il routing OpenAI/Go viene APPLICATO, non solo raccomandato
+
+**Problema**: la decisione `decideQuota()` veniva registrata (`scope: routing`)
+ma nulla la applicava al turno in esecuzione: la sessione proseguiva sul modello
+già selezionato. La raccomandazione era quindi solo un registro.
+
+**Punto di enforcement verificato nel sorgente opencode 2.2.7** (`/tmp/oc-src`):
+l'hook nativo `prompt` di `SessionPrompt.prepare`
+(`packages/core/src/session/prompt.ts`) viene eseguito **prima** che l'ammessione
+della richiesta e che il runner risolva il modello del turno (`prepareContext` →
+`context.select` → `store.get` letto per ogni step). Uno `switchModel` applicato
+in quell'hook è quindi il modello su cui il turno gira davvero. Il valore di
+ritorno dell'hook è ignorato: contano solo gli effetti in place.
+
+**Implementazione** (`shared/best-quota-runtime.mjs`, hook `prompt` inserito
+prima dell'hook `model.request`):
+
+- **Figli, agenti sconosciuti, modello mancante**: ritorno anticipato
+  (`SKIPPED`). I figli sono già instradati da `execute.before`; re-ordinarli
+  qui combatterebbe il dispatch e raddoppierebbe il budget.
+- **Candidati**: specchio della regola di delega nuova — modello configurato
+  dell'agente + `specialist` quando l'agente è `general` e il suo modello
+  inizia con `openai/`.
+- **`choose()`** decide (stessa logica di `execute.before`, lease rilasciato
+  subito dopo la decisione: la prenotazione resta solo su `model.request`).
+- **Active + `blocked`**: `blocked(reason)` → `BEST_QUOTA_BLOCKED` (i blocchi
+  `EXHAUSTED`/`UNKNOWN` restano intatti). **Active + candidato diverso dal
+  modello effettivo**: `ctx.session.switchModel({sessionID, model:{providerID,id,variant}})`.
+  Se il modello effettivo è già quello raccomandato, nessuno switch.
+- **`applied`**: dopo lo switch (o quando il modello effettivo coincide già)
+  la decisione viene marcata con `applied === candidate.model` tramite
+  `updateQuotaState` mirato (`scope==='routing' && at===decision.at`);
+  `cleanState` accetta il campo `applied` (regex modello, ≤200 char).
+- **Monitor**: registra e basta (`enforced: false`, nessun `applied`, nessuno
+  switch). Receipt `callbacks.prompt` con esito
+  `APPLIED`/`MONITOR_OBSERVED`/`SKIPPED`/`BLOCKED`/`ERROR` in
+  try/catch/finally (`liveSubscription: false`: un prompt non è prova di
+  trasporto).
+- **Continuazioni**: ogni prompt registra la propria decisione, ma se il
+  modello applicato coincide con la raccomandazione non si ri-switcha.
+- **Multi-istanza**: le riserve delle altre istanze (`percent` dei lease)
+  entrano nel gate: se un'altra istanza ha già impegnato la testa residua di
+  Go, questo istanza viene instradata su OpenAI, e solo il proprio lease viene
+  rilasciato.
+
+**CLI** (`shared/best-quota-cli.mjs`, blocco `routing` in `quota status`):
+`automatic: PASS/FAIL` richiede `mode === 'active'` **e** ultima decisione
+`routing` con `enforced === true && applied === candidate.model`; in monitor
+riporta sempre `FAIL` (onestamente), con `mode`, `recommended`, `applied`,
+`at`, `enforced`, `decisions`, `appliedDecisions`.
+
+**Verifiche locali deterministiche** (nessuna richiesta di inferenza Go):
+
+- 8 nuovi test in `tests/best-quota-runtime.test.mjs` (32/32 verdi): switch
+  General Go→OpenAI con `model.request` PASS e receipt `APPLIED`; route Go
+  sana mantenuta; continuazione senza re-switch; monitor mai switcha; figlio
+  `SKIPPED` con `execute.before` invariato; Build bloccato senza provider
+  idoneo; floor GLM di Visual (applicato se Go sano, bloccato se esaurito);
+  riserva di un'altra istanze al 90% su Go devia il routing su OpenAI.
+- Test CLI: `automatic: PASS` con decisione applicata → `FAIL` senza `applied`
+  → `FAIL` in monitor.
+- Suite complete: `best-quota*` + `best-routing` **124/124 verdi**,
+  `tests/guardrail/runner.sh` exit 0, 8/8 essenziali.
+
+**Copertura istanze**: la regola `runtimeCoverage` è invariata (heartbeat
+fresco, PID/luogo allineati, nessuna origine iniettata); il nuovo receipt
+`prompt` entra nelle callback ammesse da `cleanState`.
+
+**Non attivo**: `routing.automatic` PASS richiede `mode: active`, e
+l'attivazione resta bloccata da `GO_EXTRA_USAGE_CONFIRMATION_EXPIRED` — la
+conferma umana "Extra Usage OFF" va chiesta all'utente, mai rinnovata in
+automatico. Nessuna pubblicazione GitHub/Homebrew prima della qualifica locale.

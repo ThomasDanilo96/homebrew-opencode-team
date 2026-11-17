@@ -333,6 +333,160 @@ test('request telemetry preserves actual Sol variants without deriving percentag
   ]);
 });
 
+// --- Prompt-time regulation: the recommendation must become the model the turn runs on.
+
+const promptSession = (over = {}) => ({ id: 'ses_prompt', agent: 'general',
+  model: { providerID: 'opencode-go', id: 'qwen3.7-plus' }, ...over });
+const routingDecisions = file => readQuotaState(file).decisions.filter(d => d.scope === 'routing');
+const healthyGo = file => updateQuotaState(file, state => {
+  for (const window of Object.values(state.snapshots.find(s => s.provider === 'opencode-go').windows)) window.used = 10;
+  return state;
+});
+
+test('active prompt routing switches a General session off exhausted Go and the turn runs on the applied model', async t => {
+  const f = await fixture(t);
+  const switches = [];
+  f.ctx.session.get = async () => promptSession();
+  f.ctx.session.switchModel = async input => switches.push(input);
+  await f.hooks['prompt']({ sessionID: 'ses_prompt' });
+  assert.deepEqual(switches, [{ sessionID: 'ses_prompt',
+    model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'medium' } }]);
+  const last = routingDecisions(f.file).at(-1);
+  assert.equal(last.blocked, false);
+  assert.equal(last.enforced, true);
+  assert.equal(last.candidate.model, 'openai/gpt-6.1-sol#medium');
+  assert.equal(last.applied, last.candidate.model, 'applied is the recommendation itself');
+  // Prompt routing decides, it does not hold capacity: only real admissions do.
+  assert.equal(readQuotaState(f.file).leases.length, 0);
+  // The next native request is checked against the model that was applied.
+  await f.hooks['model.request']({ sessionID: 'ses_prompt', agent: 'general', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'medium' } });
+  const receipt = readQuotaState(f.file).runtime.instances.at(-1).callbacks;
+  assert.equal(receipt.prompt.outcome, 'APPLIED');
+  assert.equal(receipt.prompt.mode, 'active');
+  assert.equal(receipt.prompt.liveSubscription, false, 'a prompt is not transport proof');
+  assert.equal(receipt['model.request'].outcome, 'PASSED');
+});
+
+test('a healthy configured Go route is kept: no switch, applied equals recommendation', async t => {
+  const f = await fixture(t);
+  await healthyGo(f.file);
+  const switches = [];
+  f.ctx.session.get = async () => promptSession();
+  f.ctx.session.switchModel = async input => switches.push(input);
+  await f.hooks['prompt']({ sessionID: 'ses_prompt' });
+  assert.equal(switches.length, 0, 'the session is already on the recommended model');
+  const last = routingDecisions(f.file).at(-1);
+  assert.equal(last.candidate.model, 'opencode-go/qwen3.7-plus');
+  assert.equal(last.applied, last.candidate.model);
+  assert.equal(readQuotaState(f.file).leases.length, 0);
+});
+
+test('a continued prompt stays on the model already applied instead of re-switching every turn', async t => {
+  const f = await fixture(t);
+  const switches = [];
+  let model = { providerID: 'opencode-go', id: 'qwen3.7-plus' };
+  f.ctx.session.get = async () => promptSession({ model });
+  f.ctx.session.switchModel = async input => { switches.push(input); model = input.model; };
+  await f.hooks['prompt']({ sessionID: 'ses_prompt' });
+  await f.hooks['prompt']({ sessionID: 'ses_prompt' });
+  assert.equal(switches.length, 1, 'one switch, then the applied model is reused');
+  const routing = routingDecisions(f.file);
+  assert.equal(routing.length, 2, 'each continuation still records its own decision');
+  assert.ok(routing.every(d => d.applied === d.candidate.model));
+});
+
+test('monitor mode records the routing recommendation and never switches the session', async t => {
+  const f = await fixture(t, 'monitor');
+  const switches = [];
+  f.ctx.session.get = async () => promptSession();
+  f.ctx.session.switchModel = async input => switches.push(input);
+  await f.hooks['prompt']({ sessionID: 'ses_prompt' });
+  assert.equal(switches.length, 0);
+  const last = routingDecisions(f.file).at(-1);
+  assert.equal(last.enforced, false);
+  assert.equal(last.applied, undefined, 'monitor never claims an applied model');
+  const receipt = readQuotaState(f.file).runtime.instances.at(-1).callbacks.prompt;
+  assert.equal(receipt.outcome, 'MONITOR_OBSERVED');
+  assert.equal(receipt.mode, 'monitor');
+});
+
+test('a delegated child prompt is skipped so execute.before stays its only router', async t => {
+  const f = await fixture(t);
+  f.ctx.session.get = async () => promptSession({ parentID: 'ses_parent' });
+  f.ctx.session.switchModel = async () => { throw new Error('a child must not be re-routed at prompt time'); };
+  await f.hooks['prompt']({ sessionID: 'ses_child' });
+  assert.equal(routingDecisions(f.file).length, 0);
+  assert.equal(readQuotaState(f.file).runtime.instances.at(-1).callbacks.prompt.outcome, 'SKIPPED');
+  // Dispatch-time routing of a new delegation is unchanged.
+  const event = { tool: 'subagent', sessionID: 'parent', input: { agent: 'general', prompt: 'unchanged work' } };
+  await f.tools['execute.before'](event);
+  assert.equal(event.input.model, 'openai/gpt-6.1-sol#medium');
+  await f.hooks['prompt']({ sessionID: 'ses_child' });
+  assert.equal(routingDecisions(f.file).length, 1, 'the child adds no second routing decision');
+});
+
+test('active prompt stops a Build turn with no admissible provider instead of dispatching unregulated', async t => {
+  const f = await fixture(t);
+  await updateQuotaState(f.file, state => {
+    for (const window of Object.values(state.snapshots.find(s => s.provider === 'openai').windows)) window.used = 100;
+    return state;
+  });
+  f.ctx.session.get = async () => promptSession({ agent: 'build',
+    model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'low' } });
+  f.ctx.session.switchModel = async () => { throw new Error('an unregulated turn must not start'); };
+  await assert.rejects(f.hooks['prompt']({ sessionID: 'ses_build' }), /BEST_QUOTA_BLOCKED/);
+  assert.equal(readQuotaState(f.file).runtime.instances.at(-1).callbacks.prompt.outcome, 'BLOCKED');
+  const last = routingDecisions(f.file).at(-1);
+  assert.equal(last.blocked, true, 'the report still shows why the turn stopped');
+});
+
+test('Visual keeps its Go GLM floor: applied when Go is healthy, blocked when Go is exhausted', async t => {
+  const f = await fixture(t);
+  f.ctx.agent.get = async ({ agentID }) => ({ data: { model: agentID === 'visual-designer'
+    ? { providerID: 'opencode-go', id: 'glm-5.3-flash' } : { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'low' } } });
+  f.ctx.model.list = async () => ({ data: [
+    { providerID: 'opencode-go', id: 'glm-5.3-flash' }, { providerID: 'opencode-go', id: 'qwen3.7-plus' },
+    { providerID: 'openai', id: 'gpt-6.1-sol' },
+  ] });
+  const switches = [];
+  let model = { providerID: 'opencode-go', id: 'glm-5.3-flash' };
+  f.ctx.session.get = async () => promptSession({ agent: 'visual-designer', model });
+  f.ctx.session.switchModel = async input => { switches.push(input); model = input.model; };
+  // The fixture exhausts Go, so the only admissible visual model is gone.
+  await assert.rejects(f.hooks['prompt']({ sessionID: 'ses_visual' }), /BEST_QUOTA_BLOCKED/);
+  await healthyGo(f.file);
+  await f.hooks['prompt']({ sessionID: 'ses_visual' });
+  assert.equal(switches.length, 0, 'already on the only admissible visual model');
+  const last = routingDecisions(f.file).at(-1);
+  assert.equal(last.candidate.model, 'opencode-go/glm-5.3-flash');
+  assert.equal(last.applied, last.candidate.model);
+});
+
+test('a live reservation from another instance stops this one from double-spending the same headroom', async t => {
+  const f = await fixture(t);
+  await healthyGo(f.file);
+  const switches = [];
+  f.ctx.session.get = async () => promptSession();
+  f.ctx.session.switchModel = async input => switches.push(input);
+  // Another live BEST instance already holds 90 of Go's 90 remaining points.
+  await updateQuotaState(f.file, state => ({ ...state, leases: [...(state.leases ?? []), {
+    id: 'other-instance-go', provider: 'opencode-go', scope: 'admission', percent: 90,
+    ownerPid: 1, sessionID: 'other-instance', at: new Date().toISOString(),
+    expiresAt: new Date(Date.now() + 600000).toISOString(),
+  }] }));
+  await f.hooks['prompt']({ sessionID: 'ses_prompt' });
+  assert.deepEqual(switches, [{ sessionID: 'ses_prompt',
+    model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'medium' } }],
+  'routing yields to the headroom the other instance already committed');
+  const last = routingDecisions(f.file).at(-1);
+  assert.equal(last.candidate.provider, 'openai');
+  assert.equal(last.applied, last.candidate.model);
+  const leases = readQuotaState(f.file).leases;
+  assert.equal(leases.length, 1, 'only our own routing lease was released');
+  assert.equal(leases[0].id, 'other-instance-go');
+});
+
 test('a calibrated next-request envelope must fit every residual window, even when raw quota state is NORMAL', async t => {
   const f = await fixture(t);
   await updateQuotaState(f.file, state => {
