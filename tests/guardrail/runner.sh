@@ -91,6 +91,9 @@ pathlib.Path(destination).write_text(text)
 PY
 
 TRUSTED_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+if [ "${1:-}" = best-native ]; then
+  TRUSTED_PATH="/opt/homebrew/opt/node@22/bin:$TRUSTED_PATH"
+fi
 
 RC=0
 
@@ -130,9 +133,15 @@ if [ "${1:-}" = best-routing ] && [ "$#" -eq 4 ]; then
   ROUTING_AVAILABILITY_SOURCE="$(realpath_cmd "$3")"
   ROUTING_INSTRUCTIONS_SOURCE="$(realpath_cmd "$4")"
 fi
+if [ "${1:-}" = rollback ] && [ "$#" -eq 3 ]; then
+  # Stage the explicitly selected code-only inputs before entering the same
+  # kernel boundary. The verifier still validates every archive member/hash.
+  cp -p "$2" "$STAGING/rollback-code.tar.gz"
+  cp -p "$3" "$STAGING/rollback-manifest.json"
+fi
 cd "$STAGING"
 target="${1:-all}"
-case "$target" in all|smoke|maintenance|benchmark|profile|qualification|homebrew|compatibility|rollback|best-routing) ;; *) echo "unknown target: $target" >&2; exit 2 ;; esac
+case "$target" in all|smoke|maintenance|benchmark|profile|qualification|homebrew|compatibility|rollback|best-routing|best-native|packaging) ;; *) echo "unknown target: $target" >&2; exit 2 ;; esac
 
 echo "## guardrail: staging at $STAGING_REAL"
 echo "## guardrail: outside sentinel at $OUTSIDE_REAL"
@@ -142,6 +151,14 @@ echo ""
 echo "## Isolation negative-control suite"
 run_suite /usr/bin/python3 -B tests/test_isolation.py -v 2>&1 || exit 1
 echo ""
+if [ "$target" = best-native ]; then
+  run_suite node --test --test-name-pattern='BEST' tests/native-profiles.test.mjs
+  exit "$RC"
+fi
+if [ "$target" = packaging ]; then
+  run_suite node --test tests/packaging.test.mjs
+  exit "$RC"
+fi
 if [ "$target" = best-routing ]; then
   run_suite node --test tests/best-routing.test.mjs || exit 1
   if [ "$#" -eq 3 ] || [ "$#" -eq 4 ]; then
@@ -159,7 +176,7 @@ if [ "$target" = best-routing ]; then
 fi
 if [ "$target" = rollback ]; then
   [ "$#" -eq 3 ] || { echo "Use runner.sh rollback ARCHIVE MANIFEST"; exit 2; }
-  run_suite /usr/bin/python3 -B tests/code_rollback.py "$2" "$3" || exit 1
+  run_suite /usr/bin/python3 -B tests/code_rollback.py "$STAGING/rollback-code.tar.gz" "$STAGING/rollback-manifest.json" || exit 1
   exit "$RC"
 fi
 if [ "$target" = compatibility ]; then

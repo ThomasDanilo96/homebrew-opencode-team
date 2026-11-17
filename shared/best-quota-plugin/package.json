@@ -1,0 +1,6 @@
+{
+  "name": "opencode-team-best-quota",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./index.js" }
+}

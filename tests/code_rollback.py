@@ -73,7 +73,9 @@ def main():
         shutil.copyfile(ROOT / "VERSION", new / "VERSION")
         data = work / "profile-data-sentinel"
         data.write_bytes(b"fixture historical data: never part of code rollback")
-        for index, (code, version) in enumerate(((new, "0.3.7"), (old, "0.3.6"), (new, "0.3.7"))):
+        old_version = (old / "VERSION").read_text().strip()
+        new_version = (new / "VERSION").read_text().strip()
+        for index, (code, version) in enumerate(((new, new_version), (old, old_version), (new, new_version))):
             pending = work / "next"
             pending.symlink_to(code, target_is_directory=True)
             os.replace(pending, work / "current")
@@ -141,7 +143,7 @@ def main():
                 if c[0] == "bootstrap" and c != ["bootstrap", f"gui/{uid}", str(_plist)]:
                     raise ValueError(f"wrong bootstrap: {c}")
 
-        for _code, _ver in ((old, "0.3.6"), (new, "0.3.7")):
+        for _code, _ver in ((old, old_version), (new, new_version)):
             r = subprocess.run(["/bin/bash", str(_code / "bin/opencode-team"), "--help"],
                                capture_output=True, text=True, cwd=str(work.parent), env=_base, timeout=10)
             if r.returncode != 0 or "opencode-team" not in r.stdout:

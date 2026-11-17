@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import os from 'node:os';
 import { spawn, spawnSync } from 'node:child_process';
+import { readQuotaState, updateQuotaState } from './best-quota.mjs';
 
 const packageRoot = path.resolve(import.meta.dirname, '..');
 const profiles = ['best', 'free'];
@@ -334,7 +335,7 @@ function readonlyPermissions(profile) {
 }
 function configuration(profile) {
   const bestModel = process.env.OPENCODE_TEAM_BEST_MODEL || 'openai/gpt-6.1-sol';
-  const goModel = process.env.OPENCODE_TEAM_BEST_GO_MODEL || 'opencode-go/longcat-2.0';
+  const goModel = process.env.OPENCODE_TEAM_BEST_GO_MODEL || 'opencode-go/qwen3.7-plus';
   if (!/^openai\/[A-Za-z0-9][\w./-]*$/.test(bestModel)) fail('BEST coordinator model must be an openai/model ID without #variant');
   if (!/^opencode-go\/[A-Za-z0-9][\w./-]*$/.test(goModel)) fail('BEST worker model must be an opencode-go/model ID without #variant');
   if (process.env.OPENCODE_TEAM_FREE_MODEL && process.env.OPENCODE_TEAM_FREE_MODEL !== freeModel) fail(`FREE supports only ${freeModel}; no unverified paid models`);
@@ -342,9 +343,14 @@ function configuration(profile) {
   const agents = Object.fromEntries(['build', 'plan', 'explore', 'general', 'reviewer', 'title', 'summary', 'compaction'].map((id) => [id, { model }]));
   if (profile === 'best') {
     agents.build.model = `${bestModel}#low`;
+    agents.build.description = 'Coordinate structured work through native subagents; implement small tasks directly';
+    agents.build.permissions = [rule('subagent', 'deny'),
+      ...['explore', 'general', 'specialist', 'reviewer', 'visual-designer'].map((id) => rule('subagent', 'allow', id))];
     for (const id of ['plan', 'reviewer']) agents[id].model = `${bestModel}#medium`;
     agents.explore.model = 'opencode-go/mimo-v2.6-flash';
     agents.general.model = goModel;
+    agents.explore.mode = agents.general.mode = 'subagent';
+    agents.general.permissions = [rule('subagent', 'deny')];
     agents.title.model = 'openai/gpt-6-luna#low';
     // Worker selection must not replace the validated continuity model.
     for (const id of ['summary', 'compaction']) agents[id].model = 'opencode-go/minimax-m3';
@@ -352,6 +358,9 @@ function configuration(profile) {
     agents.specialist = { model: `${bestModel}#medium`, mode: 'subagent',
       description: 'Complex scoped implementation or critical technical analysis with Sol Medium; preserve file ownership and return concise evidence',
       permissions: [rule('question', 'deny'), rule('subagent', 'deny')] };
+    agents['visual-designer'] = { model: 'opencode-go/glm-5.3-flash', mode: 'subagent',
+      description: 'Visual UI/UX, HTML/CSS and templates; preserve supplied themes and accessibility',
+      permissions: [rule('subagent', 'deny')] };
   }
   for (const id of ['plan', 'explore', 'reviewer']) agents[id].permissions = readonlyPermissions(profile);
   agents.reviewer = { ...agents.reviewer, description: 'Review changes for correctness, security and regressions without editing',
@@ -394,8 +403,14 @@ function configuration(profile) {
       timeout: { startup: 45000, catalog: 30000, execution: 600000 } } } } };
   if (profile === 'best') config.mcp.servers.playwright = {
     type: 'local',
-    command: ['npx', '--yes', '@playwright/mcp@0.0.83', '--headless', '--isolated', '--browser', 'chromium', '--image-responses', 'omit', '--snapshot-mode', 'none', '--no-webmcp'],
+    command: ['/opt/homebrew/opt/node@22/bin/npx', '--yes', '@playwright/mcp@0.0.83', '--headless', '--isolated', '--browser', 'chromium', '--image-responses', 'omit', '--snapshot-mode', 'none', '--no-webmcp'],
+    environment: { PATH: '/opt/homebrew/opt/node@22/bin:{env:PATH}' },
   };
+  if (profile === 'best') {
+    config.experimental = { subagent_depth: 1 };
+    config.plugins = [{ package: path.join(packageRoot, 'shared/best-quota-plugin'),
+      options: { stateFile: path.join(roots.state, 'best/quota/state.json') } }];
+  }
   // V2 drops the root variant; low must also be the model's native default.
   if (profile === 'best') config.providers = { openai: {
     models: { [bestModel.slice('openai/'.length)]: { settings: { reasoningEffort: 'low' } } },
@@ -635,11 +650,83 @@ function help() {
   console.log(`OpenCode Team: native V2 profiles\n\n  opencode-team best|free [native OpenCode arguments]\n  opencode-team start best|free [native OpenCode arguments]\n  opencode-team setup\n  opencode-team doctor\n  opencode-team config best|free\n  opencode-team rollback BACKUP_ID\n  opencode-team cleanup enable|disable|uninstall|status|run|dry-run
   opencode-team cleanup legacy-status
   opencode-team cleanup legacy-retire LABEL --approve
+  opencode-team best quota status|forecast|doctor
+  opencode-team best quota report --days 7
+  opencode-team best quota monitor|refresh|verify-runtime|activate|disable
+  opencode-team best quota install
+  opencode-team best quota confirm-extra-usage-off --confirmed-by USER_LABEL --confirmed-at ISO_TIMESTAMP
+  opencode-team best quota configure < policy.json
+  opencode-team best quota manual openai|opencode-go < verified-usage.json
   opencode-team version\n\nBEST: OpenAI coordinator + Go workers; connect both subscriptions with /connect.\nFREE: anonymous MiMo only; no paid fallback.\nmacOS setup schedules safe maintenance daily; session deletion is disabled.\nDisable/uninstall persist across setup.\nCustom HOME/root skips automatic scheduling; explicit enable requires the login HOME.\nResume natively: opencode-team best -s SESSION_ID\nNative CLI arguments are preserved, with --standalone added in command scope.\nSee README for migration, backup and security boundaries.`);
 }
 try {
   const [action = 'help', ...args] = process.argv.slice(2);
-  if (profiles.includes(action)) launch(action, args);
+  if (action === 'best' && args[0] === 'quota') {
+    const { quotaCLI, nativeUsageReport } = await import('./best-quota-cli.mjs');
+    const file = path.join(roots.state, 'best/quota/state.json');
+    const quotaScope = { configFile: configFile('best'), databaseDirectory: path.join(roots.data, 'best/data/opencode') };
+    if (args[1] === 'install' && args.length === 2) {
+      // Extend the active file, never run setup or regenerate either profile.
+      await updateQuotaState(file, current => ({ ...current, policy: current.policy ?? { mode: 'monitor' } }));
+      locked(() => {
+        safe(configFile('best'));
+        const config = JSON.parse(fs.readFileSync(configFile('best'), 'utf8'));
+        const plugin = path.join(packageRoot, 'shared/best-quota-plugin');
+        config.plugins ??= [];
+        const previous = config.plugins.findIndex(p => {
+          const source = typeof p === 'string' ? p : p.package;
+          if (source === plugin) return true;
+          if (!path.isAbsolute(source) || path.basename(source) !== 'best-quota-plugin') return false;
+          const manifest = path.join(source, 'package.json');
+          safe(manifest);
+          try { return JSON.parse(fs.readFileSync(manifest, 'utf8')).name === 'opencode-team-best-quota'; }
+          catch { fail('Cannot verify previous governor package; configuration not changed'); }
+        });
+        if (previous >= 0 && (typeof config.plugins[previous] === 'string' ? config.plugins[previous] : config.plugins[previous].package) !== plugin) {
+          const entry = config.plugins[previous];
+          config.plugins[previous] = typeof entry === 'string' ? { package: plugin, options: { stateFile: file } }
+            : { ...entry, package: plugin };
+          transaction([{ file: configFile('best'), bytes: json(config) }]);
+        } else if (previous < 0) {
+          config.plugins.push({ package: plugin, options: { stateFile: file } });
+          transaction([{ file: configFile('best'), bytes: json(config) }]);
+        }
+      });
+      console.log(json(await quotaCLI(['status'], file, quotaScope)));
+    } else if (args[1] === 'refresh' && args.length === 2) {
+      if (!readQuotaState(file).policy || readQuotaState(file).policy.mode === 'disabled') fail('Enable read-only quota collection first: best quota monitor');
+      command(nativeBinary().binary, ['api', 'get', '/api/agent', '--standalone'], { env: profileEnvironment('best'), timeout: 90000 });
+      console.log(json(await quotaCLI(['status'], file, quotaScope)));
+    } else if (args[1] === 'verify-runtime' && args.length === 2) {
+      const { binary, version } = nativeBinary();
+      command(process.execPath, ['--test', path.join(packageRoot, 'tests/best-quota-native.test.mjs')], {
+        cwd: packageRoot, env: { ...process.env, OPENCODE_QUOTA_NATIVE_BIN: binary }, timeout: 90000,
+      });
+      // Record the actual installed runtime version, not a remembered one:
+      // activation gates compare this receipt against the verified allow-list.
+      const actual = version.match(/2\.\d+\.\d+/)?.[0];
+      if (!actual) fail(`Cannot determine OpenCode runtime version from: ${version}`);
+      await updateQuotaState(file, current => ({ ...current, runtime: { ...current.runtime,
+        version: actual, loadedAt: current.runtime?.loadedAt ?? new Date().toISOString(),
+        hookVerified: true, verifiedAt: new Date().toISOString() } }));
+      console.log(json(await quotaCLI(['doctor'], file, quotaScope)));
+    } else if (args[1] === 'report') {
+      const report = await quotaCLI(args.slice(1), file, quotaScope);
+      report.historical = { status: 'UNAVAILABLE' };
+      if (fs.existsSync(configFile('best'))) {
+        const to = Date.now(), from = to - report.days * 86400000;
+        try {
+          report.historical = nativeUsageReport(JSON.parse(command(nativeBinary().binary,
+            ['api', 'get', `/api/experimental/session/stats?from=${from}&to=${to}&tools=summary`, '--standalone'],
+            { env: profileEnvironment('best'), timeout: 90000 })));
+        } catch {
+          report.historical = { status: 'UNAVAILABLE', error: 'NATIVE_STATS_UNAVAILABLE' };
+        }
+      }
+      console.log(json(report));
+    } else console.log(json(await quotaCLI(args.slice(1), file, quotaScope)));
+  }
+  else if (profiles.includes(action)) launch(action, args);
   else if (action === 'start') launch(args[0], args.slice(1));
   else if (['help', '--help', '-h'].includes(action)) help();
   else if (action === 'version' || action === '--version') console.log(`OpenCode Team ${fs.readFileSync(path.join(packageRoot, 'VERSION'), 'utf8').trim()}`);

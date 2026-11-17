@@ -52,7 +52,15 @@ formula.install
   assert.equal(fs.readFileSync(path.join(temp, 'libexec/shared/disk-cleanup.sh'), 'utf8'),
     fs.readFileSync(path.join(root, 'shared/disk-cleanup.sh'), 'utf8'));
   assert.ok(fs.existsSync(path.join(temp, 'libexec/shared/maintenance.py')));
-  assert.deepEqual(fs.readdirSync(path.join(temp, 'libexec/tests')).sort(), ['native-profiles.test.mjs', 'setup-smoke.sh', 'test_maintenance.py']);
+  assert.deepEqual(fs.readdirSync(path.join(temp, 'libexec/tests')).sort(),
+    [...fs.readdirSync(path.join(root, 'tests')).filter(name => /\.(?:mjs|py|sh)$/.test(name) || name === 'README.md'), 'guardrail'].sort());
+  assert.ok(fs.existsSync(path.join(temp, 'libexec/tests/guardrail/runner.sh')));
+  assert.ok(fs.existsSync(path.join(temp, 'libexec/shared/best-quota-plugin/index.js')));
+  const quota = spawnSync(launcher, ['best', 'quota', 'status'], {
+    cwd: temp, encoding: 'utf8', env: { ...process.env, OPENCODE_TEAM_HOME: path.join(temp, 'isolated-team') },
+  });
+  assert.equal(quota.status, 0, quota.stderr);
+  assert.equal(JSON.parse(quota.stdout).mode, 'monitor', 'uninitialized governor observes but never silently activates');
   assert.equal(fs.readFileSync(path.join(temp, 'libexec/shared/skills/documentation-lookup.md'), 'utf8'),
     fs.readFileSync(path.join(root, 'shared/skills/documentation-lookup.md'), 'utf8'));
 });
@@ -84,9 +92,9 @@ test('published archive identity stays immutable while candidate versions can ad
   const url = source.match(/^  url "([^"]+)"$/m)[1];
   const sha = source.match(/^  sha256 "([0-9a-f]{64})"$/m)[1];
   // Pin the published archive, not HEAD: CI must not compare a commit to itself.
-  const publishedVersion = '0.3.6';
+  const publishedVersion = '0.3.7';
   const oldURL = `https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v${publishedVersion}.tar.gz`;
-  const oldSHA = '3f3fb7be10d4dd116307b264ed315dbe146409ed770072f82dd18e17c1847f0d';
+  const oldSHA = '716599bbeb9d5f54025d53d4a49de86549d86921e2b2bf9d859232ecd41a7630';
   const version = fs.readFileSync(path.join(root, 'VERSION'), 'utf8').trim();
   assert.match(version, /^\d+\.\d+\.\d+$/);
   const compare = (a, b) => a.split('.').reduce((order, part, i) => order || Math.sign(Number(part) - Number(b.split('.')[i])), 0);
@@ -179,6 +187,8 @@ formula.install
   assert.ok(fs.existsSync(path.join(temp, 'libexec/tests/test_isolation.py')));
   assert.ok(fs.existsSync(path.join(temp, 'libexec/tests/native-profiles.test.mjs')));
   assert.ok(fs.existsSync(path.join(temp, 'libexec/.github/scripts/render-staging-formula.rb')));
+  assert.equal(fs.existsSync(path.join(temp, 'libexec/best-quota-native.test.mjs')), false,
+    'staging must not misplace a continued formula install argument into libexec root');
   const launcher = path.join(temp, 'bin/opencode-team');
   const v = spawnSync(launcher, ['version'], { cwd: temp, encoding: 'utf8' });
   assert.equal(v.status, 0, v.stderr);

@@ -113,7 +113,7 @@ the ownership/preference receipt and explicitly selected maintenance paths, not 
 different macOS user's schedule. Existing legacy jobs are never silently rewritten
 by setup: disable them before enabling this one if migrating an older installation.
 
-#### 0.3.7 candidate changes (not a published stable release)
+#### 0.3.7 maintenance changes
 
 - Logical checksums retain rc2 compatibility with lower BLOB serialization cost;
   online backup pins a read-only WAL view to prevent restart starvation.
@@ -349,11 +349,19 @@ pending rollout checks](docs/validation.md), and [V2 compatibility/sources](docs
 
 ## Release preparation
 
+`VERSION` is **0.3.8**, an unpublished Quota Governor candidate. The stable
+formula URL/checksum remain pinned to published **0.3.7** until the release gates
+pass. Do not use the local staging checksum as an official release checksum.
+See [0.3.8 readiness](docs/maintenance/opencode-team-038-release-readiness.md)
+and [Quota Governor diagnostics](docs/best-quota-governor.md). Global activation,
+publication and local upgrade are blocked while the user Extra Usage declaration
+is expired or current BEST instance coverage is unverified.
+
 The workflow deliberately separates candidate testing from publication. The
 following is the release procedure; completed gates are recorded in validation:
 
 1. After approval, commit and push the reviewed source to `prerelease/vVERSION`
-   using the candidate `VERSION` (currently `0.3.7`).
+    using the candidate `VERSION` (currently `0.3.8`).
    Run **Homebrew Install** manually on that branch: Phase A installs the exact
    candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
 2. Only after Phase A succeeds, authorize the immutable `vVERSION` tag on the

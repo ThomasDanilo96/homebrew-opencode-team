@@ -11,8 +11,9 @@ class OpencodeTeam < Formula
 
   def install
     zsh_completion.install "completions/_opencode-team"
-    libexec.install "bin", "completions", "shared", "VERSION"
-    (libexec/"tests").install "tests/native-profiles.test.mjs", "tests/setup-smoke.sh", "tests/test_maintenance.py"
+    libexec.install "bin", "completions", "shared", "VERSION", "Formula", ".github"
+    (libexec/"tests").install Dir["tests/*.{mjs,py,sh}"], "tests/README.md"
+    (libexec/"tests/guardrail").install Dir["tests/guardrail/*"]
     (bin/"opencode-team").write <<~EOS
       #!/bin/bash
       export PATH="#{formula_opt_bin("node@22")}:$PATH"
@@ -37,7 +38,11 @@ class OpencodeTeam < Formula
     assert_predicate libexec/"tests/setup-smoke.sh", :executable?
     assert_predicate zsh_completion/"_opencode-team", :file?
     system "zsh", "-n", zsh_completion/"_opencode-team"
-    system "bash", libexec/"tests/setup-smoke.sh"
+    assert_predicate libexec/"shared/best-quota-plugin/index.js", :file?
+    assert_predicate libexec/"tests/best-quota-native.test.mjs", :file?
+    assert_predicate libexec/"tests/test_isolation.py", :file?
+    assert_predicate libexec/"tests/guardrail/runner.sh", :executable?
+    system "bash", libexec/"tests/guardrail/runner.sh", "smoke"
     external_path = testpath/"unrelated-working-directory"
     external_path.mkpath
     Dir.chdir(external_path) do

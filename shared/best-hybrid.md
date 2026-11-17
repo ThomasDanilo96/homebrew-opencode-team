@@ -36,15 +36,22 @@ minimalism review. Do not add another review system.
 
 This supplement applies only to BEST. Execute the ChatGPT mandate; validate it
 against real code, security and contracts rather than planning it all over again.
+These assignments supersede the older BEST model examples in shared instructions:
+Build is OpenAI Sol Low; General is Go Qwen3.7 Plus; Explore is Go MiMo Flash;
+Specialist and Reviewer are Sol Medium; Visual Designer is Go GLM-5.3-Flash.
+MiniMax M3 remains quarantined from implementation and automatic fallbacks;
+unchanged hidden summary/compaction roles are retained only for continuity.
 
 - Simple work: Build implements and verifies directly, without unnecessary children.
 - Normal work: prefer two or three useful independent lanes when delegation helps.
-- A substantial structured mandate: strongly prefer four relevant specialist lanes:
-  Explore (Go MiMo) for targeted discovery; two invocations of General (Go LongCat 2.0)
-  for disjoint implementations; Specialist (Sol Medium) for critical analysis or
-  a complex independent implementation. Reuse General with separate native sessions,
+- A substantial structured mandate: proactively delegate independent work with the
+  native `subagent` tool: Explore for targeted discovery, General for scoped
+  implementation, Specialist for critical analysis or complex implementation.
+  Reuse General with separate native sessions for disjoint implementations,
   not duplicated agent definitions. Preserve each role's configured model.
-- Do not manufacture lanes to reach four. If fewer independent jobs exist, state
+- No slash command or manual agent selection is needed. Commands with
+  `subagent:false` run directly; they do not disable Build's native delegation.
+- Do not manufacture lanes to reach a fixed count. If fewer independent jobs exist, state
   the concrete dependency, shared-file conflict or context overhead and use fewer.
 - Launch ready required lanes together as concurrent native foreground subagent
   calls in one response, so the CLI waits for their results without busywork.
@@ -54,6 +61,8 @@ against real code, security and contracts rather than planning it all over again
   analysis may run alongside implementations only when it needs no changing files.
 - Give every writer exclusive file ownership, a bounded goal, necessary context
   and acceptance tests. No concurrent edits to shared files. Build owns integration.
+- Keep at most two Go workers and one OpenAI worker concurrent. Children must not
+  delegate recursively; read-only roles must not write through shell or MCP tools.
 - After relevant implementations finish, use the independent read-only Reviewer
   (Sol Medium), then integrate corrections and run the final affected tests. Do not
   substitute the initial critical analysis for this post-implementation review.

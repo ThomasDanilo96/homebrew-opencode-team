@@ -288,3 +288,120 @@ implied by local tests.
   `doctor` reports OpenCode **2.1.0**, Serena **1.7.0**, and the unchanged ECC pin.
   This upgrade did not install/replace OpenCode. These checks do not promise
   universally minimal agent output or perpetual provider availability.
+
+## Native Hybrid restoration — 2026-11-01 (OpenCode 2.2.5)
+
+**Configuration restored; native mock delegation PASS; real-model autonomous
+selection PENDING.** No setup, release,
+commit, service restart, database migration or historical-session update performed.
+
+Confirmed configuration regression: live BEST replaced the Hybrid delegation
+section with Go/Qwen Build end-to-end ownership and manual `/code` selection.
+General still selected quarantined M3. Native `debug config --standalone` and
+`debug agents --standalone`, with `OPENCODE_DB=:memory:`, resolved Build to Qwen,
+the original allowlist to allowed, required children to visible subagent mode,
+and depth to one. Only the BEST config directory and explicit BEST JSON were
+discovered in this repository; other project Locations remain unverified.
+This proves conflicting coordination instructions, not an intrinsic Qwen tool
+failure or that the native tool was present in every affected historical request.
+Slash-command `subagent:false` controls direct command execution, not Build's
+permission to launch children with the native tool.
+
+Restored live and source assignments: Build `openai/gpt-6.1-sol#low`, Explore
+`opencode-go/mimo-v2.6-flash`, General `opencode-go/qwen3.7-plus`, Specialist and
+Reviewer `openai/gpt-6.1-sol#medium`, Visual Designer `opencode-go/glm-5.3-flash`.
+Native resolved definitions confirm these exact models/variants, modes, Build's
+allowlist, read-only edit/shell/mutating-Serena denials, worker delegation denials
+and depth one after the change. No inference was needed for these checks.
+The existing visual fallback now uses Qwen rather than bypassing M3 quarantine.
+Hidden M3 summary/compaction roles remain unchanged for continuity. Existing
+Go/OpenAI accounting and ledger are untouched; no real 50/50 balance is claimed.
+Shared instructions are unchanged so FREE's instruction bytes do not change;
+the BEST-only supplement explicitly supersedes its obsolete model examples.
+
+Verification actually executed:
+
+- `bash tests/guardrail/runner.sh best-native`: RED, three intended model/depth
+  failures; GREEN, 10 BEST tests and 13 isolation controls passed, exit 0.
+  The first attempt was blocked by the default Node binary's missing simdjson
+  dylib. This focused target uses the already installed working Node 22; no
+  Homebrew/package repair or system change was performed.
+- Node syntax check of `shared/profiles.mjs`, Bash syntax check of the runner,
+  and `git diff --check`: exit 0. No separate build/type/lint target applies to
+  these plain JavaScript/configuration/Markdown edits; coverage not measured.
+- Independent read-only review: no verified actionable findings; no duplicated
+  scans or test execution by the reviewer. This is not behavioral acceptance.
+- One disposable live probe: local server, DB in memory, frozen regression test
+  initially failing, fixture-only work, unchanged model/instruction assignments,
+  test-only step bounds, unrelated MCP startup disabled, 150-second deadline,
+  aggregate 20-step stop and stop at the first native retry. First API request
+  returned HTTP 401, before session creation/inference. Server terminated;
+  no authentication changes or second attempt. Zero model calls in that probe.
+  Explore/General invocation, actual child message models, completion back to the
+  parent, structured automatic dispatch and simple-task zero-child control are
+  all **PENDING**. No completed BEST delegation is claimed from this attempt.
+
+Verified originals, before/after runtime definitions, checksums, rollback procedure
+and failed probe evidence are retained locally in
+`.local-release-evidence/best-native-restore-20261101/`. Rollback must check current
+hashes before restoring only the two modified live files. Previous backups remain
+in place. New BEST sessions use the restored default; existing sessions retain
+their stored selection and were not rewritten. Configuration reload alone does
+not change an existing Qwen session into Sol.
+
+### Native-path closure with a local mock (same date)
+
+The original 401 was **local OpenCode server authentication**, not OpenAI/Go:
+`live_probe.py` called `/openapi.json` without Authorization while foreground
+`serve` required a password. The replacement test reproduces that 401 with zero
+provider requests, then gets 200 with the native API client and an ephemeral
+test-server password. No existing server/account authentication is changed.
+
+Native `auth list --standalone` with `OPENCODE_DB=:memory:` reports no authenticated
+integrations. V2 stores credentials in the database; keeping the real XDG data
+path does not populate a fresh memory DB. This is separate from the server 401,
+not evidence of a provider outage. No credentials were imported into the test.
+
+`tests/native-subagent-mock.py` runs actual OpenCode 2.2.5 with disposable HOME/XDG,
+DB in memory, real HOME reads denied, fixture-only writes and localhost-only
+outbound networking. Only fixture provider/model transports are replaced with a
+local scripted OpenAI-compatible endpoint; role model IDs/permissions are unchanged.
+Explicit fixture model packages prevent inherited catalog protocols selecting
+`/messages`. MCP/skills are omitted for this focused test. The harness creates
+only parents: native `subagent` creates and runs children from mock tool calls.
+
+Observed PASS: five mock requests, zero real-provider requests, no retries:
+
+- Simple `ses_e69c2d4e9ffeAcaPGJXQ0UHKS2`: zero children.
+- Structured parent `ses_e69c2d48bffelJBjszhXgPLOw2`: actual assistant Sol Low,
+  two foreground native tool calls with `state.status: completed` and child IDs.
+- Explore `ses_e69c2d456ffeCzO09CXygOs5RU`: matching parentID, actual assistant
+  `opencode-go/mimo-v2.6-flash`, session `outcome: succeeded`.
+- General `ses_e69c2d455ffetAR3MGY7sy4zhv`: matching parentID, actual assistant
+  `opencode-go/qwen3.7-plus`, session `outcome: succeeded`.
+- Both results reach the parent's next model request. Children do not receive the
+  delegation tool. Native execution intervals overlap.
+
+Exports/events/schema/connection metadata/results:
+`.local-release-evidence/best-native-restore-20261101/mock-behavior/`.
+BEST config/instruction/availability hashes still match the previous manifest.
+Ruff passes; only a pre-existing global Ruff-config deprecation warning. The
+broad 23-check suite was not repeated. Scripted choices and mock token counts do
+not prove real-model autonomy, subscription usage, quota or provider availability.
+
+#### Optional real-model smoke, prepared but NOT started
+
+Use the already authenticated native BEST client, not raw unauthenticated HTTP or
+a fresh memory DB pretending to retain connections. Separate operator approval is
+needed for normal native recording of one new fixture session; no historical
+session or database manipulation, migration or credential import is authorized.
+Check connection metadata only; absent connections block execution, not justify login.
+
+One normal prompt, no agent names/slash commands: “Nella sola fixture: ricostruisci
+la mappa dei codici in protocol.md/consumer.md; indipendentemente correggi label in
+labels.py per strip e lowercase, preservando firma e test. Restituisci mappa, diff
+e test mirato. Non toccare altri percorsi.” Reuse the earlier tiny frozen fixture.
+One attempt, 90 seconds, at most 12 aggregate native model steps and three children;
+stop at the first retry, permission/auth/provider error, with no paid fallback.
+Capture native exports/events and actual model IDs. Only this separately authorized
+observation can close real Sol's autonomous-dispatch acceptance.

@@ -1,23 +1,22 @@
 // shared/best-routing.mjs — scoped BEST routing aid, no model traffic
 import fs from 'node:fs';
 import { pathToFileURL } from 'node:url';
+import { decideQuota } from './best-quota.mjs';
 
 const KIND_COMMANDS = {
   scan: ['scan'], analysis: ['analyze', 'scan'], coding: ['code', 'codeOpenai'],
   small: ['small', 'code'], complex: ['codeComplex', 'codeOpenai', 'code'],
   architecture: ['architect'], debug: ['debug'], security: ['architect'],
-  review: ['reviewCritical'], visual: ['visual', 'visualFallback'],
+  review: ['reviewCritical'], visual: ['visual'],
 };
 const KINDS = Object.keys(KIND_COMMANDS);
 const VALID_WEIGHTS = [1, 3, 5];
 const ALLOWED = ['opencode-go', 'openai'];
 const OUTCOMES = ['passed', 'failed', 'blocked'];
-const HIGH_RISK = ['architecture', 'debug', 'security', 'review'];
 const VISUAL_SKILLS = ['frontend-design', 'accessibility', 'make-interfaces-feel-better'];
 const TOKEN_KEYS = ['input', 'output', 'cacheRead', 'cacheWrite'];
 const ENTRY_KEYS = new Set(['id', 'kind', 'weight', 'provider', 'model', 'agent', 'duration_ms', 'outcome', 'tokens', 'fallback']);
 const base = (m) => (m ? m.split('#')[0] : '');
-const providerOf = (cfg, cmd) => cfg.commands?.[cmd]?.model?.split('/')[0] || '';
 
 function isProviderAllowed(provider, policies) {
   if (!ALLOWED.includes(provider)) return false;
@@ -35,6 +34,7 @@ function isCmdAvailable(cmd, config, availability) {
   if (!config.commands?.[cmd]?.model) return false;
   const b = base(config.commands[cmd].model);
   const provider = b.split('/')[0];
+  if (provider === 'opencode-go' && (b === 'opencode-go/minimax-m3' || /claude|anthropic/i.test(b))) return false;
   const conn = availability.connected || [];
   if (!conn.includes(provider)) return false;
   const norm = (arr) => (arr || []).map(base);
@@ -47,44 +47,30 @@ function isCmdAvailable(cmd, config, availability) {
   return isProviderAllowed(provider, config.policies);
 }
 
-function deficit(ledger) {
-  let go = 0, openai = 0;
-  for (const e of ledger) {
-    if (e.outcome !== 'passed') continue;
-    if (e.provider === 'opencode-go') go += e.weight;
-    else if (e.provider === 'openai') openai += e.weight;
-  }
-  return go - openai;
-}
-
-function select(kind, available, config, ledger) {
-  if (HIGH_RISK.includes(kind)) return available.find((c) => providerOf(config, c) === 'openai') || null;
-  if (kind !== 'coding' && kind !== 'complex') return available[0];
-  const go = available.find((c) => providerOf(config, c) === 'opencode-go');
-  const openai = available.find((c) => providerOf(config, c) === 'openai');
-  return (go && openai) ? (deficit(ledger) > 0 ? openai : go) : available[0];
-}
-
 export function chooseRoute(kind, weight, config, availability, ledger) {
-  config = config || {}; availability = availability || {}; ledger = ledger || [];
+  // Ledger and weights remain reporting inputs, never quota estimates or routing targets.
+  config = config || {}; availability = availability || {};
   if (!KINDS.includes(kind) || !VALID_WEIGHTS.includes(weight))
     return { blocked: true, reason: 'invalid-input', nativeCommand: null, weight, quotaUnknown: true };
   const cmds = KIND_COMMANDS[kind] || [];
+  if (!availability.quotaForecast)
+    return { blocked: true, reason: 'quota-unavailable', nativeCommand: cmds[0] || null, weight, quotaUnknown: true };
   const available = cmds.filter((c) => isCmdAvailable(c, config, availability));
   if (!available.length)
     return { blocked: true, reason: 'no-available-candidate', nativeCommand: cmds[0] || null, weight, quotaUnknown: true };
-  const cmd = select(kind, available, config, ledger);
-  if (!cmd)
-    return { blocked: true, reason: 'no-eligible-candidate', nativeCommand: cmds[0] || null, weight, quotaUnknown: true };
+  const candidates = available.map((nativeCommand) => {
+    const def = config.commands[nativeCommand];
+    return { nativeCommand, model: def.model, provider: def.model.split('/')[0], agent: def.agent };
+  });
+  const decision = decideQuota({ kind, candidates, forecast: availability.quotaForecast, previous: null });
+  if (decision.blocked)
+    return { blocked: true, reason: decision.reason, nativeCommand: cmds[0] || null, weight, quotaUnknown: true };
+  const cmd = decision.candidate.nativeCommand;
   const def = config.commands[cmd], primary = cmds[0];
-  const reason = HIGH_RISK.includes(kind) ? 'high-risk-forces-openai'
-    : kind === 'visual' ? (cmd === primary ? 'visual' : 'visual-fallback')
-    : (kind === 'coding' || kind === 'complex') ? 'balanced'
-    : cmd === primary ? 'go-only' : 'go-fallback';
   return {
     nativeCommand: cmd, agent: def.agent, model: def.model,
     provider: def.model.split('/')[0], weight, fallback: cmd !== primary && !available.includes(primary),
-    skills: kind === 'visual' ? VISUAL_SKILLS : undefined, reason, quotaUnknown: true,
+    skills: kind === 'visual' ? VISUAL_SKILLS : undefined, reason: decision.reason, quotaUnknown: false,
   };
 }
 

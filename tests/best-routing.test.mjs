@@ -9,10 +9,11 @@ import path from 'node:path';
 import {
   chooseRoute, metrics, appendRecord, readLedger,
 } from '../shared/best-routing.mjs';
+import { forecast } from '../shared/best-quota.mjs';
 
 const CFG = {
   commands: {
-    code: { model: 'opencode-go/minimax-m3', agent: 'general' },
+    code: { model: 'opencode-go/minimax-m3.1-flash', agent: 'general' },
     small: { model: 'opencode-go/minimax-m3.1-flash', agent: 'explore', variant: 'low' },
     scan: { model: 'opencode-go/mimo-v2.6-flash', agent: 'explore' },
     analyze: { model: 'opencode-go/qwen3.7-plus', agent: 'specialist' },
@@ -30,6 +31,19 @@ const CFG = {
     { action: 'provider.use', effect: 'allow', resource: 'openai' },
   ],
 };
+const quotaForecast = (goUsed = 20, openaiUsed = 20) => {
+  const now = Date.now();
+  const window = (used, hours) => ({ used, resetAt: new Date(now + hours * 3600000).toISOString(),
+    limitWindowSeconds: hours * 3600 });
+  return forecast([
+    { provider: 'opencode-go', at: new Date(now).toISOString(), source: 'MANUAL', windows: {
+      rolling: window(goUsed, 5), weekly: window(goUsed, 168), monthly: window(goUsed, 720),
+    } },
+    { provider: 'openai', at: new Date(now).toISOString(), source: 'MANUAL', windows: {
+      rolling: window(openaiUsed, 5), weekly: window(openaiUsed, 168),
+    } },
+  ], now);
+};
 const FULL = {
   connected: ['opencode-go', 'openai'],
   models: [
@@ -40,6 +54,7 @@ const FULL = {
   ],
   unavailable: [],
   exhausted: [],
+  quotaForecast: quotaForecast(),
 };
 const entry = (id, kind, weight, provider, model, outcome, tokens, fallback, agent) => ({
   id, kind, weight, provider, model, outcome, duration_ms: 1000, agent: agent || 'general',
@@ -55,14 +70,14 @@ test('Go-only kinds route to opencode-go; analysis falls back to scan', () => {
   const r = chooseRoute('scan', 1, CFG, FULL, []);
   assert.equal(r.provider, 'opencode-go');
   assert.equal(r.nativeCommand, 'scan');
-  assert.equal(r.reason, 'go-only');
+  assert.equal(r.reason, 'quota-headroom');
   assert.equal(r.fallback, false);
-  assert.equal(r.quotaUnknown, true);
+  assert.equal(r.quotaUnknown, false);
   assert.equal(chooseRoute('analysis', 3, CFG, FULL, []).nativeCommand, 'analyze');
   const fb = chooseRoute('analysis', 3, CFG, { ...FULL, unavailable: ['opencode-go/qwen3.7-plus'] }, []);
   assert.equal(fb.nativeCommand, 'scan');
   assert.equal(fb.fallback, true);
-  assert.equal(fb.reason, 'go-fallback');
+  assert.equal(fb.reason, 'quota-headroom');
   const blocked = chooseRoute('scan', 1, CFG, { ...FULL, connected: ['openai'] }, []);
   assert.equal(blocked.blocked, true);
   assert.equal(blocked.reason, 'no-available-candidate');
@@ -80,42 +95,81 @@ test('high-risk kinds force OpenAI; blocked when unavailable', () => {
   assert.equal(chooseRoute('security', 5, CFG, FULL, []).nativeCommand, 'architect');
 });
 
-test('balanced kinds: coding ties to Go, deficit routes to OpenAI', () => {
+test('coding ties to Go and ledger weights never influence the route', () => {
   const r = chooseRoute('coding', 5, CFG, FULL, []);
   assert.equal(r.provider, 'opencode-go');
   assert.equal(r.nativeCommand, 'code');
-  assert.equal(r.reason, 'balanced');
+  assert.equal(r.reason, 'quota-headroom');
   const heavy = [
     entry('h1', 'scan', 5, 'opencode-go', 'opencode-go/mimo-v2.6-flash', 'passed'),
     entry('h2', 'scan', 5, 'opencode-go', 'opencode-go/mimo-v2.6-flash', 'passed'),
     entry('h3', 'scan', 5, 'opencode-go', 'opencode-go/mimo-v2.6-flash', 'passed'),
   ];
   const d = chooseRoute('coding', 3, CFG, FULL, heavy);
-  assert.equal(d.provider, 'openai');
-  assert.equal(d.nativeCommand, 'codeOpenai');
-  assert.equal(d.fallback, false, 'ordinary balancing is not provider/model failure');
+  assert.equal(d.provider, 'opencode-go');
+  assert.equal(d.nativeCommand, 'code');
+  assert.equal(d.fallback, false, 'ledger imbalance is not provider/model failure');
+  assert.deepEqual(chooseRoute('coding', 5, CFG, FULL, heavy), r);
 });
 
-test('complex prefers Kimi specialist; visual uses GLM and falls back to M3', () => {
-  assert.equal(chooseRoute('complex', 5, CFG, FULL, []).model, 'opencode-go/kimi-k2.7-code');
+test('complex requires OpenAI; visual uses only GLM and never falls back to M3', () => {
+  const complex = chooseRoute('complex', 5, CFG, FULL, []);
+  assert.equal(complex.model, 'openai/gpt-6.1-sol');
+  assert.equal(complex.nativeCommand, 'codeOpenai');
+  assert.equal(complex.reason, 'high-risk-forces-openai');
+  assert.equal(chooseRoute('complex', 5, CFG, { ...FULL, exhausted: ['openai'] }, []).blocked, true);
   const v = chooseRoute('visual', 1, CFG, FULL, []);
   assert.equal(v.model, 'opencode-go/glm-5.3-flash');
   assert.deepEqual(v.skills, ['frontend-design', 'accessibility', 'make-interfaces-feel-better']);
   assert.equal(v.fallback, false);
+  assert.equal(v.reason, 'visual-go-glm');
   const vf = chooseRoute('visual', 1, CFG, { ...FULL, unavailable: ['opencode-go/glm-5.3-flash'] }, []);
-  assert.equal(vf.model, 'opencode-go/minimax-m3');
-  assert.equal(vf.nativeCommand, 'visualFallback');
-  assert.equal(vf.fallback, true);
+  assert.equal(vf.blocked, true);
+  assert.equal(vf.model, undefined);
+  assert.notEqual(vf.nativeCommand, 'visualFallback');
   assert.equal(chooseRoute('scan', 1, CFG, FULL, []).skills, undefined);
 });
 
-test('small uses minimax-m3.1-flash, falls back to code M3', () => {
+test('small uses minimax-m3.1-flash and blocks rather than falling back to code M3', () => {
   assert.equal(chooseRoute('small', 1, CFG, FULL, []).model, 'opencode-go/minimax-m3.1-flash');
   assert.equal(chooseRoute('small', 1, CFG, FULL, []).nativeCommand, 'small');
-  const fb = chooseRoute('small', 1, CFG, { ...FULL, unavailable: ['opencode-go/minimax-m3.1-flash'] }, []);
-  assert.equal(fb.model, 'opencode-go/minimax-m3');
-  assert.equal(fb.nativeCommand, 'code');
-  assert.equal(fb.fallback, true);
+  const legacy = { ...CFG, commands: { ...CFG.commands, code: { ...CFG.commands.code, model: 'opencode-go/minimax-m3' } } };
+  const fb = chooseRoute('small', 1, legacy, { ...FULL, unavailable: ['opencode-go/minimax-m3.1-flash'] }, []);
+  assert.equal(fb.blocked, true);
+  assert.equal(fb.model, undefined);
+});
+
+test('quota pressure, not request counts, selects the coding provider', () => {
+  const pressured = chooseRoute('coding', 3, CFG, { ...FULL, quotaForecast: quotaForecast(85, 20) }, []);
+  assert.equal(pressured.provider, 'openai');
+  assert.equal(pressured.nativeCommand, 'codeOpenai');
+  assert.equal(pressured.reason, 'quota-headroom');
+  assert.equal(pressured.fallback, false, 'quota preference is not catalog failure');
+  assert.equal(chooseRoute('coding', 3, CFG, { ...FULL, quotaForecast: quotaForecast(20, 85) }, []).provider, 'opencode-go');
+});
+
+test('missing, unknown or stale quota blocks without inventing usage', () => {
+  for (const prediction of [undefined, forecast([]), quotaForecast(100, 100)]) {
+    const route = chooseRoute('coding', 3, CFG, { ...FULL, quotaForecast: prediction }, []);
+    assert.equal(route.blocked, true);
+    assert.equal(route.reason, 'quota-unavailable');
+    assert.equal(route.quotaUnknown, true);
+  }
+  const stale = quotaForecast();
+  for (const provider of Object.values(stale.providers)) provider.at = new Date(Date.now() - 3600000).toISOString();
+  assert.equal(chooseRoute('coding', 3, CFG, { ...FULL, quotaForecast: stale }, []).reason, 'quota-unavailable');
+  const unknownOpenAI = quotaForecast();
+  unknownOpenAI.providers.openai.state = 'UNKNOWN';
+  assert.equal(chooseRoute('complex', 5, CFG, { ...FULL, quotaForecast: unknownOpenAI }, []).reason, 'quota-unavailable');
+});
+
+test('Go Claude and Anthropic candidates are never routed even with catalog and policy approval', () => {
+  for (const model of ['opencode-go/claude-sonnet', 'opencode-go/anthropic-claude', 'anthropic/claude-sonnet']) {
+    const config = { ...CFG, commands: { scan: { model, agent: 'explore' } },
+      policies: [...CFG.policies, { action: 'provider.use', effect: 'allow', resource: 'anthropic' }] };
+    const available = { ...FULL, connected: [...FULL.connected, 'anthropic'], models: [...FULL.models, model] };
+    assert.equal(chooseRoute('scan', 1, config, available, []).blocked, true, model);
+  }
 });
 
 test('missing config commands and forbidden providers are blocked fail-closed', () => {
@@ -140,7 +194,7 @@ test('unknown catalog and unavailable providers fail closed, including variant q
   assert.equal(chooseRoute('scan', 1, CFG, { ...FULL, unavailable: ['opencode-go'] }, []).blocked, true);
   assert.equal(chooseRoute('visual', 1, CFG, {
     ...FULL, exhausted: ['opencode-go/glm-5.3-flash#low'],
-  }, []).nativeCommand, 'visualFallback');
+  }, []).blocked, true);
 });
 
 test('records cannot pretend to persist or contain prompt/credential fields', (t) => {
@@ -160,7 +214,7 @@ test('routing requires explicit provider policy and ledger rejects nested unknow
   assert.equal(data.perAgent['__proto__'].jobs, 1);
 });
 
-test('weighted balance stays within ±5 over 40+ mixed jobs', (t) => {
+test('40+ recorded jobs preserve quota routing rather than compensating ledger imbalance', (t) => {
   const f = tmpFile(t);
   let maxDeficit = 0;
   const jobs = [];
@@ -172,12 +226,14 @@ test('weighted balance stays within ±5 over 40+ mixed jobs', (t) => {
   for (let i = 0; i < jobs.length; i++) {
     const r = chooseRoute(jobs[i].kind, jobs[i].weight, CFG, FULL, readLedger(f));
     assert.ok(!r.blocked);
+    assert.deepEqual(r, chooseRoute(jobs[i].kind, jobs[i].weight, CFG, FULL, []));
     appendRecord(f, entry(`j${i}`, jobs[i].kind, jobs[i].weight, r.provider, r.model, 'passed', null, r.fallback));
     const def = readLedger(f).reduce((a, e) => a + (e.outcome === 'passed' && e.provider === 'opencode-go' ? e.weight : 0), 0)
       - readLedger(f).reduce((a, e) => a + (e.outcome === 'passed' && e.provider === 'openai' ? e.weight : 0), 0);
     maxDeficit = Math.max(maxDeficit, Math.abs(def));
   }
-  assert.ok(maxDeficit <= 5, `deficit ${maxDeficit} exceeded ±5`);
+  assert.ok(maxDeficit > 5, 'quota routing must not enforce an artificial weighted balance');
+  assert.equal(readLedger(f).length, jobs.length);
 });
 
 test('40 weighted jobs include mandatory high-risk work without trading safety for balance', () => {
@@ -188,15 +244,16 @@ test('40 weighted jobs include mandatory high-risk work without trading safety f
     for (const [kind, weight] of cycle) {
       const route = chooseRoute(kind, weight, CFG, FULL, work);
       assert.equal(route.blocked, undefined);
-      if (['architecture', 'debug'].includes(kind)) assert.equal(route.provider, 'openai');
+      if (['architecture', 'debug', 'complex'].includes(kind)) assert.equal(route.provider, 'openai');
       work.push({ ...entry(`mixed-${work.length}`, kind, weight, route.provider, route.model, 'passed'),
         agent: route.agent });
     }
   }
   const report = metrics(work);
   assert.equal(report.totals.jobs, 40);
-  assert.ok(Math.abs(report.perProvider.openai.weightedSharePct - 50) <= 5);
-  console.log('SIMULATED_WEIGHTED_BALANCE', JSON.stringify({ jobs: work.length,
+  assert.equal(report.perProvider.openai.passedWeight, 65);
+  assert.equal(report.perProvider['opencode-go'].passedWeight, 35);
+  console.log('SIMULATED_QUOTA_ROUTING', JSON.stringify({ jobs: work.length,
     openai: report.perProvider.openai.weightedSharePct,
     go: report.perProvider['opencode-go'].weightedSharePct, weight: report.totals.passedWeight }));
 });

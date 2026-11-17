@@ -369,7 +369,8 @@ test('generated BEST permissions allow authorized work while FREE and read-only 
     rule('external_directory', 'ask'), ...trustedExternal.map((directory) => rule('external_directory', 'allow', directory)),
   ]);
   assert.deepEqual(f.config('free').permissions, [rule('external_directory', 'ask'), rule('shell', 'ask')]);
-  assert.equal(f.config('best').agents.general.permissions, undefined, 'General inherits global rules after native defaults');
+  assert.deepEqual(best.agents.general.permissions, [rule('subagent', 'deny')],
+    'General inherits work permissions but explicitly cannot delegate');
   for (const id of ['plan', 'explore', 'reviewer']) {
     const rules = f.config('best').agents[id].permissions;
     assert.ok(rules.some((r) => r.action === '*' && r.effect === 'deny'));
@@ -543,25 +544,32 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE stays singleton and 
     assert.equal(c.$schema, 'https://opencode.ai/config.json');
     assert.equal(c.model, profile === 'best' ? 'openai/gpt-6.1-sol' : 'team-free/mimo-v2.6-flash-free');
     const expected = profile === 'best' ? {
-      build: 'openai/gpt-6.1-sol#low', general: 'opencode-go/longcat-2.0',
+      build: 'openai/gpt-6.1-sol#low', general: 'opencode-go/qwen3.7-plus',
       explore: 'opencode-go/mimo-v2.6-flash', title: 'openai/gpt-6-luna#low',
       summary: 'opencode-go/minimax-m3', compaction: 'opencode-go/minimax-m3',
       plan: 'openai/gpt-6.1-sol#medium', reviewer: 'openai/gpt-6.1-sol#medium',
       specialist: 'openai/gpt-6.1-sol#medium',
+      'visual-designer': 'opencode-go/glm-5.3-flash',
     } : Object.fromEntries(['build', 'plan', 'explore', 'general', 'reviewer', 'title', 'summary', 'compaction'].map((id) => [id, c.model]));
     assert.deepEqual(Object.fromEntries(Object.entries(c.agents).map(([id, agent]) => [id, agent.model])), expected);
     assert.equal(c.plugin, undefined);
-    assert.equal(c.plugins, undefined);
     assert.equal(c.agent, undefined);
     assert.deepEqual(c.skills, [path.join(f.ecc, 'skills'), ...(profile === 'best' ? [path.join(root, 'shared/skills')] : [])]);
     assert.deepEqual(Object.keys(c.mcp.servers), profile === 'best' ? ['serena', 'playwright'] : ['serena']);
     assert.ok(c.mcp.servers.serena.command.includes('--project-from-cwd'));
     if (profile === 'best') {
+      assert.deepEqual(c.plugins, [{ package: path.join(root, 'shared/best-quota-plugin'),
+        options: { stateFile: path.join(f.team, 'state/best/quota/state.json') } }],
+      'fresh BEST must load its packaged governor, not depend on a personal source checkout');
       assert.deepEqual(c.mcp.servers.playwright, {
         type: 'local',
-        command: ['npx', '--yes', '@playwright/mcp@0.0.83', '--headless', '--isolated', '--browser', 'chromium', '--image-responses', 'omit', '--snapshot-mode', 'none', '--no-webmcp'],
+        command: ['/opt/homebrew/opt/node@22/bin/npx', '--yes', '@playwright/mcp@0.0.83', '--headless', '--isolated', '--browser', 'chromium', '--image-responses', 'omit', '--snapshot-mode', 'none', '--no-webmcp'],
+        environment: { PATH: '/opt/homebrew/opt/node@22/bin:{env:PATH}' },
       });
-    } else assert.equal(c.mcp.servers.playwright, undefined);
+    } else {
+      assert.equal(c.mcp.servers.playwright, undefined);
+      assert.equal(c.plugins, undefined, 'FREE must not load the BEST governor');
+    }
     const permissions = c.agents.reviewer.permissions;
     assert.ok(permissions.some((p) => p.action === '*' && p.effect === 'deny'));
     assert.ok(!permissions.some((p) => ['shell', 'edit', 'subagent', ...(profile === 'free' ? ['execute'] : [])].includes(p.action) && p.effect === 'allow'));
@@ -595,6 +603,13 @@ test('BEST Hybrid specialist reuses general, denies only question/subagent and i
   const best = f.config('best');
   const free = f.config('free');
   const specialist = best.agents.specialist;
+  assert.equal(best.experimental.subagent_depth, 1);
+  for (const name of ['explore', 'general', 'specialist', 'reviewer', 'visual-designer']) {
+    assert.equal(best.agents[name].mode, 'subagent');
+    assert.equal(permissionEffect(best, 'build', 'subagent', name, f.home), 'allow');
+    assert.equal(permissionEffect(best, name, 'subagent', 'general', f.home), 'deny');
+  }
+  assert.equal(permissionEffect(best, 'build', 'subagent', 'build', f.home), 'deny');
   assert.ok(specialist, 'BEST Hybrid introduces a specialist agent');
   assert.equal(specialist.model, 'openai/gpt-6.1-sol#medium');
   assert.equal(specialist.mode, 'subagent');
@@ -638,7 +653,7 @@ test('BEST Hybrid specialist inherits its coordinator override, FREE ignores it'
   assert.equal(best.agents.specialist.model, 'openai/another-coordinator#medium',
     'specialist uses the same BEST coordinator and medium reasoning variant as plan/reviewer');
   // Worker pool keeps its opencode-go identity: override only swaps the OpenAI tier.
-  assert.equal(best.agents.general.model, 'opencode-go/longcat-2.0');
+  assert.equal(best.agents.general.model, 'opencode-go/qwen3.7-plus');
   assert.equal(best.agents.explore.model, 'opencode-go/mimo-v2.6-flash');
   assert.equal(best.agents.title.model, 'openai/gpt-6-luna#low');
   assert.equal(best.agents.summary.model, 'opencode-go/minimax-m3');

@@ -3,6 +3,7 @@
 ```sh
 bash tests/guardrail/runner.sh        # complete local mock suite
 bash tests/guardrail/runner.sh smoke  # installed candidate smoke
+bash tests/guardrail/runner.sh packaging  # formula/staging assets and installed fixture smoke
 ```
 
 The runner requires macOS `/usr/bin/sandbox-exec`; absence is a nonzero failure,
@@ -52,7 +53,8 @@ fixtures are removed only from the runner's own temporary directories.
   skipped without explicitly supplied evidence. The default runner deliberately
   does not inherit these opt-ins; skips are not PASS.
 
-The stable formula still references immutable 0.3.6. The staging renderer adds
-the candidate's guarded test surface and invokes the installed runner's `smoke`
+The stable formula still references immutable 0.3.7 while VERSION prepares 0.3.8.
+Stable and staging recipes share the same guarded test surface; the renderer
+changes only artifact identity and preserves the installed runner's `smoke`
 target. Local Ruby DSL tests are **not** a real `brew install`/`brew test`, remote
 CI result, model/auth check or verification of the scheduled 04:15 execution.
