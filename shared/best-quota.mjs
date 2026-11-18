@@ -585,16 +585,25 @@ function cleanUsage(entry) {
   return usage;
 }
 
+// Revocation audit entries carry this nil connection instead of an account
+// identity, so no reader can ever certify them for a real subscription.
+export const REVOKED_CONNECTION = '0'.repeat(64);
+
 export function cleanExtraUsageConfirmation(value) {
   if (!object(value) || value.source !== 'manual_user_confirmed' || value.status !== 'OFF'
       || typeof value.id !== 'string' || !/^[a-f0-9-]{36}$/i.test(value.id)
-      || typeof value.confirmedBy !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,79}$/i.test(value.confirmedBy)) {
+      || typeof value.confirmedBy !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,79}$/i.test(value.confirmedBy)
+      || (value.provider !== undefined && value.provider !== 'opencode-go')) {
     throw new Error('invalid Extra Usage confirmation');
   }
   const confirmedAt = timestamp(value.confirmedAt), expiresAt = timestamp(value.expiresAt);
+  // The one-hour window is retained only as a stored-format constraint so
+  // older readers can still validate the audit entry. It is not a lifetime:
+  // goExtraUsageSafety treats a manual OFF declaration as persistent.
   if (expiresAt <= confirmedAt || expiresAt - confirmedAt > 3600000) throw new Error('invalid Extra Usage confirmation expiry');
   return { id: value.id, source: 'manual_user_confirmed', status: 'OFF', confirmedBy: value.confirmedBy,
-    connection: connectionFingerprint(value.connection), confirmedAt: iso(confirmedAt), expiresAt: iso(expiresAt) };
+    provider: 'opencode-go', connection: connectionFingerprint(value.connection),
+    confirmedAt: iso(confirmedAt), expiresAt: iso(expiresAt) };
 }
 
 function cleanState(value, now) {
@@ -603,8 +612,10 @@ function cleanState(value, now) {
   const state = blankState();
   if (value.extraUsageConfirmations !== undefined) {
     if (!Array.isArray(value.extraUsageConfirmations)) throw new Error('invalid Extra Usage confirmation audit');
-    state.extraUsageConfirmations = value.extraUsageConfirmations.map(cleanExtraUsageConfirmation)
-      .filter(entry => timestamp(entry.confirmedAt) >= now - 35 * DAY).slice(-MAX_ENTRIES);
+    // Declarations and revocations are auditable history: they are bounded by
+    // the fixed entry cap only, never aged out, so revoking or re-confirming
+    // cannot erase the record of what was declared and when.
+    state.extraUsageConfirmations = value.extraUsageConfirmations.map(cleanExtraUsageConfirmation).slice(-MAX_ENTRIES);
   }
   if (value.policy !== undefined) {
     const policy = value.policy;

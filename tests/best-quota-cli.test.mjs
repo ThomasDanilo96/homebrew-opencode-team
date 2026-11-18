@@ -149,7 +149,7 @@ test('MiMo alone remains UNKNOWN and automatically excluded, not an independent 
   assert.ok(report.activation.blockers.includes('EXISTING_LIVE_SESSION_COVERAGE_UNVERIFIED'));
 });
 
-test('manual_user_confirmed is audited, connection-bound and expires without bypassing native activation checks', async t => {
+test('manual_user_confirmed persists across restarts and instances, stays identity-bound and is revocable without bypassing native activation checks', async t => {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'quota-confirmation-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'state.json'), connection = 'a'.repeat(64);
@@ -160,28 +160,69 @@ test('manual_user_confirmed is audited, connection-bound and expires without byp
   assert.equal(report.activation.extraUsage.source, 'manual_user_confirmed');
   assert.equal(report.activation.extraUsage.status, 'OFF');
   assert.equal(report.activation.extraUsage.apiAttested, false);
+  assert.equal(report.activation.extraUsage.persistent, true);
+  assert.equal(report.activation.extraUsage.autoDetectsConsoleChanges, false);
   assert.equal(report.activation.blockers.includes('GO_EXTRA_USAGE_UNVERIFIED'), false);
   assert.ok(report.activation.blockers.includes('EXISTING_LIVE_SESSION_COVERAGE_UNVERIFIED'));
   const state = readQuotaState(file), entry = state.extraUsageConfirmations.at(-1);
   assert.equal(entry.confirmedBy, 'requesting_user');
   assert.equal(entry.connection, connection);
+  assert.equal(entry.provider, 'opencode-go');
   assert.ok(entry.id);
+  // The stored one-hour window survives only as an older-reader format rule.
   assert.equal(Date.parse(entry.expiresAt) - Date.parse(entry.confirmedAt), 3600000);
-  assert.equal(goExtraUsageSafety(state, Date.parse(entry.expiresAt)).reason, 'GO_EXTRA_USAGE_CONFIRMATION_EXPIRED');
+  const expiry = Date.parse(entry.expiresAt);
+  assert.equal(goExtraUsageSafety(state, expiry).certified, true, 'no 60 minute expiry');
+  assert.equal(goExtraUsageSafety(state, expiry + 23 * 3600000).certified, true, 'no 24 hour expiry');
+  assert.equal(goExtraUsageSafety(state, expiry + 30 * 86400000).certified, true, 'still certified a month later');
   assert.equal(goExtraUsageSafety(state, Date.parse(entry.confirmedAt) - 1).certified, false);
-  assert.equal(goExtraUsageSafety(state, Date.now(), 'b'.repeat(64)).certified, false);
+  assert.equal(goExtraUsageSafety(state, Date.now(), 'b'.repeat(64)).certified, false, 'another account never inherits it');
+  // A restarted process re-derives the same decision from the shared file.
+  const quotaUrl = new URL('../shared/best-quota.mjs', import.meta.url).href;
+  const sourcesUrl = new URL('../shared/best-quota-sources.mjs', import.meta.url).href;
+  const child = spawnSync(process.execPath, ['--input-type=module', '-e',
+    `import {readQuotaState} from ${JSON.stringify(quotaUrl)};`
+    + `import {goExtraUsageSafety} from ${JSON.stringify(sourcesUrl)};`
+    + 'console.log(JSON.stringify(goExtraUsageSafety(readQuotaState(process.argv[1]))));', file],
+    { encoding: 'utf8' });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(JSON.parse(child.stdout).certified, true, 'restart keeps the declaration');
+  const second = await quotaCLI(['status'], file);
+  assert.equal(second.activation.extraUsage.certified, true, 'a second instance shares the declaration');
   await assert.rejects(quotaCLI(['activate'], file), /native pre-dispatch/);
   assert.equal(readQuotaState(file).policy.mode, 'monitor');
   await updateQuotaState(file, current => ({ ...current, runtime: { version: '2.2.5',
     loadedAt: confirmedAt, verifiedAt: confirmedAt, hookVerified: true } }));
   await assert.rejects(quotaCLI(['activate'], file), /EXISTING_LIVE_SESSION_COVERAGE_UNVERIFIED/);
-  await assert.rejects(quotaCLI(['confirm-extra-usage-off', '--confirmed-by', 'requesting_user', '--confirmed-at',
-    new Date(Date.now() - 3600001).toISOString()], file), /expired/);
-  assert.equal(readQuotaState(file).extraUsageConfirmations.length, 1);
+  // The original confirmation date may be old: no hourly or daily re-confirmation.
+  const legacy = await quotaCLI(['confirm-extra-usage-off', '--confirmed-by', 'requesting_user', '--confirmed-at',
+    new Date(Date.now() - 86400000).toISOString()], file);
+  assert.equal(legacy.activation.extraUsage.certified, true);
+  assert.equal(readQuotaState(file).extraUsageConfirmations.length, 2);
+  // The stored window itself stays strictly bounded for older readers.
   await assert.rejects(updateQuotaState(file, current => {
     current.extraUsageConfirmations[0].expiresAt = new Date(Date.parse(confirmedAt) + 7200000).toISOString();
     return current;
   }), /confirmation/);
+  // Revocation is immediate and verifiable, and never deletes the audit trail.
+  const revoked = await quotaCLI(['revoke-extra-usage-confirmation', '--confirmed-by', 'requesting_user'], file);
+  assert.equal(revoked.activation.extraUsage.status, 'REVOKED');
+  assert.equal(revoked.activation.extraUsage.certified, false);
+  assert.ok(revoked.activation.blockers.includes('GO_EXTRA_USAGE_CONFIRMATION_REVOKED'));
+  const afterRevoke = readQuotaState(file);
+  assert.equal(afterRevoke.extraUsageConfirmations.length, 3);
+  assert.equal(afterRevoke.extraUsageConfirmations[0].confirmedBy, 'requesting_user');
+  assert.equal(afterRevoke.extraUsageConfirmations[0].connection, connection);
+  await assert.rejects(quotaCLI(['activate'], file), /GO_EXTRA_USAGE_CONFIRMATION_REVOKED/);
+  // Re-confirming restores the persistent declaration for the same identity.
+  const reconfirmed = await quotaCLI(['confirm-extra-usage-off', '--confirmed-by', 'requesting_user',
+    '--confirmed-at', new Date().toISOString()], file);
+  assert.equal(reconfirmed.activation.extraUsage.certified, true);
+  assert.equal(reconfirmed.activation.extraUsage.source, 'manual_user_confirmed');
+  assert.equal(readQuotaState(file).extraUsageConfirmations.length, 4);
+  await assert.rejects(quotaCLI(['revoke-extra-usage-confirmation', '--confirmed-by', 'bad label!'], file),
+    /Invalid revocation label/);
+  assert.equal(readQuotaState(file).extraUsageConfirmations.length, 4, 'an invalid revocation writes nothing');
 });
 
 test('runtime coverage requires every discovered process and location, rejects reused PIDs, expired callbacks and injected tests', () => {

@@ -1,6 +1,6 @@
 // Authentication stays inside the supported plugin connection interface.
 // Account endpoints are compatibility adapters, never inference or billing APIs.
-import { normalizeGo, normalizeOpenAI, cleanExtraUsageConfirmation } from './best-quota.mjs';
+import { normalizeGo, normalizeOpenAI, cleanExtraUsageConfirmation, REVOKED_CONNECTION } from './best-quota.mjs';
 import { createHash } from 'node:crypto';
 
 export function goExtraUsageSafety(state, now = Date.now(), connection = state?.sources?.['opencode-go']?.connection) {
@@ -10,10 +10,23 @@ export function goExtraUsageSafety(state, now = Date.now(), connection = state?.
   if (!value) return unknown;
   let entry;
   try { entry = cleanExtraUsageConfirmation(value); } catch { return unknown; }
-  if (!Number.isFinite(now) || entry.connection !== connection || Date.parse(entry.confirmedAt) > now) return unknown;
-  if (now >= Date.parse(entry.expiresAt)) return { ...unknown, reason: 'GO_EXTRA_USAGE_CONFIRMATION_EXPIRED' };
+  if (!Number.isFinite(now)) return unknown;
+  // A revocation is the newest audit entry and wins over any older
+  // declaration: it carries a nil connection, so it can never be certified
+  // for an account, and it fails closed everywhere.
+  if (entry.confirmedBy.startsWith('revoked.') || entry.connection === REVOKED_CONNECTION) {
+    return { ...unknown, status: 'REVOKED', reason: 'GO_EXTRA_USAGE_CONFIRMATION_REVOKED', source: 'manual_user_revoked' };
+  }
+  // Bound to this exact subscription identity: a different account or an
+  // unverifiable one never inherits the declaration.
+  if (entry.connection !== connection || Date.parse(entry.confirmedAt) > now) return unknown;
   // Accepted user declaration, never an automatic billing/API attestation.
-  return { status: 'OFF', certified: true, apiAttested: false, source: 'manual_user_confirmed', confirmation: entry };
+  // It persists: expiresAt only satisfies the stored format for older
+  // readers. A later Go Console change is not detected automatically —
+  // revoke and re-confirm to reflect it.
+  return { status: 'OFF', certified: true, apiAttested: false, source: 'manual_user_confirmed',
+    persistent: true, autoDetectsConsoleChanges: false,
+    confirmation: { ...entry, persistent: true } };
 }
 
 const fingerprint = (id, connection, value) => createHash('sha256').update(JSON.stringify([

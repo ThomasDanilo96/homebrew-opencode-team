@@ -258,31 +258,49 @@ test('uncertified Go billing is denied even with abundant quota and a pinned liv
     model: { providerID: 'opencode-go', id: 'qwen3.7-plus' } }), /BEST_QUOTA_BLOCKED/);
 });
 
-test('runtime accepts a valid manual_user_confirmed declaration but denies expired or different subscription identities', async t => {
+test('runtime accepts a persistent manual_user_confirmed declaration and denies expired-format, revoked or different subscription identities', async t => {
   const f = await fixture(t, 'active', null);
   const now = Date.now();
+  const declaration = (connection, confirmedBy = 'requesting_user') => ({ id: '12345678-1234-1234-1234-123456789abc',
+    source: 'manual_user_confirmed', status: 'OFF', provider: 'opencode-go', confirmedBy, connection,
+    confirmedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 60000).toISOString() });
   await updateQuotaState(f.file, state => {
     for (const window of Object.values(state.snapshots[0].windows)) window.used = 10;
     state.sources['opencode-go'] = { connection: 'a'.repeat(64), status: 'LIVE' };
-    state.extraUsageConfirmations = [{ id: '12345678-1234-1234-1234-123456789abc', source: 'manual_user_confirmed',
-      status: 'OFF', confirmedBy: 'requesting_user', connection: 'a'.repeat(64),
-      confirmedAt: new Date(now - 1000).toISOString(), expiresAt: new Date(now + 60000).toISOString() }];
+    state.extraUsageConfirmations = [declaration('a'.repeat(64))];
     return state;
   });
   const event = { sessionID: 'confirmed', agent: 'general', kind: 'primary',
     model: { providerID: 'opencode-go', id: 'qwen3.7-plus' } };
   await f.hooks['model.request'](event);
+  // The stored window is a format legacy, not a lifetime: a past expiresAt
+  // does not re-expire the declaration.
   await updateQuotaState(f.file, state => {
     state.extraUsageConfirmations[0].expiresAt = new Date(now - 1).toISOString();
     return state;
   });
-  await assert.rejects(f.hooks['model.request'](event), /BEST_QUOTA_BLOCKED/);
+  await f.hooks['model.request'](event);
+  // Another subscription identity never inherits the declaration.
   await updateQuotaState(f.file, state => {
-    state.extraUsageConfirmations[0].expiresAt = new Date(now + 60000).toISOString();
     state.extraUsageConfirmations[0].connection = 'b'.repeat(64);
     return state;
   });
   await assert.rejects(f.hooks['model.request'](event), /BEST_QUOTA_BLOCKED/);
+  // An explicit revocation fails closed immediately, keeping the old entry.
+  await updateQuotaState(f.file, state => {
+    state.extraUsageConfirmations.push({ ...declaration('0'.repeat(64), 'revoked.requesting_user'),
+      id: '22222222-2222-4222-8222-222222222222', confirmedAt: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 3600000).toISOString() });
+    return state;
+  });
+  assert.equal(readQuotaState(f.file).extraUsageConfirmations.length, 2);
+  await assert.rejects(f.hooks['model.request'](event), /BEST_QUOTA_BLOCKED/);
+  // Re-confirming the same identity restores the persistent declaration.
+  await updateQuotaState(f.file, state => {
+    state.extraUsageConfirmations.push(declaration('a'.repeat(64)));
+    return state;
+  });
+  await f.hooks['model.request'](event);
 });
 
 test('a fully exhausted quota suspends a long running task at the next request, not during a file tool', async t => {

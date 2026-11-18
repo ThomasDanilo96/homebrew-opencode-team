@@ -655,6 +655,7 @@ function help() {
   opencode-team best quota monitor|refresh|verify-runtime|activate|disable
   opencode-team best quota install
   opencode-team best quota confirm-extra-usage-off --confirmed-by USER_LABEL --confirmed-at ISO_TIMESTAMP
+  opencode-team best quota revoke-extra-usage-confirmation --confirmed-by USER_LABEL
   opencode-team best quota configure < policy.json
   opencode-team best quota manual openai|opencode-go < verified-usage.json
   opencode-team version\n\nBEST: OpenAI coordinator + Go workers; connect both subscriptions with /connect.\nFREE: anonymous MiMo only; no paid fallback.\nmacOS setup schedules safe maintenance daily; session deletion is disabled.\nDisable/uninstall persist across setup.\nCustom HOME/root skips automatic scheduling; explicit enable requires the login HOME.\nResume natively: opencode-team best -s SESSION_ID\nNative CLI arguments are preserved, with --standalone added in command scope.\nSee README for migration, backup and security boundaries.`);

@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
-import { forecast, decideQuota, calibrateQuota, readQuotaState, updateQuotaState, normalizeGo, normalizeOpenAI, verifiedRuntime } from './best-quota.mjs';
+import { forecast, decideQuota, calibrateQuota, readQuotaState, updateQuotaState, normalizeGo, normalizeOpenAI, verifiedRuntime, REVOKED_CONNECTION } from './best-quota.mjs';
 import { goExtraUsageSafety } from './best-quota-sources.mjs';
 
 function parseInput(input) {
@@ -101,7 +101,8 @@ export function runtimeCoverage(state, file, scope, inventory = runtimeInventory
 
 export async function quotaCLI(args, file, scope) {
   const [command = 'status', ...rest] = args;
-  const allowed = ['status', 'report', 'doctor', 'forecast', 'monitor', 'disable', 'activate', 'manual', 'configure', 'confirm-extra-usage-off'];
+  const allowed = ['status', 'report', 'doctor', 'forecast', 'monitor', 'disable', 'activate', 'manual', 'configure',
+    'confirm-extra-usage-off', 'revoke-extra-usage-confirmation'];
   if (!allowed.includes(command)) throw new Error(`Unknown quota command: ${command}`);
   let state = readQuotaState(file);
   let admittedCoverage;
@@ -138,17 +139,39 @@ export async function quotaCLI(args, file, scope) {
     if (rest.length !== 4 || rest[0] !== '--confirmed-by' || rest[2] !== '--confirmed-at') {
       throw new Error('Usage: best quota confirm-extra-usage-off --confirmed-by USER_LABEL --confirmed-at ISO_TIMESTAMP');
     }
-    const confirmedAt = Date.parse(rest[3]), now = Date.now();
-    if (!Number.isFinite(confirmedAt) || confirmedAt > now || now - confirmedAt >= 3600000) {
-      throw new Error('Extra Usage confirmation expired or invalid; request a new user confirmation OFF');
+    if (!/^[a-z0-9][a-z0-9._-]{0,79}$/i.test(rest[1])) throw new Error('Invalid confirmation label; use a simple USER_LABEL');
+    const confirmedAt = Date.parse(rest[3]);
+    // No hourly re-confirmation: the original confirmation date is recorded
+    // and the OFF declaration persists until explicitly revoked. Only a
+    // future timestamp is impossible.
+    if (!Number.isFinite(confirmedAt) || confirmedAt > Date.now()) {
+      throw new Error('Extra Usage confirmation timestamp invalid; request a new user confirmation OFF');
     }
     state = await updateQuotaState(file, current => {
       const connection = current.sources['opencode-go']?.connection;
       if (!connection) throw new Error('Go subscription identity unavailable; refresh before confirming Extra Usage OFF');
       current.extraUsageConfirmations ??= [];
+      // expiresAt is stored only so older readers can validate the entry
+      // format; current code never expires the declaration on it.
       current.extraUsageConfirmations.push({ id: randomUUID(), source: 'manual_user_confirmed', status: 'OFF',
-        confirmedBy: rest[1], connection, confirmedAt: new Date(confirmedAt).toISOString(),
+        provider: 'opencode-go', confirmedBy: rest[1], connection, confirmedAt: new Date(confirmedAt).toISOString(),
         expiresAt: new Date(confirmedAt + 3600000).toISOString() });
+      return current;
+    });
+  } else if (command === 'revoke-extra-usage-confirmation') {
+    if (rest.length !== 2 || rest[0] !== '--confirmed-by') {
+      throw new Error('Usage: best quota revoke-extra-usage-confirmation --confirmed-by USER_LABEL');
+    }
+    const revokedBy = `revoked.${rest[1]}`;
+    if (!/^[a-z0-9][a-z0-9._-]{0,79}$/i.test(revokedBy)) throw new Error('Invalid revocation label; use a simple USER_LABEL');
+    const revokedAt = Date.now();
+    state = await updateQuotaState(file, current => {
+      current.extraUsageConfirmations ??= [];
+      // Newest audit entry, nil connection: every reader fails closed, so the
+      // declaration stops applying immediately, while all history is kept.
+      current.extraUsageConfirmations.push({ id: randomUUID(), source: 'manual_user_confirmed', status: 'OFF',
+        provider: 'opencode-go', confirmedBy: revokedBy, connection: REVOKED_CONNECTION,
+        confirmedAt: new Date(revokedAt).toISOString(), expiresAt: new Date(revokedAt + 3600000).toISOString() });
       return current;
     });
   } else if (command === 'manual') {
