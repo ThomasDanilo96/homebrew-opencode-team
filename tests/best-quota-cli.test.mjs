@@ -253,9 +253,11 @@ test('status reports whether the OpenAI/Go routing choice was applied automatica
   const decision = (extra = {}) => ({ at, kind: 'coding', blocked: false, scope: 'routing', enforced: true,
     candidate: { agent: 'general', provider: 'openai', model: 'openai/gpt-6.1-sol#medium' }, ...extra });
   await updateQuotaState(file, state => ({ ...state, policy: { mode: 'active' },
+    runtime: { version: '2.2.7', loadedAt: at, hookVerified: true, verifiedAt: at },
     decisions: [decision({ applied: 'openai/gpt-6.1-sol#medium' })] }));
   let report = await quotaCLI(['status'], file);
   assert.equal(report.routing.automatic, 'PASS');
+  assert.equal(report.routing.capability, 'VERIFIED', 'capability and live application are separate facts');
   assert.equal(report.routing.recommended, 'openai/gpt-6.1-sol#medium');
   assert.equal(report.routing.applied, 'openai/gpt-6.1-sol#medium');
   assert.equal(report.routing.enforced, true);
@@ -264,6 +266,7 @@ test('status reports whether the OpenAI/Go routing choice was applied automatica
   await updateQuotaState(file, state => { state.decisions.push(decision()); return state; });
   report = await quotaCLI(['status'], file);
   assert.equal(report.routing.automatic, 'FAIL');
+  assert.equal(report.routing.capability, 'VERIFIED', 'the capability does not degrade when a decision was skipped');
   assert.equal(report.routing.applied, null, 'no model is claimed when none was applied');
   // Monitor mode never enforces, whatever the recorded decision says.
   await updateQuotaState(file, state => {
@@ -273,8 +276,14 @@ test('status reports whether the OpenAI/Go routing choice was applied automatica
   });
   report = await quotaCLI(['status'], file);
   assert.equal(report.routing.automatic, 'FAIL');
+  assert.equal(report.routing.capability, 'VERIFIED', 'verified capability plus monitor mode is not live application');
   assert.equal(report.routing.mode, 'monitor');
   assert.equal(report.routing.applied, 'openai/gpt-6.1-sol#medium', 'the record itself is still reported honestly');
+  // An unverified runtime cannot claim the capability at all.
+  await updateQuotaState(file, state => { state.runtime = { version: '0.0.1', loadedAt: at, hookVerified: false }; return state; });
+  report = await quotaCLI(['status'], file);
+  assert.equal(report.routing.capability, 'UNVERIFIED');
+  assert.equal(report.routing.automatic, 'FAIL');
 });
 
 test('heartbeat receipt survives state validation as liveness-only proof', async t => {

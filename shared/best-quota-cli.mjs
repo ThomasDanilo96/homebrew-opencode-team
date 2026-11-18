@@ -231,6 +231,12 @@ export async function quotaCLI(args, file, scope) {
         // time and the model recorded as applied is the one recommended.
         // Monitor mode never enforces, so it honestly reports FAIL.
         automatic: applied ? 'PASS' : 'FAIL',
+        // Two independent facts: capability says the runtime can enforce
+        // (native hook verified for this version, certified by tests);
+        // automatic says a live decision was actually applied. A VERIFIED
+        // capability with automatic FAIL means "can regulate, not yet
+        // regulating" — never the other way around.
+        capability: state.runtime?.hookVerified && verifiedRuntime(state.runtime?.version) ? 'VERIFIED' : 'UNVERIFIED',
         mode: state.policy?.mode ?? 'monitor',
         recommended: last?.candidate?.model ?? null,
         applied: last?.applied ?? null,
