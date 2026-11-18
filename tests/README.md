@@ -53,7 +53,7 @@ fixtures are removed only from the runner's own temporary directories.
   skipped without explicitly supplied evidence. The default runner deliberately
   does not inherit these opt-ins; skips are not PASS.
 
-The stable formula still references immutable 0.3.7 while VERSION prepares 0.3.8.
+The stable formula still references immutable 0.3.8 while VERSION prepares 0.3.9.
 Stable and staging recipes share the same guarded test surface; the renderer
 changes only artifact identity and preserves the installed runner's `smoke`
 target. Local Ruby DSL tests are **not** a real `brew install`/`brew test`, remote

@@ -349,19 +349,19 @@ pending rollout checks](docs/validation.md), and [V2 compatibility/sources](docs
 
 ## Release preparation
 
-`VERSION` is **0.3.8**, an unpublished Quota Governor candidate. The stable
-formula URL/checksum remain pinned to published **0.3.7** until the release gates
+`VERSION` is **0.3.9**, an unpublished Quota Governor candidate. The stable
+formula URL/checksum remain pinned to published **0.3.8** until the release gates
 pass. Do not use the local staging checksum as an official release checksum.
-See [0.3.8 readiness](docs/maintenance/opencode-team-038-release-readiness.md)
-and [Quota Governor diagnostics](docs/best-quota-governor.md). Global activation,
-publication and local upgrade are blocked while the user Extra Usage declaration
-is expired or current BEST instance coverage is unverified.
+See [Quota Governor diagnostics](docs/best-quota-governor.md). The user Extra
+Usage OFF declaration is now persistent and revocable (no 1-hour expiry), so it
+no longer blocks publication; global activation and local upgrade still require
+current BEST instance coverage to be verified.
 
 The workflow deliberately separates candidate testing from publication. The
 following is the release procedure; completed gates are recorded in validation:
 
 1. After approval, commit and push the reviewed source to `prerelease/vVERSION`
-    using the candidate `VERSION` (currently `0.3.8`).
+    using the candidate `VERSION` (currently `0.3.9`).
    Run **Homebrew Install** manually on that branch: Phase A installs the exact
    candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
 2. Only after Phase A succeeds, authorize the immutable `vVERSION` tag on the

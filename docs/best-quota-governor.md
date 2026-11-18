@@ -1145,3 +1145,52 @@ fresco, PID/luogo allineati, nessuna origine iniettata); il nuovo receipt
 l'attivazione resta bloccata da `GO_EXTRA_USAGE_CONFIRMATION_EXPIRED` — la
 conferma umana "Extra Usage OFF" va chiesta all'utente, mai rinnovata in
 automatico. Nessuna pubblicazione GitHub/Homebrew prima della qualifica locale.
+
+### 14. Hotfix 18 novembre 2026 (0.3.9): la dichiarazione "Extra Usage OFF" è persistente e revocabile
+
+La regola `GO_EXTRA_USAGE_CONFIRMATION_EXPIRED` (1 ora) è stata **rimossa**:
+la dichiarazione umana "Extra Usage OFF" non scade più, senza introdurre
+servizi, daemon, scheduler o database nuovi.
+
+- **Persistenza.** `goExtraUsageSafety()` non legge più `expiresAt` come
+  scadenza: quella finestra resta solo un vincolo di formato dello storage
+  (≤ 1 ora) perché i lettori più vecchi possano validare la voce. La voce
+  restante viene marcata `persistent: true` e
+  `autoDetectsConsoleChanges: false` — onestamente: **un cambio futuro del
+  Go Console non viene rilevato in automatico**, va revocata e riconfermata.
+- **Identità.** Ora la voce registra anche `provider: "opencode-go"` e resta
+  legata all'`connection` fingerprint del subscription Go: un cambio
+  account/workspace non eredita la dichiarazione, e un'identità
+  inverificabile non viene indovinata su altri account (`apiAttested: false`
+  invariato: è una dichiarazione umana, mai un'attestazione API).
+- **Revoca.** Nuovo comando CLI (audit mai cancellato):
+  `opencode-team best quota revoke-extra-usage-confirmation --confirmed-by USER_LABEL`.
+  La voce di revoca usa `confirmedBy: revoked.<label>` e una connection nil
+  (`REVOKED_CONNECTION`): ogni lettore fallisce in chiusura, l'effetto è
+  immediato e verificabile (`status: REVOKED`, blocker
+  `GO_EXTRA_USAGE_CONFIRMATION_REVOKED`), poi una nuova conferma ripristina
+  la dichiarazione. La history non viene mai rimossa (solo cap fisso
+  `MAX_ENTRIES`, il filtro di 35 giorni sulle conferme è stato rimosso).
+- **CLI conferma.** `confirm-extra-usage-off` accetta ormai un `--confirmed-at`
+  anche vecchio (rifiuta solo timestamp futuri/impossibili): niente
+  re-conferma oraria o giornaliera. I gate `activate` nativi (pre-dispatch,
+  copertura istanze) restano invariati e non vengono bypassati.
+- **Sicurezza economica invariata.** Nessun fallback a pagamento, nessuna
+  chiave API a pagamento non autorizzata, blocchi `EXHAUSTED`/`UNKNOWN`/dati
+  stale, soppressione del retry su errore quota, riserva atomica multi-istanza
+  e admission `CRITICAL` con quota reale: la dichiarazione OFF **non giustifica
+  mai una quota esausta**.
+- **Test (10 mirati + regressioni):** persistenza via restart e seconda
+  istanza, assenza di scadenza 60min/24h/30gg, cambio account negato,
+  revoca → re-conferma, Go esausto, rifiuto del fallback a pagamento,
+  routing operativo, più `best-quota*` + `best-routing` 124/124 e
+  `tests/guardrail/runner.sh` exit 0.
+- **Attivazione (18 novembre).** Dichiarazione registrata sullo stato vivo
+  con la data originale `2026-11-18T14:13:43.000Z`, round-trip di revoca
+  verificato live e re-conferma finale; `operational: ACTIVE`, copertura
+  PASS, evidenza runtime applicata (`routing.appliedDecisions: 7`).
+  Le istanze live non sono state riavviate. Nota onesta: al momento della
+  verifica `activation.status` può risultare `BLOCKED` da
+  `SUBSCRIPTION_QUOTAS_UNVERIFIED` (dati quota stale > 15 minuti perché
+  l'istanza BEST non ha raccolto da ultimo) — gate preesistente e
+  indipendente dal hotfix, che si dissolve alla prossima raccolta.
