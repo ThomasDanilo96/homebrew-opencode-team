@@ -9,7 +9,7 @@ maintenance described below; it never deletes sessions.
 | Profile | Default | Connection |
 | --- | --- | --- |
 | `best` | OpenAI Sol coordinator + Go workers | Connect OpenAI and Go independently inside BEST |
-| `free` | `team-free/mimo-v2.6-flash-free` | Anonymous; no paid credentials |
+| `free` | `team-free/deepseek-v4.1-flash-free` + role models | Anonymous; verified zero-cost models, no paid credentials |
 
 The stable formula selects a checksum-verified release archive; `opencode-team
 version` prints the installed version. Tags are immutable; formula metadata
@@ -185,8 +185,8 @@ writer files, followed by Reviewer after implementation. General is reused, not
 duplicated as Coder A/B. Fewer lanes are correct when four useful independent jobs
 do not exist; the coordinator explains why. Plan remains optional, not a routine
 second planning cycle. There is no fixed fanout, router, scheduler, hook or automatic
-high/max escalation. `shared/best-hybrid.md` supplements BEST only; FREE's existing
-instructions and configuration remain unchanged.
+high/max escalation. `shared/best-hybrid.md` supplements BEST only; FREE's own
+`shared/free-hybrid.md` supplement is described below.
 BEST prioritizes the smallest readable, safe solution with demonstrated necessity
 for each addition. Significant changes require a concrete minimalism review;
 unnecessary abstractions must be removed before delivery. These are native agent
@@ -325,22 +325,52 @@ Removed commands (`daily`, `openai`, `go`, `best-ecc`, `best-native`, `deep-audi
 and runtime/maintenance aliases) fail rather than silently redirect. Owners must
 explicitly unload obsolete OS jobs; setup does not manage them.
 
-## FREE boundary
+## FREE Hybrid boundary
 
 Native `provider.use` filters provider IDs, not models. FREE therefore uses a
 singleton `team-free` provider without canonical catalog inheritance, at
 `https://opencode.ai/inference/openai/v1`, with empty API key/Authorization and no
 credential environment. All other providers are denied, including historical
-paid accounts. Every primary, child and maintenance agent selects the same free
-model; ordinary model/agent overrides cannot select a paid catalog fallback.
-Outages/rate limits must fail, not consume a paid account.
+paid accounts. Outages/rate limits must fail, not consume a paid account.
+
+The provider exposes the verified zero-cost catalog (models.dev cost 0, tool
+calling proven at qualification time): `deepseek-v4.1-flash-free`,
+`beam-free`, `mimo-v2.6-flash-free`, `big-pickle`, `flint-40b-free`,
+`iceman-free`, `longcat-2.5-free`, `nemotron-3.5-lightning-free` and
+`nemotron-3.5-super-vl-free`. Deprecated or restricted candidates
+(`glm-5.3-flash-free`, `minimax-m3.1-flash-free`, `inkling-2-small-free`) are
+excluded. Every entry declares `cost: { input: 0, output: 0 }`.
+
+| Responsibility | Native model |
+| --- | --- |
+| Build (coordinator), Plan, Reviewer | `team-free/deepseek-v4.1-flash-free` |
+| Explore (read-only analysis) | `team-free/beam-free` |
+| General, title, summary, compaction | `team-free/mimo-v2.6-flash-free` |
+
+Simple tasks stay with Build; meaningful scoped work delegates through native
+V2 subagents to Explore or General only, at most two concurrent, never
+recursively (`experimental.subagent_depth: 1`, children deny `subagent`).
+`OPENCODE_TEAM_FREE_MODEL` accepts only `team-free/<verified id>` and setup
+fails otherwise, so no unverified or paid model can reach the generated config.
+
+Permissions: ordinary reads, searches, workspace edits, tests, lint/typecheck,
+ordinary shell commands, non-destructive git and authorized delegation are
+allowed natively, so routine work runs without prompts. Explicit prompts remain
+for destructive commands, any remote `git push`, credentials and secrets,
+`sudo`/`launchctl` and infrastructure CLIs, `~/Library/LaunchAgents/*` edits and
+every directory outside the workspace. Secret reads ask instead of failing.
+There is no configured `*`/`*` allow wildcard and no `provider.use allow *`;
+`opencode --auto` must not be used to bypass these rules. `shared/free-hybrid.md`
+documents the full policy and per-model data-handling caveats.
 
 This is **not an adversarial billing sandbox or perpetual free-service promise**.
 Trusted project/system/Console config, plugins and host shell/network authority
 can change boundaries. Do not add credentials, alter the endpoint/header or run
-untrusted project config expecting isolation. The 128k/8192 limits are local
-budgets; zero catalog cost is not an invoice audit. MiMo free-period inputs may
-be used to improve the model: do not submit secrets or confidential data.
+untrusted project config expecting isolation. Free availability is promotional
+and can end without notice; unavailability is never permission to spend.
+Zero catalog cost is not an invoice audit, and the local budgets are not a
+usage guarantee. Never paste secrets or confidential data into prompts: several
+free models collect feedback data or log requests.
 
 ## Verification
 
@@ -349,8 +379,9 @@ pending rollout checks](docs/validation.md), and [V2 compatibility/sources](docs
 
 ## Release preparation
 
-`VERSION` is **0.3.9**, an unpublished Quota Governor candidate. The stable
-formula URL/checksum remain pinned to published **0.3.8** until the release gates
+`VERSION` is **0.3.10**, a locally qualified candidate carrying the GPT-6.2 Sol
+BEST routing (`7cf02bf`) and the FREE Hybrid transformation. The stable
+formula URL/checksum remain pinned to published **0.3.9** until the release gates
 pass. Do not use the local staging checksum as an official release checksum.
 See [Quota Governor diagnostics](docs/best-quota-governor.md). The user Extra
 Usage OFF declaration is now persistent and revocable (no 1-hour expiry), so it
@@ -361,7 +392,7 @@ The workflow deliberately separates candidate testing from publication. The
 following is the release procedure; completed gates are recorded in validation:
 
 1. After approval, commit and push the reviewed source to `prerelease/vVERSION`
-    using the candidate `VERSION` (currently `0.3.9`).
+    using the candidate `VERSION` (currently `0.3.10`).
    Run **Homebrew Install** manually on that branch: Phase A installs the exact
    candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
 2. Only after Phase A succeeds, authorize the immutable `vVERSION` tag on the
