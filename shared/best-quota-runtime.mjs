@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 const kinds = { build: 'coding', general: 'coding', explore: 'scan', specialist: 'complex',
   reviewer: 'review', plan: 'architecture', 'visual-designer': 'visual' };
 const candidate = (agent, model) => ({ agent, model, provider: model.split('/')[0] });
+const exploreFallback = 'openai/gpt-6.2-sol#low';
 const blocked = (reason = 'admission-denied') => {
   throw new Error(`BEST_QUOTA_BLOCKED (${reason}): new work suspended; state retained. Run opencode-team best quota status.`);
 };
@@ -61,7 +62,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
     try { process.kill(pid, 0); return true; }
     catch (error) { return error.code !== 'ESRCH'; }
   };
-  function fitsObservedRequest(value, state, prediction, calibration) {
+  function fitsObservedRequest(value, state, prediction, calibration, held = 0) {
     const [model, variant] = value.model.split('#');
     const name = classifyActivity({ provider: value.provider, model, variant });
     if (name === 'unclassified') return true;
@@ -73,7 +74,8 @@ export async function setupGovernor(ctx, dependencies = {}) {
     // an unbounded task's duration or a token-to-allowance conversion.
     const cost = estimateQuotaCost(calibration, name, Math.max(...durations));
     return cost.state !== 'ESTIMATE' || Object.entries(cost.windows).every(([window, percent]) =>
-      percent <= prediction.providers[value.provider].windows[window]?.remaining - prediction.options.safetyMarginPercent);
+      percent <= prediction.providers[value.provider].windows[window]?.remaining
+        - (value.agent === 'explore' && name === 'discovery-mimo' ? held : prediction.options.safetyMarginPercent));
   }
   let refreshPromise, lastRefresh = 0;
   async function refresh(force = false) {
@@ -127,11 +129,16 @@ export async function setupGovernor(ctx, dependencies = {}) {
         // automatic MiMo routing; independent candidates remain eligible.
         .filter(value => classifyActivity({ provider: value.provider, model: value.model.split('#')[0] }) !== 'discovery-mimo'
           || calibration.classes['discovery-mimo'].state !== 'UNKNOWN')
-        .filter(value => !active(current) || fitsObservedRequest(value, current, prediction, calibration));
-      decision = decideQuota({ kind: kinds[agent] ?? 'coding', candidates,
+        .filter(value => !active(current) || fitsObservedRequest(value, current, prediction, calibration, reserved[value.provider]));
+      const routing = { kind: kinds[agent] ?? 'coding', candidates,
         forecast: prediction,
         previous: current.decisions.findLast(d => d.scope === 'routing' && d.candidate?.agent === agent),
-        options: { ...current.policy, reserved } });
+        options: { ...current.policy, reserved } };
+      // Explore uses OpenAI only when the configured model cannot be admitted.
+      if (candidates.some(value => value.model === exploreFallback) && agent === 'explore') {
+        decision = decideQuota({ ...routing, candidates: candidates.filter(value => value.model !== exploreFallback) });
+      }
+      if (!decision || decision.blocked) decision = decideQuota(routing);
       current.decisions.push({ ...decision, scope: 'routing', enforced: active(current) });
       if (active(current) && !decision.blocked) {
         current.leases ??= [];
@@ -177,12 +184,11 @@ export async function setupGovernor(ctx, dependencies = {}) {
     const configured = await configuredModel(agent);
     if (!configured) { if (active(readQuotaState(file))) blocked(); return; }
     const models = [candidate(agent, configured)];
-    // Only a new bounded General delegation may cross providers. No replay, no
-    // mutation of a model already dispatched, no lower-quality critical fallback.
+    // Cross-provider alternatives are for new delegations, never resumed children.
     if (agent === 'general') {
       const alternative = await configuredModel('specialist');
       if (alternative?.startsWith('openai/')) models.push(candidate(agent, alternative));
-    }
+    } else if (agent === 'explore') models.push(candidate(agent, exploreFallback));
     if (event.input.model && !models.some(m => m.model === event.input.model)) {
       if (active(readQuotaState(file))) blocked();
       return;
@@ -190,7 +196,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
     const leaseID = randomUUID();
     const { state, decision } = await choose(agent, models, leaseID);
     if (!active(state)) return;
-    if (decision.blocked) blocked();
+    if (decision.blocked) blocked(agent === 'explore' ? decision.reason : undefined);
     leases.set(`${event.sessionID}:${event.id}`, leaseID);
     event.input.model = decision.candidate.model;
   }));
@@ -234,6 +240,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
     const roleModel = (await configuredModel(event.agent || 'build'))?.split('#')[0];
     const alternative = event.agent === 'general' ? (await configuredModel('specialist'))?.split('#')[0] : null;
     const compatible = model === roleModel || (event.agent === 'general' && model === alternative)
+      || (event.agent === 'explore' && `${model}#${event.model.variant}` === exploreFallback)
       || (event.kind === 'title' && model === 'openai/gpt-6-luna') || continuity;
     const binding = await subscription(ctx, event.model.providerID);
     if (event.model.providerID === 'opencode-go' && !(await goPaymentSafety(state, Date.now(), binding)).certified) blocked();
@@ -254,11 +261,11 @@ export async function setupGovernor(ctx, dependencies = {}) {
       const provider = prediction.providers[event.model.providerID];
       if (provider.connection !== binding) blocked('account-changed');
       if (provider.confirmedExhausted || ['EXHAUSTED', 'UNKNOWN'].includes(provider.state)) blocked('quota-unavailable');
-      if (!fitsObservedRequest(selected, current, prediction, calibrateQuota(current))) blocked('calibrated-request-envelope');
       // A record=false observation must not count its own session's existing
       // lease, or a retry could block the very request it is re-checking.
       const held = reservedPercent((current.leases ?? []).filter(lease =>
         record || !lease.sessionID || lease.sessionID !== event.sessionID), event.model.providerID);
+      if (!fitsObservedRequest(selected, current, prediction, calibrateQuota(current), held)) blocked('calibrated-request-envelope');
       decision = decideQuota({ kind: kinds[event.agent] ?? 'coding',
         candidates: [selected], forecast: prediction,
         options: { ...current.policy, reserved: { [event.model.providerID]: held } } });

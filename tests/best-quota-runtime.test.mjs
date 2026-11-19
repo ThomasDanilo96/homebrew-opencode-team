@@ -112,15 +112,54 @@ test('uncalibrated MiMo is excluded from automatic delegation without blocking q
   f.ctx.model.list = async () => ({ data: [
     { providerID: 'opencode-go', id: 'mimo-v2.6-flash' },
     { providerID: 'opencode-go', id: 'qwen3.7-plus' },
-    { providerID: 'openai', id: 'gpt-6.1-sol' },
+    { providerID: 'openai', id: 'gpt-6.2-sol' },
   ] });
   await updateQuotaState(f.file, state => {
     for (const window of Object.values(state.snapshots[0].windows)) window.used = 10;
     return state;
   });
-  await assert.rejects(f.tools['execute.before']({ tool: 'subagent', id: 'discovery', sessionID: 'parent',
-    input: { agent: 'explore' } }), /BEST_QUOTA_BLOCKED/);
+  const event = { tool: 'subagent', id: 'discovery', sessionID: 'parent', input: { agent: 'explore' } };
+  await f.tools['execute.before'](event);
+  assert.equal(event.input.model, 'openai/gpt-6.2-sol#low');
+  const model = { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'low' };
+  const request = { sessionID: 'child', agent: 'explore', kind: 'primary', model };
+  await f.hooks['model.request'](request);
+  await assert.rejects(f.hooks['model.request']({ ...request, model: { ...model, variant: 'medium' } }), /BEST_QUOTA_BLOCKED/);
+  await f.tools['execute.after'](event);
+  f.ctx.session.get = async () => ({ agent: 'explore', model });
+  const resume = { ...event, input: { agent: 'explore', sessionID: 'child' } };
+  await f.tools['execute.before'](resume);
+  assert.equal(resume.input.model, undefined);
+  await f.tools['execute.after'](resume);
   await f.tools['execute.before']({ tool: 'subagent', id: 'coding', sessionID: 'parent', input: { agent: 'general' } });
+  await updateQuotaState(f.file, state => {
+    const [go] = state.snapshots;
+    for (const window of Object.values(go.windows)) window.used = 95;
+    const at = Date.parse(go.at);
+    state.snapshots.push({ ...structuredClone(go), at: new Date(at - 60000).toISOString() });
+    state.usage.push({ at: new Date(at - 1000).toISOString(), provider: go.provider,
+      model: 'opencode-go/mimo-v2.6-flash', connection: go.connection, requests: 1 });
+    state.usage.push({ ...state.usage.at(-1), at: go.at, requests: 0, durationMs: 1000 });
+    return state;
+  });
+  const critical = { ...event, input: { agent: 'explore' } };
+  await f.tools['execute.before'](critical);
+  assert.equal(critical.input.model, 'opencode-go/mimo-v2.6-flash');
+  await f.tools['execute.after'](critical);
+  await updateQuotaState(f.file, state => {
+    for (const snapshot of state.snapshots) {
+      if (snapshot.provider === 'opencode-go') snapshot.windows.monthly.used = 100;
+    }
+    return state;
+  });
+  await f.tools['execute.before'](critical);
+  assert.equal(critical.input.model, 'openai/gpt-6.2-sol#low');
+  await f.tools['execute.after'](critical);
+  await updateQuotaState(f.file, state => {
+    state.snapshots.find(s => s.provider === 'openai').windows.weekly.used = 100;
+    return state;
+  });
+  await assert.rejects(f.tools['execute.before'](critical), /quota-unavailable/);
 });
 test('monitor records decisions but does not change execution; retry governor never retries quota denial', async t => {
   const f = await fixture(t, 'monitor');

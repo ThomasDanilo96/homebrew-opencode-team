@@ -352,13 +352,14 @@ const bestExternalPermissions = [rule('external_directory', 'ask'),
   ...['~/Sites/Github/*', '~/Sites/Python/*', '~/.local/bin/*', '~/Library/LaunchAgents/*',
     ...new Set([os.tmpdir(), fs.realpathSync(os.tmpdir())].map((directory) => path.join(directory, 'opencode', '*')))]
     .map((directory) => rule('external_directory', 'allow', directory))];
-function readonlyPermissions(profile) {
+function readonlyPermissions(profile, agent) {
   return [rule('*', 'deny'), ...['read', 'glob', 'grep', 'webfetch', 'websearch', 'skill', 'question',
     'serena_initial_instructions', 'serena_get_current_config', 'serena_get_symbols_overview', 'serena_find_symbol',
     'serena_find_declaration', 'serena_find_implementations', 'serena_find_referencing_symbols',
     'serena_get_diagnostics_for_file', 'serena_search_for_pattern', 'serena_list_dir', 'serena_find_file'].map((a) => rule(a, 'allow')),
   ...(profile === 'best' ? [
-    ...['execute', 'serena_activate_project', 'serena_list_memories', 'serena_read_memory'].map((a) => rule(a, 'allow')),
+    rule('execute', agent === 'explore' ? 'deny' : 'allow'),
+    ...['serena_activate_project', 'serena_list_memories', 'serena_read_memory'].map((a) => rule(a, 'allow')),
     ...bestExternalPermissions,
   ] : [rule('external_directory', 'ask')]),
   rule('read', profile === 'best' ? 'deny' : 'ask', '*.env'),
@@ -410,7 +411,7 @@ function configuration(profile) {
     agents.general.permissions = [rule('subagent', 'deny')];
     agents.general.description = 'Implement an independent, well-scoped task using verified free models; return focused changes and actual test results';
   }
-  for (const id of ['plan', 'explore', 'reviewer']) agents[id].permissions = readonlyPermissions(profile);
+  for (const id of ['plan', 'explore', 'reviewer']) agents[id].permissions = readonlyPermissions(profile, id);
   agents.reviewer = { ...agents.reviewer, description: 'Review changes for correctness, security and regressions without editing',
     mode: 'subagent', system: 'Read-only review. Report verified findings with file references and missing regressions. Never mutate files or run shell commands.' };
   for (const id of ['title', 'summary', 'compaction']) agents[id].permissions = [rule('*', 'deny')];

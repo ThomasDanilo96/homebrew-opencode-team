@@ -204,9 +204,11 @@ goPaymentSafety:async()=>({certified:true}),transportSafety:async()=>true})};`);
   configuration.providers.openai = { ...definition, models: { 'gpt-6.1-sol': { ...definition.models.probe, modelID: 'gpt-6.1-sol' } } };
   configuration.providers['opencode-go'] = { ...definition, models: { 'qwen3.7-plus': { ...definition.models.probe, modelID: 'qwen3.7-plus' } } };
   configuration.model = 'openai/gpt-6.1-sol';
+  configuration.providers.openai.models['gpt-6.2-sol'] = { ...definition.models.probe, modelID: 'gpt-6.2-sol' };
   configuration.agents = { build: { model: 'openai/gpt-6.1-sol' }, title: { model: 'openai/gpt-6.1-sol' },
     specialist: { model: 'openai/gpt-6.1-sol#medium', mode: 'subagent' },
-    general: { model: 'opencode-go/qwen3.7-plus', mode: 'subagent' } };
+    general: { model: 'opencode-go/qwen3.7-plus', mode: 'subagent' },
+    explore: { model: 'opencode-go/mimo-v2.6-flash', mode: 'subagent' } };
   configuration.plugins = [{ package: wrapper, options: { stateFile: file } }];
   fs.writeFileSync(config, JSON.stringify(configuration));
   respond = body => {
@@ -215,9 +217,10 @@ goPaymentSafety:async()=>({certified:true}),transportSafety:async()=>true})};`);
     if (text.includes('CHILD_ONLY')) return { content: 'CHILD_DONE' };
     if (text.includes('CHILD_RESUME')) return { content: 'CHILD_RESUMED' };
     if (body.messages.slice(user + 1).some(m => m.role === 'tool')) return { content: 'PARENT_DONE' };
-    if (!text.includes('PARENT_NATIVE_PROBE')) return { content: 'HEALTHY_DONE' };
+    if (!text.includes('PARENT_NATIVE_PROBE') && !text.includes('EXPLORE_NATIVE_PROBE')) return { content: 'HEALTHY_DONE' };
     return { tool_calls: [{ index: 0, id: 'delegate', type: 'function', function: { name: 'subagent',
-      arguments: JSON.stringify({ agent: 'general', description: 'Quota scoped probe', prompt: 'CHILD_ONLY', background: false }) } }] };
+      arguments: JSON.stringify({ agent: text.includes('EXPLORE_NATIVE_PROBE') ? 'explore' : 'general',
+        description: 'Quota scoped probe', prompt: 'CHILD_ONLY', background: false }) } }] };
   };
   const known1 = instanceIDs();
   await api('POST', '/api/location/reload' + query);
@@ -232,6 +235,14 @@ goPaymentSafety:async()=>({certified:true}),transportSafety:async()=>true})};`);
   assert.equal(children[0].model.providerID, 'openai');
   assert.equal(children[0].model.id, 'gpt-6.1-sol');
   assert.deepEqual(models, ['gpt-6.1-sol', 'gpt-6.1-sol', 'gpt-6.1-sol']);
+
+  const { data: exploreParent } = await api('POST', '/api/session', { title: 'Explore probe', location: { directory: dir } });
+  const beforeExplore = models.length;
+  assert.equal(await prompt(exploreParent.id, 'EXPLORE_NATIVE_PROBE'), 'succeeded', errors);
+  const exploreChild = (await api('GET', '/api/session?limit=20')).data.find(s => s.parentID === exploreParent.id);
+  assert.equal(exploreChild?.agent, 'explore');
+  assert.equal(exploreChild.model.variant, 'low');
+  assert.deepEqual(models.slice(beforeExplore), ['gpt-6.1-sol', 'gpt-6.2-sol', 'gpt-6.1-sol']);
 
   const beforeHealthy = requests;
   assert.equal(await prompt(parent.id, 'HEALTHY_FOLLOWUP'), 'succeeded');
