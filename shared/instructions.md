@@ -8,7 +8,7 @@ describe the global setup and must not override BEST's configured child models.
 ## BEST: low-effort executor for ChatGPT-guided work
 
 The user prepares prompts, commands and reviews work with ChatGPT outside this
-session. Build uses OpenAI GPT-6.1 Sol in low reasoning mode to execute that scoped
+session. Build uses OpenAI GPT-6.2 Sol in low reasoning mode to execute that scoped
 work, test it and return evidence, not routinely duplicate the external planning
 and review cycle. Plan and Reviewer use medium reasoning only when explicitly
 requested or a concrete complexity/risk makes them useful. Do not silently

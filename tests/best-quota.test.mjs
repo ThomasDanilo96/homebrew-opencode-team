@@ -707,6 +707,15 @@ test('calibration never leaks valid prior-account intervals into a different cur
 
 test('classifyActivity is public, shared with calibration, and does not invent Sol variants', () => {
   for (const name of Object.keys(CLASS_MODELS)) assert.equal(quota.classifyActivity(activity(name)), name);
+  // GPT-6.2 Sol is the current BEST coordinator: same OpenAI account identity,
+  // same weekly quota and same Sol classes as the legacy 6.1 events.
+  for (const variant of ['low', 'medium']) {
+    assert.equal(quota.classifyActivity({ provider: 'openai', model: 'openai/gpt-6.2-sol', variant }),
+      variant === 'low' ? 'coordination-sol-low' : 'analysis-review-sol-medium');
+    assert.equal(quota.classifyActivity({ provider: 'openai', model: 'openai/gpt-6.1-sol', variant }),
+      variant === 'low' ? 'coordination-sol-low' : 'analysis-review-sol-medium');
+  }
+  assert.equal(quota.classifyActivity({ provider: 'openai', model: 'openai/gpt-6.2-sol', variant: 'high' }), 'unclassified');
   for (const usage of [null, {}, activity('coordination-sol-low', { variant: undefined, kind: 'coding' }),
     activity('coordination-sol-low', { variant: 'high' }), activity('coordination-sol-low', { provider: 'other' }),
     activity('coordination-sol-low', { provider: undefined }), activity('coding-qwen', { activityClass: 'visual-glm' })]) {

@@ -249,8 +249,9 @@ export function classifyActivity(usage) {
     if (/^opencode-go\/mimo(?:[-.0-9]|$)/i.test(usage.model ?? '')) result = 'discovery-mimo';
     else if (/^opencode-go\/qwen(?:[-.0-9]|$)/i.test(usage.model ?? '')) result = 'coding-qwen';
     else if (/^opencode-go\/glm(?:[-.0-9]|$)/i.test(usage.model ?? '')) result = 'visual-glm';
-  } else if (usage.provider === 'openai' && usage.model === 'openai/gpt-6.1-sol') {
-    // Legacy OpenAI coding events do not identify the reasoning variant.
+  } else if (usage.provider === 'openai' && /^openai\/gpt-6\.[12]-sol$/.test(usage.model)) {
+    // OpenAI Sol coding events (6.1 legacy and 6.2 current) share one account
+    // identity and weekly quota; they do not identify the reasoning variant.
     if (usage.variant === 'low') result = 'coordination-sol-low';
     else if (usage.variant === 'medium') result = 'analysis-review-sol-medium';
   }

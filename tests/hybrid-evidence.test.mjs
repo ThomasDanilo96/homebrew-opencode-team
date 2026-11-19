@@ -75,12 +75,12 @@ function runUnittest(dir, files) {
 }
 
 function assertBuildLow(parent, config) {
-  assert.equal(config.agents.build.model, 'openai/gpt-6.1-sol#low');
-  assert.equal(config.providers.openai.models['gpt-6.1-sol'].settings.reasoningEffort, 'low');
+  assert.equal(config.agents.build.model, 'openai/gpt-6.2-sol#low');
+  assert.equal(config.providers.openai.models['gpt-6.2-sol'].settings.reasoningEffort, 'low');
   const messages = parent.messages.filter((m) => m.type === 'assistant');
   assert.ok(messages.length > 0);
   assert.ok(messages.every((m) => m.agent === 'build' && m.model.providerID === 'openai'
-    && m.model.id === 'gpt-6.1-sol' && (!m.model.variant || m.model.variant === 'low')));
+    && m.model.id === 'gpt-6.2-sol' && (!m.model.variant || m.model.variant === 'low')));
 }
 
 function assertForegroundBatch(parent) {
@@ -160,7 +160,7 @@ test('native Hybrid exports prove four concurrent lanes, models, ownership and s
   high.messages.find((m) => m.type === 'assistant').model.variant = 'high';
   assert.throws(() => assertBuildLow(high, config));
   const mediumDefault = structuredClone(config);
-  mediumDefault.providers.openai.models['gpt-6.1-sol'].settings.reasoningEffort = 'medium';
+  mediumDefault.providers.openai.models['gpt-6.2-sol'].settings.reasoningEffort = 'medium';
   assert.throws(() => assertBuildLow(parent, mediumDefault));
   const background = structuredClone(parent);
   background.messages.flatMap((m) => m.content || []).find((p) => p.name === 'subagent').state.input.background = true;
@@ -172,7 +172,7 @@ test('native Hybrid exports prove four concurrent lanes, models, ownership and s
   assert.equal(new Set(children.map((c) => c.info.id)).size, 5);
   assert.deepEqual(children.map((c) => c.info.agent).sort(), ['explore', 'general', 'general', 'reviewer', 'specialist']);
   const models = { explore: ['opencode-go', 'mimo-v2.6-flash'], general: ['opencode-go', 'longcat-2.0'],
-    specialist: ['openai', 'gpt-6.1-sol'], reviewer: ['openai', 'gpt-6.1-sol'] };
+    specialist: ['openai', 'gpt-6.2-sol'], reviewer: ['openai', 'gpt-6.2-sol'] };
   const mutations = new Set(['edit', 'write', 'patch', 'serena_replace_symbol_body', 'serena_replace_content']);
   const messages = (c) => c.messages.filter((m) => m.type === 'assistant');
   const end = (c) => Math.max(...messages(c).map((m) => m.time.completed));
@@ -204,7 +204,7 @@ test('native Hybrid exports prove four concurrent lanes, models, ownership and s
   const reviewer = children.find((c) => c.info.agent === 'reviewer');
   assert.ok(reviewer.info.time.created > Math.max(...children.filter((c) => c.info.agent === 'general').map(end)));
   const build = messages(parent);
-  assert.ok(build.every((m) => m.agent === 'build' && m.model.providerID === 'openai' && m.model.id === 'gpt-6.1-sol'));
+  assert.ok(build.every((m) => m.agent === 'build' && m.model.providerID === 'openai' && m.model.id === 'gpt-6.2-sol'));
   const events = fs.readFileSync(`${prefix}.jsonl`, 'utf8');
   assert.ok(!events.includes('Permission required'));
   for (const file of ['TASK.md', 'test_alpha.py', 'test_beta.py']) {

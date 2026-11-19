@@ -169,9 +169,9 @@ missing-docstring policy. See [0.3.3 validation](docs/best-context7-validation.m
 
 | Responsibility | Native model |
 | --- | --- |
-| Build: implementation, tests and integration | `openai/gpt-6.1-sol#low` |
-| Optional Plan / independent Reviewer | `openai/gpt-6.1-sol#medium` |
-| Specialist: complex scoped implementation or critical analysis | `openai/gpt-6.1-sol#medium` |
+| Build: implementation, tests and integration | `openai/gpt-6.2-sol#low` |
+| Optional Plan / independent Reviewer | `openai/gpt-6.2-sol#medium` |
+| Specialist: complex scoped implementation or critical analysis | `openai/gpt-6.2-sol#medium` |
 | General | `opencode-go/longcat-2.0` |
 | Explore | `opencode-go/mimo-v2.6-flash` |
 | Title | `openai/gpt-6-luna#low` |
@@ -202,7 +202,7 @@ Changing a primary agent alone may retain the session model; children use their
 own configured models. For an explicit planning run:
 
 ```sh
-opencode-team best run --agent plan --model 'openai/gpt-6.1-sol#medium' "Plan this change"
+opencode-team best run --agent plan --model 'openai/gpt-6.2-sol#medium' "Plan this change"
 opencode-team best run --model opencode-go/minimax-m3 "Reply OK"
 ```
 

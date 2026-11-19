@@ -334,7 +334,7 @@ function readonlyPermissions(profile) {
   ...(profile === 'best' ? [rule('read', 'allow', '*.env.example')] : [])];
 }
 function configuration(profile) {
-  const bestModel = process.env.OPENCODE_TEAM_BEST_MODEL || 'openai/gpt-6.1-sol';
+  const bestModel = process.env.OPENCODE_TEAM_BEST_MODEL || 'openai/gpt-6.2-sol';
   const goModel = process.env.OPENCODE_TEAM_BEST_GO_MODEL || 'opencode-go/qwen3.7-plus';
   if (!/^openai\/[A-Za-z0-9][\w./-]*$/.test(bestModel)) fail('BEST coordinator model must be an openai/model ID without #variant');
   if (!/^opencode-go\/[A-Za-z0-9][\w./-]*$/.test(goModel)) fail('BEST worker model must be an opencode-go/model ID without #variant');

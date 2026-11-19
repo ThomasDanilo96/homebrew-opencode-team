@@ -516,10 +516,10 @@ test('only best/free public profiles; native arguments and resume are forwarded 
   const f = fixture(t);
   ok(f.run('setup'));
   for (const profile of ['best', 'free']) {
-    const result = f.run('start', profile, 'run', '-s', 'ses_native', '--model', profile === 'free' ? 'opencode/big-pickle' : 'openai/gpt-6.1-sol', 'a prompt with spaces');
+    const result = f.run('start', profile, 'run', '-s', 'ses_native', '--model', profile === 'free' ? 'opencode/big-pickle' : 'openai/gpt-6.2-sol', 'a prompt with spaces');
     ok(result);
     const capture = JSON.parse(fs.readFileSync(f.env.MOCK_CAPTURE));
-    assert.deepEqual(capture.args, ['run', '-s', 'ses_native', '--model', profile === 'free' ? 'opencode/big-pickle' : 'openai/gpt-6.1-sol', 'a prompt with spaces', '--standalone']);
+    assert.deepEqual(capture.args, ['run', '-s', 'ses_native', '--model', profile === 'free' ? 'opencode/big-pickle' : 'openai/gpt-6.2-sol', 'a prompt with spaces', '--standalone']);
     assert.equal(capture.env.XDG_DATA_HOME, path.join(f.team, 'data', profile, 'data'));
     assert.equal(capture.env.XDG_CONFIG_HOME, path.join(f.team, 'config', profile, 'v2', 'xdg-config'));
     const tools = path.join(f.team, 'data/best');
@@ -542,13 +542,13 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE stays singleton and 
     const c = f.config(profile);
     assert.equal(c.default_agent, 'build');
     assert.equal(c.$schema, 'https://opencode.ai/config.json');
-    assert.equal(c.model, profile === 'best' ? 'openai/gpt-6.1-sol' : 'team-free/mimo-v2.6-flash-free');
+    assert.equal(c.model, profile === 'best' ? 'openai/gpt-6.2-sol' : 'team-free/mimo-v2.6-flash-free');
     const expected = profile === 'best' ? {
-      build: 'openai/gpt-6.1-sol#low', general: 'opencode-go/qwen3.7-plus',
+      build: 'openai/gpt-6.2-sol#low', general: 'opencode-go/qwen3.7-plus',
       explore: 'opencode-go/mimo-v2.6-flash', title: 'openai/gpt-6-luna#low',
       summary: 'opencode-go/minimax-m3', compaction: 'opencode-go/minimax-m3',
-      plan: 'openai/gpt-6.1-sol#medium', reviewer: 'openai/gpt-6.1-sol#medium',
-      specialist: 'openai/gpt-6.1-sol#medium',
+      plan: 'openai/gpt-6.2-sol#medium', reviewer: 'openai/gpt-6.2-sol#medium',
+      specialist: 'openai/gpt-6.2-sol#medium',
       'visual-designer': 'opencode-go/glm-5.3-flash',
     } : Object.fromEntries(['build', 'plan', 'explore', 'general', 'reviewer', 'title', 'summary', 'compaction'].map((id) => [id, c.model]));
     assert.deepEqual(Object.fromEntries(Object.entries(c.agents).map(([id, agent]) => [id, agent.model])), expected);
@@ -581,7 +581,7 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE stays singleton and 
     { action: 'provider.use', resource: 'openai', effect: 'allow' },
   ]);
   assert.deepEqual(f.config('best').providers, {
-    openai: { models: { 'gpt-6.1-sol': { settings: { reasoningEffort: 'low' } } } },
+    openai: { models: { 'gpt-6.2-sol': { settings: { reasoningEffort: 'low' } } } },
   }, 'V2 drops root #variants, so bare native sessions also need a low model default');
   assert.equal(f.config('best').agents.expert, undefined, 'Build already owns difficult reasoning; no duplicate specialist');
   assert.equal(f.config('free').agents.expert, undefined);
@@ -611,7 +611,7 @@ test('BEST Hybrid specialist reuses general, denies only question/subagent and i
   }
   assert.equal(permissionEffect(best, 'build', 'subagent', 'build', f.home), 'deny');
   assert.ok(specialist, 'BEST Hybrid introduces a specialist agent');
-  assert.equal(specialist.model, 'openai/gpt-6.1-sol#medium');
+  assert.equal(specialist.model, 'openai/gpt-6.2-sol#medium');
   assert.equal(specialist.mode, 'subagent');
   assert.equal(typeof specialist.description, 'string');
   assert.ok(specialist.description.length > 16, `specialist description must be meaningful, got ${JSON.stringify(specialist.description)}`);
@@ -731,7 +731,7 @@ test('isolated BEST permits Go without changing or inheriting the classic OpenAI
   assert.equal(env.OPENCODE_CONFIG, f.configPath('best'));
   assert.equal(env.XDG_CONFIG_HOME, path.join(f.team, 'config/best/v2/xdg-config'));
   assert.ok(f.config('best').policies.some((p) => p.resource === 'opencode-go' && p.effect === 'allow'));
-  assert.equal(f.config('best').agents.reviewer.model, 'openai/gpt-6.1-sol#medium');
+  assert.equal(f.config('best').agents.reviewer.model, 'openai/gpt-6.2-sol#medium');
   assert.equal(fs.readFileSync(classic, 'utf8'), bytes);
   assert.equal(fs.statSync(classic).mtimeMs, before);
   assert.equal(fs.statSync(classic).mode & 0o777, 0o400);
@@ -965,7 +965,7 @@ test('an interrupted transaction is blocked on launch and recovered before the n
   const result = f.run('setup');
   assert.notEqual(result.status, 0);
   assert.match(result.stderr, /Recovered interrupted/);
-  assert.equal(f.config('best').model, 'openai/gpt-6.1-sol');
+  assert.equal(f.config('best').model, 'openai/gpt-6.2-sol');
   assert.equal(fs.existsSync(path.join(f.team, 'config/.pending')), false);
   delete f.env.MOCK_ECC_DIRTY;
   ok(f.run('setup'));

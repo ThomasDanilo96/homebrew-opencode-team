@@ -222,7 +222,7 @@ export async function quotaCLI(args, file, scope) {
   }
   const candidates = [
     { provider: 'opencode-go', model: 'opencode-go/qwen3.7-plus', agent: 'general' },
-    { provider: 'openai', model: 'openai/gpt-6.1-sol#medium', agent: 'general' },
+    { provider: 'openai', model: 'openai/gpt-6.2-sol#medium', agent: 'general' },
   ];
   return {
     operational: state.policy?.mode === 'active' ? (coverage.status === 'PASS' && extraUsage.certified && state.runtime?.hookVerified

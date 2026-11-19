@@ -54,7 +54,7 @@ def main():
                     assert "subagent" not in tools, "General can recursively delegate"
                     delta = {"content": "GENERAL_NATIVE_OK"}
                 else:
-                    assert model == "gpt-6.1-sol", model
+                    assert model == "gpt-6.2-sol", model
                     assert "subagent" in tools, "native tool absent from Build request"
                     assert "BEST Hybrid: proportional native delegation" in json.dumps(messages)
                     outputs = [m for m in messages if m["role"] == "tool"]
@@ -105,7 +105,7 @@ def main():
                               "limit": {"context": 128000, "output": 4096},
                               "cost": {"input": 0, "output": 0}}
                               for model in models}}
-        for provider, models in {"openai": ["gpt-6.1-sol", "gpt-6-luna"],
+        for provider, models in {"openai": ["gpt-6.2-sol", "gpt-6-luna"],
                                  "opencode-go": ["mimo-v2.6-flash", "qwen3.7-plus"]}.items()}
     file = fixture / "opencode.json"
     file.write_text(json.dumps(config))
@@ -182,7 +182,7 @@ def main():
         agents = api("GET", "/api/agent" + query)
         (evidence / "mock-native-agents.json").write_text(json.dumps(agents, indent=2))
         by_id = {a["id"]: a for a in agents["data"]}
-        assert by_id["build"]["model"] == {"id": "gpt-6.1-sol", "providerID": "openai", "variant": "low"}
+        assert by_id["build"]["model"] == {"id": "gpt-6.2-sol", "providerID": "openai", "variant": "low"}
         connections = api("GET", "/api/integration" + query)
         # Only public connection metadata, not the credential endpoint or stored values.
         relevant = [i for i in connections["data"] if i["id"] in ["openai", "opencode-go"]]
