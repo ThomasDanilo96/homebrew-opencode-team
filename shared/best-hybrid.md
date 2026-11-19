@@ -43,6 +43,11 @@ MiniMax M3 remains quarantined from implementation and automatic fallbacks;
 unchanged hidden summary/compaction roles are retained only for continuity.
 
 - Simple work: Build implements and verifies directly, without unnecessary children.
+- For complex mandates, the operator can opt into native `/goal <objective>` on
+  OpenCode 2.3.2. Include acceptance checks and the authorization boundary in
+  the objective. Goal review can spend subscription quota and does not grant
+  permissions. Use `/goal pause` to stop the goal and resume only after reviewing
+  the remaining scope. Ordinary prompts do not start a goal.
 - Normal work: prefer two or three useful independent lanes when delegation helps.
 - A substantial structured mandate: proactively delegate independent work with the
   native `subagent` tool: Explore for targeted discovery, General for scoped

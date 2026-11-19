@@ -119,7 +119,7 @@ test('native V2 quota gates existing sessions and native children before local t
       await new Promise(resolve => setTimeout(resolve, 250));
     }
   }
-  async function prompt(sessionID, text) {
+  async function prompt(sessionID, text, command) {
     // A reused session retains its previous outcome while the next run starts.
     // Observe this execution's native lifecycle instead of polling stale state.
     const controller = new AbortController();
@@ -147,7 +147,8 @@ test('native V2 quota gates existing sessions and native children before local t
       assert.fail(`session ${sessionID} event stream ended: ${errors}`);
     })();
     try {
-      await api('POST', `/api/session/${sessionID}/prompt`, { text });
+      await api('POST', `/api/session/${sessionID}/${command ? 'command' : 'prompt'}`,
+        command ? { text, name: command } : { text });
       return await finished;
     } catch (error) {
       t.diagnostic(`Prompt ${text.slice(0, 80)} failed; recent loopback requests: ${JSON.stringify(recentRequests)}`);
@@ -333,6 +334,37 @@ test('native V2 quota gates existing sessions and native children before local t
      ? ['gpt-6.1-sol', 'gpt-6.1-sol', 'gpt-6.2-sol', 'gpt-6.1-sol']
      : ['gpt-6.1-sol', 'gpt-6.2-sol', 'gpt-6.1-sol']);
 
+  if (asyncChildren) {
+    const { data: goal } = await api('POST', '/api/session', { title: 'BEST goal probe', location: { directory: dir } });
+    const evidence = path.join(dir, 'goal-evidence');
+    let turns = 0, reviews = 0, toolRequested = false;
+    respond = body => {
+      const text = JSON.stringify(body.messages.at(-1));
+      if (/verdict/.test(text)) {
+        reviews++;
+        return { content: JSON.stringify(turns === 1
+          ? { verdict: 'continue', reason: 'Authorized check remains', next_step: 'Finish the authorized check only' }
+          : { verdict: 'blocked', reason: 'Only the privileged operation remains' }) };
+      }
+      if (turns === 1 && !toolRequested) {
+        toolRequested = true;
+        return { tool_calls: [{ index: 0, id: 'goal-check', type: 'function', function: {
+          name: 'shell', arguments: JSON.stringify({ command: 'printf verified > goal-evidence',
+            description: 'Record authorized isolated check', workdir: dir }),
+        } }] };
+      }
+      turns++;
+      return { content: turns === 1 ? 'Stopped before checking' : 'Authorized check finished; privileged operation not attempted' };
+    };
+    assert.equal(await prompt(goal.id, 'Verify the local fixture; a privileged rollout is not authorized.', 'goal'), 'succeeded');
+    assert.equal(turns, 2);
+    assert.equal(reviews, 2);
+    assert.equal(fs.readFileSync(evidence, 'utf8'), 'verified');
+    assert.equal(await prompt(goal.id, 'resume', 'goal'), 'succeeded');
+    assert.equal(reviews, 3, 'explicit resume reviews once before pausing again');
+    t.diagnostic('PASS: native /goal reviewer admitted; premature stop continued to a real local tool action');
+    respond = () => ({ content: 'HEALTHY_DONE' });
+  }
   const beforeHealthy = requests;
   assert.equal(await prompt(parent.id, 'HEALTHY_FOLLOWUP'), 'succeeded');
   assert.equal(requests, beforeHealthy + 1, 'same session accepts a new healthy prompt');
