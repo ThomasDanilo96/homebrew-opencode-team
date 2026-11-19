@@ -19,8 +19,27 @@ const legacySerena = path.join(roots.data, 'bin/serena');
 const serenaBin = !process.env.OPENCODE_TEAM_DEPENDENCY_ROOT && fs.existsSync(legacySerena)
   ? legacySerena : path.join(dependencyRoot, 'bin/serena');
 const eccSource = path.resolve(process.env.OPENCODE_TEAM_ECC_SOURCE || path.join(dependencyRoot, `ecc-${eccPin}`));
-const freeID = 'mimo-v2.6-flash-free';
+// Verified FREE catalog (models.dev cost 0, tool calling proven 2026-11-19).
+// Excluded: glm-5.3-flash-free and minimax-m3.1-flash-free (deprecated),
+// inkling-2-small-free (region/training restrictions).
+const freeCatalog = {
+  'deepseek-v4.1-flash-free': { context: 200000, output: 32000 },
+  'beam-free': { context: 1048576, output: 131072 },
+  'mimo-v2.6-flash-free': { context: 128000, output: 8192 },
+  'big-pickle': { context: 200000, output: 32000 },
+  'flint-40b-free': { context: 262144, output: 65536 },
+  'iceman-free': { context: 262144, output: 131072 },
+  'longcat-2.5-free': { context: 1000000, output: 262144 },
+  'nemotron-3.5-lightning-free': { context: 262144, output: 262144 },
+  'nemotron-3.5-super-vl-free': { context: 1048576, output: 131072 },
+};
+// Role assignment: Build/Plan/Reviewer coordinate and review with the strong
+// zero-retention coordinator, Explore reads with the large-context model,
+// General and the maintenance roles reuse the proven helper.
+const freeID = 'deepseek-v4.1-flash-free';
 const freeModel = `team-free/${freeID}`;
+const freeExploreModel = 'team-free/beam-free';
+const freeAuxModel = 'team-free/mimo-v2.6-flash-free';
 const configFile = (profile) => path.join(roots.config, profile, 'opencode.jsonc');
 const instructionFile = (profile) => path.join(roots.config, profile, 'v2/AGENTS.md');
 const sharedRulesFile = path.resolve(process.env.OPENCODE_TEAM_RULES_FILE || path.join(home, '.config/opencode/AGENTS.md'));
@@ -316,6 +335,19 @@ function provision() {
   if (process.env.OPENCODE_TEAM_ECC_SOURCE) console.error(`Explicit local ECC source: ${eccSource} (${actual}; official pin ${eccPin})`);
 }
 const rule = (action, effect, resource = '*') => ({ action, resource, effect });
+// Native command wildcards are approval guardrails, not a shell sandbox.
+const approvalShell = ['git *reset *--hard*', 'git *clean *', 'git *push *-f*', 'git *push *--force*',
+  'git *push +*', 'git *push * +*', 'git *push *--mirror*',
+  'git *commit *--amend*', 'git *rebase *', 'git *filter-*',
+  'rm *', '*/rm *', 'rmdir *', '*/rmdir *',
+  'git *config *', 'git *credential *', 'ssh-keygen *', 'ssh-add *', 'security *',
+  '*.ssh/*', '*.git-credentials*', '*.netrc*', '*auth.json*',
+  'dropdb *', 'psql *', 'mysql *', 'opencode *api delete *',
+  'sudo *', 'launchctl *', 'kubectl *', 'helm *', 'terraform *', 'aws *', 'gcloud *', 'az *'];
+// FREE additionally prompts for any remote push, force-free or not.
+const freeApprovalShell = [...approvalShell, 'git *push *', 'git push'];
+const secretFiles = ['*.pem', '*.key', '*.env', '*.env.*', '*auth.json*', '*credentials*', '*secrets*',
+  '*.ssh/*', '*.aws/*', '*.gnupg/*', '*.netrc'];
 const bestExternalPermissions = [rule('external_directory', 'ask'),
   ...['~/Sites/Github/*', '~/Sites/Python/*', '~/.local/bin/*', '~/Library/LaunchAgents/*',
     ...new Set([os.tmpdir(), fs.realpathSync(os.tmpdir())].map((directory) => path.join(directory, 'opencode', '*')))]
@@ -338,8 +370,14 @@ function configuration(profile) {
   const goModel = process.env.OPENCODE_TEAM_BEST_GO_MODEL || 'opencode-go/qwen3.7-plus';
   if (!/^openai\/[A-Za-z0-9][\w./-]*$/.test(bestModel)) fail('BEST coordinator model must be an openai/model ID without #variant');
   if (!/^opencode-go\/[A-Za-z0-9][\w./-]*$/.test(goModel)) fail('BEST worker model must be an opencode-go/model ID without #variant');
-  if (process.env.OPENCODE_TEAM_FREE_MODEL && process.env.OPENCODE_TEAM_FREE_MODEL !== freeModel) fail(`FREE supports only ${freeModel}; no unverified paid models`);
-  const model = profile === 'best' ? bestModel : freeModel;
+  const freeOverride = process.env.OPENCODE_TEAM_FREE_MODEL;
+  const freeOverrideID = freeOverride && freeOverride.startsWith('team-free/')
+    ? freeOverride.slice('team-free/'.length) : '';
+  if (freeOverride && !freeCatalog[freeOverrideID]) {
+    fail(`FREE supports only verified zero-cost team-free models (${Object.keys(freeCatalog).join(', ')}); no unverified paid models`);
+  }
+  const freeCoordinator = freeOverride || freeModel;
+  const model = profile === 'best' ? bestModel : freeCoordinator;
   const agents = Object.fromEntries(['build', 'plan', 'explore', 'general', 'reviewer', 'title', 'summary', 'compaction'].map((id) => [id, { model }]));
   if (profile === 'best') {
     agents.build.model = `${bestModel}#low`;
@@ -361,6 +399,16 @@ function configuration(profile) {
     agents['visual-designer'] = { model: 'opencode-go/glm-5.3-flash', mode: 'subagent',
       description: 'Visual UI/UX, HTML/CSS and templates; preserve supplied themes and accessibility',
       permissions: [rule('subagent', 'deny')] };
+  } else {
+    agents.explore.model = freeExploreModel;
+    for (const id of ['general', 'title', 'summary', 'compaction']) agents[id].model = freeAuxModel;
+    agents.build.description = 'Coordinate structured work through native subagents; implement small tasks directly';
+    // Only Build may delegate, only to Explore and General, never recursively.
+    agents.build.permissions = [rule('subagent', 'deny'),
+      ...['explore', 'general'].map((id) => rule('subagent', 'allow', id))];
+    agents.explore.mode = agents.general.mode = 'subagent';
+    agents.general.permissions = [rule('subagent', 'deny')];
+    agents.general.description = 'Implement an independent, well-scoped task using verified free models; return focused changes and actual test results';
   }
   for (const id of ['plan', 'explore', 'reviewer']) agents[id].permissions = readonlyPermissions(profile);
   agents.reviewer = { ...agents.reviewer, description: 'Review changes for correctness, security and regressions without editing',
@@ -379,24 +427,15 @@ function configuration(profile) {
   const config = { $schema: 'https://opencode.ai/config.json', model, default_agent: 'build', agents,
     policies: [rule('provider.use', 'deny'), ...(profile === 'best' ? ['opencode-go', 'openai'] : ['team-free']).map((provider) => rule('provider.use', 'allow', provider))],
     permissions: [...(profile === 'best' ? bestExternalPermissions : [rule('external_directory', 'ask')]),
-      rule('shell', profile === 'best' ? 'allow' : 'ask'),
-      ...(profile === 'best' ? [
-        // Native command wildcards are approval guardrails, not a shell sandbox.
-        ...['git *reset *--hard*', 'git *clean *', 'git *push *-f*', 'git *push *--force*',
-          'git *push +*', 'git *push * +*', 'git *push *--mirror*',
-          'git *commit *--amend*', 'git *rebase *', 'git *filter-*',
-          'rm *', '*/rm *', 'rmdir *', '*/rmdir *',
-          'git *config *', 'git *credential *', 'ssh-keygen *', 'ssh-add *', 'security *',
-          '*.ssh/*', '*.git-credentials*', '*.netrc*', '*auth.json*',
-          'dropdb *', 'psql *', 'mysql *', 'opencode *api delete *',
-          'sudo *', 'launchctl *', 'kubectl *', 'helm *', 'terraform *', 'aws *', 'gcloud *', 'az *']
-          .map((resource) => rule('shell', 'ask', resource)),
-        ...['*.pem', '*.key', '*.env', '*.env.*', '*auth.json*', '*credentials*', '*secrets*',
-          '*.ssh/*', '*.aws/*', '*.gnupg/*', '*.netrc'].map((resource) => rule('edit', 'ask', resource)),
-        rule('edit', 'allow', '*.env.example'),
-        rule('edit', 'deny', '~/Library/LaunchAgents/*'),
-        rule('read', 'deny', '*.env'), rule('read', 'deny', '*.env.*'),
-        rule('read', 'allow', '*.env.example')] : [])],
+      rule('shell', 'allow'),
+      ...(profile === 'best' ? approvalShell : freeApprovalShell).map((resource) => rule('shell', 'ask', resource)),
+      ...secretFiles.map((resource) => rule('edit', 'ask', resource)),
+      rule('edit', 'allow', '*.env.example'),
+      rule('edit', profile === 'best' ? 'deny' : 'ask', '~/Library/LaunchAgents/*'),
+      ...(profile === 'best'
+        ? [rule('read', 'deny', '*.env'), rule('read', 'deny', '*.env.*')]
+        : secretFiles.map((resource) => rule('read', 'ask', resource))),
+      rule('read', 'allow', '*.env.example')],
     skills: [path.join(eccSource, 'skills'), ...(profile === 'best' ? [path.join(packageRoot, 'shared/skills')] : [])], instructions,
     mcp: { servers: { serena: { type: 'local', command: [serenaBin, 'start-mcp-server', '--context', 'ide', '--project-from-cwd', '--enable-web-dashboard', 'false', '--open-web-dashboard', 'false'],
       codemode: false, disabled: false, environment: { SERENA_HOME: path.join(roots.state, profile, 'serena') },
@@ -406,8 +445,9 @@ function configuration(profile) {
     command: ['/opt/homebrew/opt/node@22/bin/npx', '--yes', '@playwright/mcp@0.0.83', '--headless', '--isolated', '--browser', 'chromium', '--image-responses', 'omit', '--snapshot-mode', 'none', '--no-webmcp'],
     environment: { PATH: '/opt/homebrew/opt/node@22/bin:{env:PATH}' },
   };
+  // Depth 1 keeps subagents from spawning subagents in both profiles.
+  config.experimental = { subagent_depth: 1 };
   if (profile === 'best') {
-    config.experimental = { subagent_depth: 1 };
     config.plugins = [{ package: path.join(packageRoot, 'shared/best-quota-plugin'),
       options: { stateFile: path.join(roots.state, 'best/quota/state.json') } }];
   }
@@ -416,12 +456,16 @@ function configuration(profile) {
     models: { [bestModel.slice('openai/'.length)]: { settings: { reasoningEffort: 'low' } } },
   } };
   else config.providers = { 'team-free': {
-    name: 'Team FREE (anonymous MiMo)', env: [], package: '@opencode/ai/providers/openai-compatible',
+    name: 'Team FREE (verified zero-cost models)', env: [], package: '@opencode/ai/providers/openai-compatible',
     settings: { baseURL: 'https://opencode.ai/inference/openai/v1', apiKey: '' },
     // Explicitly blank authorization prevents historical accounts from paying.
-    headers: { Authorization: '' }, models: { [freeID]: { modelID: freeID,
+    headers: { Authorization: '' },
+    models: Object.fromEntries(Object.entries(freeCatalog).map(([id, limits]) => [id, {
+      modelID: id,
       capabilities: { tools: true, input: ['text'], output: ['text'] },
-      limit: { context: 128000, output: 8192 }, cost: { input: 0, output: 0 } } },
+      limit: { context: limits.context, output: limits.output },
+      cost: { input: 0, output: 0 },
+    }])),
   } };
   return config;
 }
@@ -590,7 +634,9 @@ function setup() {
   const updates = profiles.flatMap((p) => [{ file: configFile(p), bytes: json(configuration(p)) },
     { file: instructionFile(p), bytes: Buffer.concat([
       fs.readFileSync(path.join(packageRoot, 'shared/instructions.md')),
-      ...(p === 'best' ? [Buffer.from('\n'), fs.readFileSync(path.join(packageRoot, 'shared/best-hybrid.md'))] : []),
+      ...(p === 'best'
+        ? [Buffer.from('\n'), fs.readFileSync(path.join(packageRoot, 'shared/best-hybrid.md'))]
+        : [Buffer.from('\n'), fs.readFileSync(path.join(packageRoot, 'shared/free-hybrid.md'))]),
     ]) }]);
   locked(() => {
     provision();
@@ -658,7 +704,7 @@ function help() {
   opencode-team best quota revoke-extra-usage-confirmation --confirmed-by USER_LABEL
   opencode-team best quota configure < policy.json
   opencode-team best quota manual openai|opencode-go < verified-usage.json
-  opencode-team version\n\nBEST: OpenAI coordinator + Go workers; connect both subscriptions with /connect.\nFREE: anonymous MiMo only; no paid fallback.\nmacOS setup schedules safe maintenance daily; session deletion is disabled.\nDisable/uninstall persist across setup.\nCustom HOME/root skips automatic scheduling; explicit enable requires the login HOME.\nResume natively: opencode-team best -s SESSION_ID\nNative CLI arguments are preserved, with --standalone added in command scope.\nSee README for migration, backup and security boundaries.`);
+  opencode-team version\n\nBEST: OpenAI coordinator + Go workers; connect both subscriptions with /connect.\nFREE: verified free models only; no paid credentials or fallback.\nmacOS setup schedules safe maintenance daily; session deletion is disabled.\nDisable/uninstall persist across setup.\nCustom HOME/root skips automatic scheduling; explicit enable requires the login HOME.\nResume natively: opencode-team best -s SESSION_ID\nNative CLI arguments are preserved, with --standalone added in command scope.\nSee README for migration, backup and security boundaries.`);
 }
 try {
   const [action = 'help', ...args] = process.argv.slice(2);

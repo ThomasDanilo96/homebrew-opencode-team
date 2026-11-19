@@ -368,7 +368,31 @@ test('generated BEST permissions allow authorized work while FREE and read-only 
   assert.deepEqual(best.permissions.filter((r) => r.action === 'external_directory'), [
     rule('external_directory', 'ask'), ...trustedExternal.map((directory) => rule('external_directory', 'allow', directory)),
   ]);
-  assert.deepEqual(f.config('free').permissions, [rule('external_directory', 'ask'), rule('shell', 'ask')]);
+  const free = f.config('free');
+  assert.deepEqual(free.permissions.filter((r) => r.action === 'external_directory'),
+    [rule('external_directory', 'ask')], 'FREE keeps a single untrusted-external ask');
+  assert.deepEqual(free.permissions.filter((r) => r.action === 'shell' && r.effect === 'allow'),
+    [rule('shell', 'allow')], 'FREE allows ordinary shell work');
+  const firstShellAsk = free.permissions.findIndex((r) => r.action === 'shell' && r.effect === 'ask');
+  assert.ok(firstShellAsk > free.permissions.findIndex((r) => r.action === 'shell' && r.effect === 'allow'),
+    'every shell ask must follow the allow so the last match wins');
+  for (const resource of ['git *push *', 'git push', 'rm *', 'sudo *', 'launchctl *']) {
+    assert.ok(free.permissions.some((r) => r.action === 'shell' && r.resource === resource && r.effect === 'ask'),
+      `FREE must ask for ${resource}`);
+  }
+  assert.ok(free.permissions.some((r) => r.action === 'edit' && r.resource === '~/Library/LaunchAgents/*' && r.effect === 'ask'),
+    'FREE asks before LaunchAgent edits');
+  for (const resource of ['*.env', '*.key', '*credentials*', '*.ssh/*']) {
+    assert.ok(free.permissions.some((r) => r.action === 'read' && r.resource === resource && r.effect === 'ask'),
+      `FREE must ask before reading ${resource}`);
+    assert.ok(free.permissions.some((r) => r.action === 'edit' && r.resource === resource && r.effect === 'ask'),
+      `FREE must ask before editing ${resource}`);
+  }
+  assert.deepEqual(free.permissions.at(-1), rule('read', 'allow', '*.env.example'));
+  for (const c of [best, free]) {
+    assert.ok(!c.permissions.some((r) => r.action === '*' && r.resource === '*'),
+      'no configured */* allow wildcard');
+  }
   assert.deepEqual(best.agents.general.permissions, [rule('subagent', 'deny')],
     'General inherits work permissions but explicitly cannot delegate');
   for (const id of ['plan', 'explore', 'reviewer']) {
@@ -484,19 +508,23 @@ test('native V2 resolves generated policies without executing shell resources', 
       assert.equal(result.effect, expected, `${profile}/${agent}: ${action} ${resource}`);
     };
     for (const agent of profile === 'best' ? ['build', 'general', 'specialist'] : ['build', 'general']) {
-      for (const command of [...commands, ...ordinaryGit]) evaluate(agent, 'shell', command, profile === 'best' ? 'allow' : 'ask');
+      for (const command of [...commands, ...ordinaryGit]) {
+        // FREE allows ordinary commands; any remote push still prompts.
+        const push = /\bpush\b/.test(command);
+        evaluate(agent, 'shell', command, profile === 'best' || !push ? 'allow' : 'ask');
+      }
       for (const command of approvalCommands) evaluate(agent, 'shell', command, 'ask');
       evaluate(agent, 'external_directory', '/development/fixture/*', 'ask');
       for (const directory of trustedExternal) evaluate(agent, 'external_directory', directory.replace(/^~/, f.home), profile === 'best' ? 'allow' : 'ask');
       evaluate(agent, 'read', `${f.home}/Library/LaunchAgents/fixture.plist`, 'allow');
-      evaluate(agent, 'edit', `${f.home}/Library/LaunchAgents/fixture.plist`, profile === 'best' ? 'deny' : 'allow');
+      evaluate(agent, 'edit', `${f.home}/Library/LaunchAgents/fixture.plist`, profile === 'best' ? 'deny' : 'ask');
       evaluate(agent, 'edit', `${f.home}/.local/bin/fixture`, 'allow');
       for (const action of ['read', 'edit', 'skill', 'serena_replace_symbol_body']) evaluate(agent, action, 'fixture', 'allow');
       evaluate(agent, 'read', 'settings.env', profile === 'best' ? 'deny' : 'ask');
       evaluate(agent, 'read', 'settings.env.production', profile === 'best' ? 'deny' : 'ask');
       evaluate(agent, 'read', 'settings.env.example', 'allow');
     }
-    evaluate('build', 'edit', `${f.home}/Sites/Github/fixture/private.key`, profile === 'best' ? 'ask' : 'allow');
+    evaluate('build', 'edit', `${f.home}/Sites/Github/fixture/private.key`, 'ask');
     evaluate('build', 'edit', `${f.home}/Sites/Github/fixture/.env.example`, 'allow');
     evaluate('build', 'subagent', 'general', 'allow');
     for (const agent of ['plan', 'explore', 'reviewer']) {
@@ -535,14 +563,14 @@ test('only best/free public profiles; native arguments and resume are forwarded 
   assert.equal(f.run('best', 'run', 'hello').status, 7);
 });
 
-test('BEST keeps an OpenAI coordinator and Go workers; FREE stays singleton and reviewers read-only', (t) => {
+test('BEST keeps an OpenAI coordinator and Go workers; FREE assigns verified free role models and reviewers read-only', (t) => {
   const f = fixture(t);
   ok(f.run('setup'));
   for (const profile of ['best', 'free']) {
     const c = f.config(profile);
     assert.equal(c.default_agent, 'build');
     assert.equal(c.$schema, 'https://opencode.ai/config.json');
-    assert.equal(c.model, profile === 'best' ? 'openai/gpt-6.2-sol' : 'team-free/mimo-v2.6-flash-free');
+    assert.equal(c.model, profile === 'best' ? 'openai/gpt-6.2-sol' : 'team-free/deepseek-v4.1-flash-free');
     const expected = profile === 'best' ? {
       build: 'openai/gpt-6.2-sol#low', general: 'opencode-go/qwen3.7-plus',
       explore: 'opencode-go/mimo-v2.6-flash', title: 'openai/gpt-6-luna#low',
@@ -550,7 +578,12 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE stays singleton and 
       plan: 'openai/gpt-6.2-sol#medium', reviewer: 'openai/gpt-6.2-sol#medium',
       specialist: 'openai/gpt-6.2-sol#medium',
       'visual-designer': 'opencode-go/glm-5.3-flash',
-    } : Object.fromEntries(['build', 'plan', 'explore', 'general', 'reviewer', 'title', 'summary', 'compaction'].map((id) => [id, c.model]));
+    } : {
+      build: 'team-free/deepseek-v4.1-flash-free', plan: 'team-free/deepseek-v4.1-flash-free',
+      reviewer: 'team-free/deepseek-v4.1-flash-free', explore: 'team-free/beam-free',
+      general: 'team-free/mimo-v2.6-flash-free', title: 'team-free/mimo-v2.6-flash-free',
+      summary: 'team-free/mimo-v2.6-flash-free', compaction: 'team-free/mimo-v2.6-flash-free',
+    };
     assert.deepEqual(Object.fromEntries(Object.entries(c.agents).map(([id, agent]) => [id, agent.model])), expected);
     assert.equal(c.plugin, undefined);
     assert.equal(c.agent, undefined);
@@ -591,7 +624,13 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE stays singleton and 
   ]);
   const provider = f.config('free').providers['team-free'];
   assert.equal(provider.canonical, undefined);
-  assert.deepEqual(Object.keys(provider.models), ['mimo-v2.6-flash-free']);
+  assert.deepEqual(Object.keys(provider.models), ['deepseek-v4.1-flash-free', 'beam-free', 'mimo-v2.6-flash-free',
+    'big-pickle', 'flint-40b-free', 'iceman-free', 'longcat-2.5-free',
+    'nemotron-3.5-lightning-free', 'nemotron-3.5-super-vl-free']);
+  for (const model of Object.values(provider.models)) {
+    assert.deepEqual(model.cost, { input: 0, output: 0 }, 'FREE catalog entries must declare zero cost');
+    assert.equal(model.capabilities.tools, true);
+  }
   assert.equal(provider.settings.apiKey, '');
   assert.equal(provider.headers.Authorization, '');
   assert.deepEqual(provider.env, []);
@@ -659,39 +698,43 @@ test('BEST Hybrid specialist inherits its coordinator override, FREE ignores it'
   assert.equal(best.agents.summary.model, 'opencode-go/minimax-m3');
   assert.equal(best.agents.compaction.model, 'opencode-go/minimax-m3');
   assert.equal(best.providers.openai.models['another-coordinator'].settings.reasoningEffort, 'low');
-  // FREE singleton is unaffected by the BEST override.
+  // FREE role models are unaffected by the BEST override.
   const free = f.config('free');
-  assert.equal(free.model, 'team-free/mimo-v2.6-flash-free');
-  assert.equal(free.agents.build.model, 'team-free/mimo-v2.6-flash-free');
+  assert.equal(free.model, 'team-free/deepseek-v4.1-flash-free');
+  assert.equal(free.agents.build.model, 'team-free/deepseek-v4.1-flash-free');
   assert.equal(free.agents.specialist, undefined);
 });
 
-test('BEST Hybrid supplement is appended to BEST AGENTS.md only; FREE stays exactly shared/instructions.md; setup is byte-idempotent', (t) => {
+test('BEST and FREE each append their own hybrid supplement to shared/instructions.md; setup is byte-idempotent', (t) => {
   const f = fixture(t);
   ok(f.run('setup'));
   const instructionsPath = path.join(root, 'shared/instructions.md');
-  const supplementPath = path.join(root, 'shared/best-hybrid.md');
+  const bestSupplementPath = path.join(root, 'shared/best-hybrid.md');
+  const freeSupplementPath = path.join(root, 'shared/free-hybrid.md');
   const instructionsBytes = fs.readFileSync(instructionsPath);
-  const supplementBytes = fs.readFileSync(supplementPath);
+  const bestSupplementBytes = fs.readFileSync(bestSupplementPath);
+  const freeSupplementBytes = fs.readFileSync(freeSupplementPath);
   const bestFile = path.join(f.team, 'config/best/v2/AGENTS.md');
   const freeFile = path.join(f.team, 'config/free/v2/AGENTS.md');
   const bestBytes = fs.readFileSync(bestFile);
   const freeBytes = fs.readFileSync(freeFile);
-  // FREE generated instructions must be byte-identical to the shared source.
-  assert.ok(freeBytes.equals(instructionsBytes),
-    'FREE generated AGENTS.md must equal shared/instructions.md byte-for-byte');
-  assert.equal(bestBytes.length >= instructionsBytes.length, true,
-    'BEST generated AGENTS.md must at minimum contain the shared instructions');
-  assert.equal(bestBytes.subarray(0, instructionsBytes.length).equals(instructionsBytes), true,
-    'BEST generated AGENTS.md must start with shared/instructions.md bytes verbatim');
-  assert.ok(supplementBytes.length > 0, 'supplement must carry content');
-  assert.deepEqual(bestBytes, Buffer.concat([instructionsBytes, Buffer.from('\n'), supplementBytes]));
+  for (const bytes of [instructionsBytes, bestSupplementBytes, freeSupplementBytes]) {
+    assert.ok(bytes.length > 0, 'source must carry content');
+  }
+  for (const [file, supplement] of [[bestFile, bestSupplementBytes], [freeFile, freeSupplementBytes]]) {
+    assert.deepEqual(fs.readFileSync(file),
+      Buffer.concat([instructionsBytes, Buffer.from('\n'), supplement]),
+      `${file} must be shared/instructions.md plus its own supplement`);
+  }
   const strict = bestBytes.toString().split('## BEST strict minimalism')[1];
   assert.ok(strict, 'BEST must generate the strict minimalism policy');
   assert.match(strict, /concrete demonstrated need/);
   assert.match(strict, /Django ORM, QuerySet, ModelForm/);
   assert.match(strict, /FAIL[\s\S]*simplif/);
-  assert.ok(!freeBytes.includes(Buffer.from('## BEST strict minimalism')));
+  assert.ok(!freeBytes.includes(Buffer.from('## BEST strict minimalism')),
+    'FREE must not inherit the BEST strict policy');
+  assert.match(freeBytes.toString(), /FREE Hybrid/,
+    'FREE AGENTS.md must carry the FREE Hybrid supplement');
   ok(f.run('best', 'run', 'fixture'));
   const capture = JSON.parse(fs.readFileSync(f.env.MOCK_CAPTURE));
   const loaded = JSON.parse(fs.readFileSync(capture.env.OPENCODE_CONFIG));
@@ -708,6 +751,118 @@ test('BEST Hybrid supplement is appended to BEST AGENTS.md only; FREE stays exac
   // The shared source is never copied into the generated tree as a regular file.
   assert.notEqual(bestFile, instructionsPath);
   assert.notEqual(freeFile, instructionsPath);
+});
+
+test('FREE Hybrid: verified free catalog, role models, native delegation, read-only reviewer, gated danger, economic isolation', (t) => {
+  const f = fixture(t);
+  ok(f.run('setup'));
+  const rule = (action, effect, resource = '*') => ({ action, resource, effect });
+  const free = f.config('free');
+  const catalog = free.providers['team-free'].models;
+  // (1) Free models: only the verified team-free catalog, all zero-cost with tools.
+  const verified = ['deepseek-v4.1-flash-free', 'beam-free', 'mimo-v2.6-flash-free', 'big-pickle',
+    'flint-40b-free', 'iceman-free', 'longcat-2.5-free',
+    'nemotron-3.5-lightning-free', 'nemotron-3.5-super-vl-free'];
+  assert.deepEqual(Object.keys(catalog).sort(), [...verified].sort());
+  for (const [id, model] of Object.entries(catalog)) {
+    assert.equal(model.modelID, id);
+    assert.deepEqual(model.cost, { input: 0, output: 0 }, `${id} must be free`);
+    assert.equal(model.capabilities.tools, true, `${id} must call tools`);
+    assert.ok(model.limit.context > 0 && model.limit.output > 0);
+  }
+  assert.deepEqual(free.providers['team-free'].settings, { baseURL: 'https://opencode.ai/inference/openai/v1', apiKey: '' },
+    'FREE must never carry a paid key');
+  assert.equal(free.plugins, undefined, 'FREE must not load the BEST governor');
+  assert.deepEqual(free.policies, [
+    { action: 'provider.use', resource: '*', effect: 'deny' },
+    { action: 'provider.use', resource: 'team-free', effect: 'allow' },
+  ], 'economic isolation: only team-free is usable');
+  // (2) Role assignment: distinct models only where they help; <=4 distinct.
+  const roleModels = Object.fromEntries(['build', 'plan', 'explore', 'general', 'reviewer']
+    .map((id) => [id, free.agents[id].model]));
+  assert.deepEqual(roleModels, {
+    build: 'team-free/deepseek-v4.1-flash-free',
+    plan: 'team-free/deepseek-v4.1-flash-free',
+    explore: 'team-free/beam-free',
+    general: 'team-free/mimo-v2.6-flash-free',
+    reviewer: 'team-free/deepseek-v4.1-flash-free',
+  });
+  assert.equal(free.model, roleModels.build, 'root follows the coordinator');
+  for (const [id, model] of Object.entries(roleModels)) {
+    assert.ok(verified.includes(model.slice('team-free/'.length)), `${id} must use a verified model`);
+  }
+  assert.ok(new Set(Object.values(roleModels)).size <= 4, 'at most four distinct models');
+  for (const id of ['title', 'summary', 'compaction']) {
+    assert.equal(free.agents[id].model, 'team-free/mimo-v2.6-flash-free', `${id} reuses the helper`);
+  }
+  // (2) Native V2 subagents: only Build delegates, only to Explore/General, depth 1.
+  assert.deepEqual(free.agents.build.permissions, [
+    rule('subagent', 'deny'), rule('subagent', 'allow', 'explore'), rule('subagent', 'allow', 'general')]);
+  assert.deepEqual(free.agents.general.permissions, [rule('subagent', 'deny')],
+    'General implements but cannot delegate');
+  for (const id of ['plan', 'explore', 'reviewer']) {
+    assert.ok(free.agents[id].permissions.some((r) => r.action === '*' && r.effect === 'deny'),
+      `${id} must stay read-only`);
+  }
+  assert.equal(free.agents.explore.mode, 'subagent');
+  assert.equal(free.agents.general.mode, 'subagent');
+  assert.equal(free.experimental.subagent_depth, 1, 'no recursive delegation');
+  // (3) Reviewer read-only: no write or delegation escapes.
+  const reviewer = free.agents.reviewer.permissions;
+  for (const action of ['shell', 'edit', 'write', 'subagent', 'execute', 'patch']) {
+    assert.ok(!reviewer.some((r) => r.action === action && r.effect === 'allow'),
+      `reviewer must not allow ${action}`);
+  }
+  // (4) Ordinary dev work must not prompt: shell allow + no external ask inside the workspace.
+  assert.deepEqual(free.permissions.filter((r) => r.action === 'shell' && r.effect === 'allow'),
+    [rule('shell', 'allow')]);
+  const allowIndex = free.permissions.findIndex((r) => r.action === 'shell' && r.effect === 'allow');
+  const askIndexes = free.permissions
+    .map((r, i) => (r.action === 'shell' && r.effect === 'ask' ? i : -1)).filter((i) => i >= 0);
+  assert.ok(askIndexes.every((i) => i > allowIndex), 'every shell ask must follow the allow (last match wins)');
+  assert.ok(!free.permissions.some((r) => r.action === 'external_directory' && r.resource !== '*'),
+    'no per-path external allow that could leak outside the workspace');
+  assert.ok(!free.permissions.some((r) => r.action === '*' && r.resource === '*'),
+    'no configured */* wildcard in FREE');
+  // (5) Dangerous, secret and remote operations still prompt.
+  for (const resource of ['rm *', 'sudo *', 'launchctl *', 'kubectl *', 'git *reset *--hard*',
+    'git *push *', 'git push', 'git *rebase *', '*.ssh/*']) {
+    assert.ok(free.permissions.some((r) => r.action === 'shell' && r.resource === resource && r.effect === 'ask'),
+      `FREE must ask before ${resource}`);
+  }
+  for (const resource of ['*.env', '*.key', '*.pem', '*credentials*', '*auth.json*']) {
+    assert.ok(free.permissions.some((r) => r.action === 'edit' && r.resource === resource && r.effect === 'ask'),
+      `FREE must ask before editing ${resource}`);
+    assert.ok(free.permissions.some((r) => r.action === 'read' && r.resource === resource && r.effect === 'ask'),
+      `FREE must ask before reading ${resource}`);
+  }
+  assert.ok(free.permissions.some((r) => r.action === 'edit' && r.resource === '~/Library/LaunchAgents/*'
+    && r.effect === 'ask'), 'FREE must ask before LaunchAgent edits');
+  assert.equal(free.permissions.at(-1).resource, '*.env.example', 'example env files stay readable last');
+  // (6) Economic isolation: the override accepts only verified team-free models.
+  const run = (...args) => f.run(...args);
+  for (const value of ['openai/gpt-6.2-sol', 'opencode-go/minimax-m3', 'opencode/zen/glm-5.3-flash-free', 'team-free/unknown']) {
+    f.env.OPENCODE_TEAM_FREE_MODEL = value;
+    assert.notEqual(run('setup').status, 0, `${value} must be rejected`);
+    delete f.env.OPENCODE_TEAM_FREE_MODEL;
+  }
+  ok(run('setup'));
+  assert.equal(f.config('free').model, 'team-free/deepseek-v4.1-flash-free', 'rejected values never persist');
+  f.env.OPENCODE_TEAM_FREE_MODEL = 'team-free/longcat-2.5-free';
+  ok(run('setup'));
+  assert.equal(f.config('free').model, 'team-free/longcat-2.5-free');
+  delete f.env.OPENCODE_TEAM_FREE_MODEL;
+  ok(run('setup'));
+  // (7) BEST untouched: the GPT-6.2 Sol coordinator and its supplement still generate.
+  const best = f.config('best');
+  assert.equal(best.model, 'openai/gpt-6.2-sol');
+  assert.equal(best.agents.build.model, 'openai/gpt-6.2-sol#low');
+  assert.ok(fs.readFileSync(path.join(f.team, 'config/best/v2/AGENTS.md'), 'utf8').includes('## BEST strict minimalism'));
+  // (8) FREE packaging: AGENTS.md carries the FREE Hybrid supplement and no BEST policy.
+  const freeInstructions = fs.readFileSync(path.join(f.team, 'config/free/v2/AGENTS.md'), 'utf8');
+  assert.match(freeInstructions, /FREE Hybrid/);
+  assert.ok(!freeInstructions.includes('## BEST strict minimalism'));
+  assert.deepEqual(free.instructions, [path.join(f.team, 'config/free/v2/AGENTS.md')]);
 });
 
 test('isolated BEST permits Go without changing or inheriting the classic OpenAI-only configuration', (t) => {
@@ -918,7 +1073,7 @@ test('explicit coordinator and worker model choices update only their roles with
   delete f.env.OPENCODE_TEAM_BEST_GO_MODEL;
   f.env.OPENCODE_TEAM_FREE_MODEL = 'openai/paid';
   assert.notEqual(f.run('setup').status, 0);
-  assert.equal(f.config('free').model, 'team-free/mimo-v2.6-flash-free');
+  assert.equal(f.config('free').model, 'team-free/deepseek-v4.1-flash-free');
 });
 
 test('a write failure midway through setup restores both previous configs and allows retry', (t) => {

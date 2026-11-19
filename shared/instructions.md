@@ -40,6 +40,9 @@ use behavioral RED → GREEN tests; obey the shared user and project rules.
 
 ## FREE
 
-The BEST model assignments above do not apply to FREE. Keep its anonymous
-singleton model; do not add credentials or paid fallback models or change its
-endpoint to recover an outage. Unavailability is not permission to spend.
+The BEST model assignments above do not apply to FREE. FREE runs only the
+verified zero-cost `team-free` models; do not add credentials, paid fallback
+models or provider switches to recover an outage. Unavailability is not
+permission to spend. Role assignments, delegation limits and permission
+behavior are described in the FREE Hybrid supplement appended to FREE's
+AGENTS.md.
