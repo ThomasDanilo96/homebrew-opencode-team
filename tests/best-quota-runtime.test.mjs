@@ -6,6 +6,66 @@ import path from 'node:path';
 import { setupGovernor } from '../shared/best-quota-runtime.mjs';
 import { updateQuotaState, readQuotaState } from '../shared/best-quota.mjs';
 
+test('new 2.3.2 instance admits its first request with active persisted state without inventing certification', async t => {
+  const f = await fixture(t);
+  await updateQuotaState(f.file, state => ({ ...state, runtime: { ...state.runtime,
+    hookVerified: true, verifiedAt: new Date().toISOString() } }));
+  f.ctx.app.version = '2.3.2';
+  const cleanup = await setupGovernor(f.ctx, { collect: async () => ({ snapshots: [], sources: {} }),
+    subscription: async () => f.auth.binding, goPaymentSafety: async () => ({ certified: true }),
+    transportSafety: async () => true });
+  t.after(cleanup);
+  t.after(f.cleanup);
+  assert.equal(readQuotaState(f.file).runtime.hookVerified, false, 'old version certificate must be invalidated');
+  await f.hooks['model.request']({ sessionID: 'first', agent: 'build', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'low' } });
+  const state = readQuotaState(f.file);
+  assert.equal(state.policy.mode, 'active');
+  assert.equal(state.runtime.hookVerified, false, 'an admitted fixture request is not runtime certification');
+  assert.equal(state.runtime.instances.at(-1).callbacks['model.request'].outcome, 'PASSED');
+  assert.ok(state.leases.some(lease => lease.sessionID === 'first'));
+});
+
+test('registration immediately observes liveness only, without waiting for a first request', async t => {
+  const f = await fixture(t);
+  t.after(f.cleanup);
+  const receipt = readQuotaState(f.file).runtime.instances.at(-1);
+  assert.equal(receipt.callbacks.heartbeat.outcome, 'PASSED');
+  assert.equal(receipt.callbacks.heartbeat.liveSubscription, false);
+  assert.ok(Date.parse(receipt.callbacks.heartbeat.at) >= Date.parse(receipt.registeredAt));
+  assert.equal(receipt.callbacks['model.request'], undefined);
+});
+
+test('background delegation has an explicit foreground recovery path and reserves nothing before routing', async t => {
+  const f = await fixture(t);
+  t.after(f.cleanup);
+  const event = { tool: 'subagent', id: 'background', sessionID: 'parent',
+    input: { agent: 'general', background: true, prompt: 'private-do-not-log' } };
+  await assert.rejects(f.tools['execute.before'](event), error =>
+    error.message.includes('background-lifecycle-unverified; use background=false')
+      && !error.message.includes('private-do-not-log'));
+  assert.equal(readQuotaState(f.file).decisions.length, 0);
+  assert.equal(readQuotaState(f.file).leases.length, 0);
+  event.input.background = false;
+  await f.tools['execute.before'](event);
+  assert.equal(event.input.model, 'openai/gpt-6.1-sol#medium');
+  assert.equal(readQuotaState(f.file).leases.length, 1);
+  await f.tools['execute.after'](event);
+  assert.equal(readQuotaState(f.file).leases.length, 0);
+});
+
+test('pre-routing runtime and agent denials are distinguishable and do not disclose input', async t => {
+  const f = await fixture(t);
+  t.after(f.cleanup);
+  const event = { tool: 'subagent', id: 'denied', sessionID: 'parent', input: { agent: 'unsupported' } };
+  await assert.rejects(f.tools['execute.before'](event), /unsupported-agent/);
+  f.ctx.app.version = '9.9.9';
+  event.input.agent = 'general';
+  await assert.rejects(f.tools['execute.before'](event), /runtime-version-unverified/);
+  await assert.rejects(f.hooks['model.request']({ sessionID: 'first', agent: 'build', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.1-sol' } }), /runtime-version-unverified/);
+});
+
 async function fixture(t, mode = 'active', payment = { certified: true }, collect = async () => ({ snapshots: [], sources: {} }), event) {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'quota-runtime-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
@@ -43,7 +103,7 @@ test('internal instance receipt records actual host and observed callbacks witho
   assert.equal(receipt.origin, 'INJECTED_TEST');
   assert.ok(receipt.instanceID);
   assert.ok(receipt.registeredAt);
-  assert.deepEqual(receipt.callbacks, {});
+  assert.deepEqual(Object.keys(receipt.callbacks), ['heartbeat']);
   const event = { sessionID: 'do-not-persist-this-session', agent: 'build', kind: 'primary',
     model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'low' },
     request: new Request('http://127.0.0.1/mock', { headers: { authorization: 'Bearer do-not-persist-this-token' } }) };
