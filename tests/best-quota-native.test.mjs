@@ -167,6 +167,17 @@ test('native V2 quota gates existing sessions and native children before local t
   const info = await api('GET', '/api/info');
   assert.ok(VERIFIED_RUNTIME_VERSIONS.includes(info.version),
     `requalify hooks on another runtime version: ${info.version} not in ${VERIFIED_RUNTIME_VERSIONS.join(',')}`);
+  const asyncChildren = info.version === '2.3.2';
+  const delegationRequests = asyncChildren ? 4 : 3;
+  async function settleDelegation(sessionID, expectedRequests) {
+    if (!asyncChildren) return;
+    const deadline = Date.now() + 10000;
+    while (requests < expectedRequests) {
+      if (Date.now() > deadline) assert.fail(`asynchronous delegation did not complete: ${JSON.stringify(recentRequests)} ${errors}`);
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    await api('POST', `/api/experimental/session/${sessionID}/wait`);
+  }
   const query = `?location%5Bdirectory%5D=${encodeURIComponent(dir)}`;
   await api('GET', '/api/agent' + query);
   const plugins = await waitForGovernor('initial activation');
@@ -188,9 +199,9 @@ test('native V2 quota gates existing sessions and native children before local t
   const wrapper = path.join(dir, 'test-plugin');
   fs.mkdirSync(wrapper);
   fs.writeFileSync(path.join(wrapper, 'index.js'), `import { setupGovernor } from ${JSON.stringify(new URL('../shared/best-quota-runtime.mjs', import.meta.url).href)};
-export default {id:'opencode-team.best-quota',setup:ctx=>setupGovernor(ctx,{
-collect:async()=>({snapshots:[],sources:{}}),subscription:async()=> 'a'.repeat(64),
-goPaymentSafety:async()=>({certified:true}),transportSafety:async()=>true})};`);
+ export default {id:'opencode-team.best-quota',setup:ctx=>setupGovernor(ctx,{
+ collect:async()=>({snapshots:[],sources:{}}),subscription:async()=> 'a'.repeat(64),
+ goPaymentSafety:async()=>({certified:true}),transportSafety:async()=>true})};`);
   const now = Date.now();
   await updateQuotaState(file, s => ({ ...s, snapshots: [
     { provider: 'opencode-go', connection: 'a'.repeat(64), source: 'LIVE', at: new Date(now).toISOString(), windows: Object.fromEntries(
@@ -228,21 +239,81 @@ goPaymentSafety:async()=>({certified:true}),transportSafety:async()=>true})};`);
   await api('GET', '/api/agent' + query);
   const { data: parent } = await api('POST', '/api/session', { title: 'Quota routing probe', location: { directory: dir } });
   assert.equal(await prompt(parent.id, 'PARENT_NATIVE_PROBE'), 'succeeded', errors);
+  await settleDelegation(parent.id, delegationRequests);
   const sessions = await api('GET', '/api/session?limit=20');
   const children = sessions.data.filter(s => s.parentID === parent.id);
   assert.equal(children.length, 1, JSON.stringify(await api('GET', `/api/experimental/session/${parent.id}/export`)));
   assert.equal(children[0].agent, 'general');
   assert.equal(children[0].model.providerID, 'openai');
   assert.equal(children[0].model.id, 'gpt-6.1-sol');
-  assert.deepEqual(models, ['gpt-6.1-sol', 'gpt-6.1-sol', 'gpt-6.1-sol']);
+  assert.deepEqual(models, Array(delegationRequests).fill('gpt-6.1-sol'));
+
+  // Regression for the first chat after loading active persisted state on a
+  // newly qualified runtime. Percentages and all replies remain synthetic.
+  await updateQuotaState(file, state => {
+    state.snapshots.find(s => s.provider === 'openai').windows.weekly.used = 54;
+    const go = state.snapshots.find(s => s.provider === 'opencode-go');
+    for (const window of Object.values(go.windows)) window.used = 20;
+    go.windows.monthly.used = 95;
+    return state;
+  });
+  let releaseChild, childStarted;
+  const childHeld = new Promise(resolve => { releaseChild = resolve; });
+  const childReady = new Promise(resolve => { childStarted = resolve; });
+  t.after(() => releaseChild());
+  respond = async body => {
+    const user = body.messages.findLastIndex(m => m.role === 'user');
+    const text = JSON.stringify(body.messages[user]?.content);
+    if (text.includes('CHILD_ONLY')) {
+      childStarted();
+      await childHeld;
+      return { content: 'CHILD_DONE' };
+    }
+    if (text.includes('<subagent ')) return { content: 'BACKGROUND_DONE' };
+    const tools = body.messages.slice(user + 1).filter(m => m.role === 'tool');
+    if (asyncChildren && tools.length) return { content: 'BACKGROUND_DISPATCHED' };
+    if (tools.length >= 2) return { content: 'FOREGROUND_RECOVERY_DONE' };
+    if (tools.length) assert.ok(JSON.stringify(tools).includes('background-lifecycle-unverified; use background=false'));
+    return { tool_calls: [{ index: 0, id: tools.length ? 'foreground-recovery' : 'background-denied',
+      type: 'function', function: { name: 'subagent', arguments: JSON.stringify({
+        agent: 'general', description: 'Bounded recovery', prompt: 'CHILD_ONLY', background: !tools.length }) } }] };
+  };
+  const { data: fresh } = await api('POST', '/api/session', { title: 'First critical request', location: { directory: dir } });
+  const beforeFresh = requests;
+  const freshPrompt = prompt(fresh.id, 'PARENT_BACKGROUND_PROBE');
+  await Promise.race([childReady, new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('child did not start')), 10000).unref())]);
+  assert.equal(readQuotaState(file).leases.filter(lease => lease.scope === 'routing').length, 1,
+    'native running child still holds routing capacity after subagent returned');
+  releaseChild();
+  assert.equal(await freshPrompt, 'succeeded');
+  await settleDelegation(fresh.id, beforeFresh + 4);
+  assert.equal(requests, beforeFresh + 4, 'parent, explicit foreground recovery, child, parent continuation');
+  assert.equal((await api('GET', '/api/session?limit=20')).data.filter(s => s.parentID === fresh.id).length, 1,
+    'rejected background must not create a child');
+  assert.equal((readQuotaState(file).leases ?? []).length, 0, 'foreground and request lifecycle release every reservation');
+  t.diagnostic(`PASS: new active chat at 46% weekly / 5% monthly admits first request; ${asyncChildren ? 'native background delegation completes' : 'explicit background denial recovers through native foreground delegation'}`);
+  // Restore the original scripted routing probes.
+  respond = body => {
+    const user = body.messages.findLastIndex(m => m.role === 'user');
+    const text = JSON.stringify(body.messages[user]?.content);
+    if (text.includes('CHILD_ONLY')) return { content: 'CHILD_DONE' };
+    if (body.messages.slice(user + 1).some(m => m.role === 'tool')) return { content: 'PARENT_DONE' };
+    if (!text.includes('EXPLORE_NATIVE_PROBE')) return { content: 'HEALTHY_DONE' };
+    return { tool_calls: [{ index: 0, id: 'delegate', type: 'function', function: { name: 'subagent',
+      arguments: JSON.stringify({ agent: 'explore', description: 'Quota scoped probe', prompt: 'CHILD_ONLY', background: false }) } }] };
+  };
 
   const { data: exploreParent } = await api('POST', '/api/session', { title: 'Explore probe', location: { directory: dir } });
   const beforeExplore = models.length;
   assert.equal(await prompt(exploreParent.id, 'EXPLORE_NATIVE_PROBE'), 'succeeded', errors);
+  await settleDelegation(exploreParent.id, beforeExplore + delegationRequests);
   const exploreChild = (await api('GET', '/api/session?limit=20')).data.find(s => s.parentID === exploreParent.id);
   assert.equal(exploreChild?.agent, 'explore');
   assert.equal(exploreChild.model.variant, 'low');
-  assert.deepEqual(models.slice(beforeExplore), ['gpt-6.1-sol', 'gpt-6.2-sol', 'gpt-6.1-sol']);
+   assert.deepEqual(models.slice(beforeExplore), asyncChildren
+     ? ['gpt-6.1-sol', 'gpt-6.1-sol', 'gpt-6.2-sol', 'gpt-6.1-sol']
+     : ['gpt-6.1-sol', 'gpt-6.2-sol', 'gpt-6.1-sol']);
 
   const beforeHealthy = requests;
   assert.equal(await prompt(parent.id, 'HEALTHY_FOLLOWUP'), 'succeeded');
@@ -255,7 +326,7 @@ goPaymentSafety:async()=>({certified:true}),transportSafety:async()=>true})};`);
     const text = JSON.stringify(body.messages[user]?.content);
     if (text.includes('CHILD_RESUME')) return { content: 'CHILD_RESUMED' };
     if (body.messages.slice(user + 1).some(m => m.role === 'tool')) return { content: 'PARENT_RESUMED_DONE' };
-    const tool = body.tools.find(tool => tool.function.name === 'subagent');
+    const tool = body.tools.find(tool => tool.function?.name === 'subagent');
     assert.ok(tool.function.parameters.properties.sessionID, 'native resume schema must use sessionID');
     return { tool_calls: [{ index: 0, id: 'resume', type: 'function', function: { name: 'subagent',
       arguments: JSON.stringify({ agent: 'general', sessionID: childID, description: 'Resume bounded child',
@@ -263,7 +334,8 @@ goPaymentSafety:async()=>({certified:true}),transportSafety:async()=>true})};`);
   };
   const beforeResume = requests;
   assert.equal(await prompt(parent.id, 'RESUME_NATIVE_CHILD'), 'succeeded');
-  assert.equal(requests, beforeResume + 3, 'native parent, existing child, parent continuation: ' + JSON.stringify(
+  await settleDelegation(parent.id, beforeResume + delegationRequests);
+  assert.equal(requests, beforeResume + delegationRequests, 'native parent, existing child, parent continuation: ' + JSON.stringify(
     (await api('GET', `/api/experimental/session/${parent.id}/export`)).data.messages
       .filter(m => m.type === 'assistant').flatMap(m => m.content ?? []).filter(p => p.type === 'tool').map(p => p.state)));
   const resumed = await api('GET', '/api/session?limit=20');
@@ -354,14 +426,17 @@ goPaymentSafety:async()=>({certified:true}),transportSafety:async()=>true})};`);
   await updateQuotaState(file, state => ({ ...state, policy: { ...state.policy, cooldownMs: 0 } }));
   respond = body => {
     const user = body.messages.findLastIndex(m => m.role === 'user');
-    if (JSON.stringify(body.messages[user]?.content).includes('CHILD_GO')) return { content: 'GO_CHILD_DONE' };
+    const text = JSON.stringify(body.messages[user]?.content);
+    if (text.includes('CHILD_GO')) return { content: 'GO_CHILD_DONE' };
+    if (text.includes('<subagent ')) return { content: 'PARENT_GO_DONE' };
     if (body.messages.slice(user + 1).some(m => m.role === 'tool')) return { content: 'PARENT_GO_DONE' };
     return { tool_calls: [{ index: 0, id: 'go-child', type: 'function', function: { name: 'subagent',
       arguments: JSON.stringify({ agent: 'general', description: 'Bounded Go child', prompt: 'CHILD_GO', background: false }) } }] };
   };
   const beforeGo = requests;
   assert.equal(await prompt(parent.id, 'CREATE_NATIVE_GO_CHILD'), 'succeeded');
-  assert.equal(requests, beforeGo + 3);
+  await settleDelegation(parent.id, beforeGo + delegationRequests);
+  assert.equal(requests, beforeGo + delegationRequests);
   const goChildren = (await api('GET', '/api/session?limit=20')).data.filter(s => s.parentID === parent.id && s.id !== childID);
   assert.equal(goChildren.length, 1);
   const goChild = goChildren[0];

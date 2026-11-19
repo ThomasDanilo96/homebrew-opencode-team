@@ -21,7 +21,7 @@ const MAX_ENTRIES = 4096;
 const MAX_BYTES = 16 * 1024 * 1024;
 // Runtimes whose hook contract this governor was qualified against. A version
 // outside this list blocks admission instead of silently skipping the guard.
-export const VERIFIED_RUNTIME_VERSIONS = ['2.2.5', '2.2.7'];
+export const VERIFIED_RUNTIME_VERSIONS = ['2.2.5', '2.2.7', '2.3.2'];
 export const verifiedRuntime = version => typeof version === 'string' && VERIFIED_RUNTIME_VERSIONS.includes(version);
 // A lock holder only lives for the duration of one synchronous state write.
 // Anything older is an orphaned lock from a crashed writer and must not block

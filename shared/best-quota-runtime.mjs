@@ -20,6 +20,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
   const transportSafety = dependencies.transportSafety ?? verifySubscriptionTransport;
   const pinned = new Map();
   const leases = new Map();
+  const asyncDelegation = ctx.app.version === '2.3.2';
   const active = state => state.policy?.mode === 'active';
   // A receipt belongs to one setup/cleanup lifecycle, not just a reusable PID.
   // Record only configuration identity and callback metadata, never event bodies.
@@ -47,7 +48,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
       // Observation failure must not break work in monitor mode. No exception
       // text is logged: transport errors may contain credential material.
       let state;
-      try { state = readQuotaState(file); } catch { blocked(); }
+      try { state = readQuotaState(file); } catch { blocked('quota-state-unavailable'); }
       if (active(state)) throw error;
       console.warn('BEST quota observation unavailable; monitor mode has not changed execution.');
     }
@@ -100,7 +101,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
     hookVerified: state.runtime?.version === ctx.app.version && state.runtime?.hookVerified === true,
   } })))();
   await guarded(() => refresh())();
-  async function choose(agent, models, leaseID) {
+  async function choose(agent, models, leaseID, sessionID) {
     await refresh();
     const { data: inventory } = await ctx.model.list();
     const goCertified = (await goPaymentSafety(readQuotaState(file))).certified === true;
@@ -118,11 +119,12 @@ export async function setupGovernor(ctx, dependencies = {}) {
       // Percent points already committed by in-flight admissions (this and
       // other instances) so parallel terminals cannot spend one budget twice.
       const reserved = Object.fromEntries(['opencode-go', 'openai'].map(provider =>
-        [provider, reservedPercent(current.leases, provider)]));
+        [provider, reservedPercent(current.leases.filter(lease =>
+          !sessionID || lease.sessionID !== sessionID), provider)]));
       const candidates = models.filter(value => inventory.some(m => m.providerID === value.provider
         && m.id === value.model.split('/').slice(1).join('/').split('#')[0] && m.enabled !== false))
         .filter(value => !active(current) || (current.leases ?? []).filter(l => l.provider === value.provider
-            && l.scope !== 'admission').length
+            && l.scope !== 'admission' && (!sessionID || l.sessionID !== sessionID)).length
           < (value.provider === 'opencode-go' ? 2 : 1) * instanceCapacity)
         .filter(value => !active(current) || value.provider !== 'opencode-go' || goCertified)
         // No invented starting allowance for discovery. This excludes only
@@ -142,8 +144,13 @@ export async function setupGovernor(ctx, dependencies = {}) {
       current.decisions.push({ ...decision, scope: 'routing', enforced: active(current) });
       if (active(current) && !decision.blocked) {
         current.leases ??= [];
+        // A join is still one worker. Replace its capacity receipt atomically;
+        // a delayed completion holding the old lease ID cannot release this run.
+        if (sessionID) current.leases = current.leases.filter(lease =>
+          lease.scope !== 'routing' || lease.sessionID !== sessionID);
         current.leases.push({ id: leaseID, provider: decision.candidate.provider, ownerPid: process.pid,
-          scope: 'routing', expiresAt: new Date(Date.now() + 600000).toISOString() });
+          ...(sessionID ? { sessionID } : {}),
+          scope: 'routing', at: new Date().toISOString(), expiresAt: new Date(Date.now() + 600000).toISOString() });
       }
       return current;
     });
@@ -152,9 +159,14 @@ export async function setupGovernor(ctx, dependencies = {}) {
   await ctx.tool.hook('execute.before', guarded(async event => {
     if (event.tool !== 'subagent') return;
     const agent = event.input?.agent;
-    if (event.input?.background === true && active(readQuotaState(file))) blocked();
+    if (asyncDelegation && active(readQuotaState(file)) && (!ctx.event || !ctx.session.get)) {
+      blocked('delegation-lifecycle-unverified');
+    }
+    if (!asyncDelegation && event.input?.background === true && active(readQuotaState(file))) {
+      blocked('background-lifecycle-unverified; use background=false');
+    }
     if (!kinds[agent] || (active(readQuotaState(file)) && !verifiedRuntime(ctx.app.version))) {
-      if (active(readQuotaState(file))) blocked();
+      if (active(readQuotaState(file))) blocked(!kinds[agent] ? 'unsupported-agent' : 'runtime-version-unverified');
       return;
     }
     if (event.input.sessionID) {
@@ -174,7 +186,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
       }
       await checkRequest({ sessionID: event.input.sessionID, agent, kind: 'primary', model: child.model }, false);
       const leaseID = randomUUID();
-      const { state, decision } = await choose(agent, [candidate(agent, model)], leaseID);
+      const { state, decision } = await choose(agent, [candidate(agent, model)], leaseID, event.input.sessionID);
       if (active(state)) {
         if (decision.blocked) blocked(decision.reason);
         leases.set(`${event.sessionID}:${event.id}`, leaseID);
@@ -182,7 +194,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
       return;
     }
     const configured = await configuredModel(agent);
-    if (!configured) { if (active(readQuotaState(file))) blocked(); return; }
+    if (!configured) { if (active(readQuotaState(file))) blocked('agent-model-unavailable'); return; }
     const models = [candidate(agent, configured)];
     // Cross-provider alternatives are for new delegations, never resumed children.
     if (agent === 'general') {
@@ -190,19 +202,50 @@ export async function setupGovernor(ctx, dependencies = {}) {
       if (alternative?.startsWith('openai/')) models.push(candidate(agent, alternative));
     } else if (agent === 'explore') models.push(candidate(agent, exploreFallback));
     if (event.input.model && !models.some(m => m.model === event.input.model)) {
-      if (active(readQuotaState(file))) blocked();
+      if (active(readQuotaState(file))) blocked('delegation-model-override');
       return;
     }
     const leaseID = randomUUID();
     const { state, decision } = await choose(agent, models, leaseID);
     if (!active(state)) return;
-    if (decision.blocked) blocked(agent === 'explore' ? decision.reason : undefined);
+    if (decision.blocked) blocked(decision.reason);
     leases.set(`${event.sessionID}:${event.id}`, leaseID);
     event.input.model = decision.candidate.model;
   }));
+  async function childIdleSince(sessionID, at) {
+    try {
+      const child = await ctx.session.get({ sessionID });
+      return Number.isFinite(child?.time?.idle) && child.time.idle > Date.parse(at)
+        && (!Number.isFinite(child.time.busy) || child.time.idle > child.time.busy);
+    } catch {
+      console.warn('BEST quota child lifecycle unavailable; reservation retained.');
+      return false;
+    }
+  }
   await ctx.tool.hook('execute.after', async event => {
     const key = `${event.sessionID}:${event.id}`, id = leases.get(key);
     if (!id) return;
+    if (asyncDelegation) {
+      // 2.3.2 returns from subagent while the child is still running, regardless
+      // of background=false. Persist the native child identity; tool completion
+      // is not worker completion. Unknown correlation must retain capacity.
+      const sessionID = event.result?.metadata?.sessionID;
+      if (event.status !== 'completed' || typeof sessionID !== 'string'
+          || !/^[a-z0-9][a-z0-9._:-]{0,127}$/i.test(sessionID)
+          || (event.input?.sessionID && event.input.sessionID !== sessionID)) {
+        blocked('delegation-lifecycle-unverified');
+      }
+      const state = await updateQuotaState(file, current => {
+        const lease = current.leases?.find(lease => lease.id === id);
+        if (lease) lease.sessionID = sessionID;
+        return current;
+      });
+      leases.delete(key);
+      const lease = state.leases?.find(lease => lease.id === id);
+      // Reconcile a child that ended before execute.after could bind its ID.
+      // A prior resume's stale outcome/idle timestamp is never sufficient.
+      if (!lease || !await childIdleSince(sessionID, lease.at)) return;
+    }
     // Releasing existing capacity is lifecycle cleanup, not new work. It must
     // still happen when a human disables monitoring while the worker finishes.
     await updateQuotaState(file, state => ({ ...state, leases: (state.leases ?? []).filter(l => l.id !== id) }));
@@ -233,7 +276,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
       }
       return;
     }
-    if (!verifiedRuntime(ctx.app.version)) blocked();
+    if (!verifiedRuntime(ctx.app.version)) blocked('runtime-version-unverified');
     // The guard sees the actual selected model, including old sessions and all
     // auxiliary calls. Never substitute HTTP endpoints, headers or credentials.
     const continuity = (event.kind === 'compaction' || event.agent === 'summary') && model === 'opencode-go/minimax-m3';
@@ -243,11 +286,12 @@ export async function setupGovernor(ctx, dependencies = {}) {
       || (event.agent === 'explore' && `${model}#${event.model.variant}` === exploreFallback)
       || (event.kind === 'title' && model === 'openai/gpt-6-luna') || continuity;
     const binding = await subscription(ctx, event.model.providerID);
-    if (event.model.providerID === 'opencode-go' && !(await goPaymentSafety(state, Date.now(), binding)).certified) blocked();
-    if (!compatible || /claude|anthropic/i.test(model) || (/minimax/i.test(model) && !continuity) || !binding) blocked();
+    if (event.model.providerID === 'opencode-go' && !(await goPaymentSafety(state, Date.now(), binding)).certified) blocked('go-payment-safety-unverified');
+    if (!compatible || /claude|anthropic/i.test(model) || (/minimax/i.test(model) && !continuity)) blocked('incompatible-model');
+    if (!binding) blocked('subscription-binding-unverified');
     // Transport verification is async prep and must finish before any
     // reservation is taken, so a transport failure never leaks a lease.
-    if (transport && !await transportSafety(ctx, event)) blocked();
+    if (transport && !await transportSafety(ctx, event)) blocked('subscription-transport-unverified');
     const selected = candidate(event.agent || 'build', `${model}${event.model.variant ? `#${event.model.variant}` : ''}`);
     // One atomic read-decide-reserve cycle: parallel BEST instances see each
     // other's in-flight percent before their own quota snapshot is written.
@@ -403,13 +447,21 @@ export async function setupGovernor(ctx, dependencies = {}) {
   if (ctx.event) eventLoop = (async () => {
     const types = ['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.step.ended'];
     for await (const event of ctx.event.subscribe({ types, signal: controller.signal })) {
+      const ended = new Set();
+      if (asyncDelegation && event.type !== 'session.step.ended') {
+        for (const lease of readQuotaState(file).leases ?? []) {
+          if (lease.scope === 'routing' && lease.sessionID === event.data.sessionID
+              && Date.parse(lease.at) <= event.created && await childIdleSince(lease.sessionID, lease.at)) ended.add(lease.id);
+        }
+      }
       // An admission reservation covers one request; when the session's step or
       // execution ends the request is over, so its percent returns to the pool.
-      await guarded(() => updateQuotaState(file, state => {
+      await updateQuotaState(file, state => {
         state.leases = (state.leases ?? []).filter(lease =>
-          !(lease.scope === 'admission' && lease.sessionID === event.data.sessionID));
+          !(lease.scope === 'admission' && lease.sessionID === event.data.sessionID
+            && Date.parse(lease.at) < event.created) && !ended.has(lease.id));
         return state;
-      }))();
+      });
       if (event.type === 'session.step.ended') {
         const request = pinned.get(`${event.data.sessionID}:primary`), tokens = event.data.tokens;
         if (request) await guarded(() => attest({ lifecycle: { type: event.type, at: new Date(event.created).toISOString() } }))();
@@ -424,13 +476,21 @@ export async function setupGovernor(ctx, dependencies = {}) {
         }))();
         continue;
       }
-      for (const key of pinned.keys()) if (key.startsWith(`${event.data.sessionID}:`)) {
+      for (const [key, request] of pinned) if (key.startsWith(`${event.data.sessionID}:`)
+          && request.startedAt < event.created) {
         await guarded(() => attest({ lifecycle: { type: event.type, at: new Date(event.created).toISOString() } }))();
-        pinned.delete(key);
+        if (pinned.get(key) === request) pinned.delete(key);
       }
     }
   })();
-  await guarded(() => attest({ registeredAt: new Date().toISOString() }))();
+  await guarded(() => {
+    const at = new Date().toISOString(), mode = readQuotaState(file).policy?.mode ?? 'monitor';
+    // Hook registration has just completed in this process. Observe liveness
+    // now, not three minutes later or only after the first admitted request.
+    // This says nothing about subscription transport or runtime qualification.
+    return attest({ registeredAt: at, callbacks: { heartbeat: {
+      at, outcome: mode === 'active' ? 'PASSED' : 'MONITOR_OBSERVED', mode, liveSubscription: false } } });
+  })();
   // Idle locations never fire request callbacks, so activation coverage must
   // not depend on a workspace happening to be busy. This in-process, unref'd
   // heartbeat — no daemon, no scheduler, no network — keeps proving that this

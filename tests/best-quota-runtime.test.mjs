@@ -3,6 +3,7 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { EventEmitter, on } from 'node:events';
 import { setupGovernor } from '../shared/best-quota-runtime.mjs';
 import { updateQuotaState, readQuotaState } from '../shared/best-quota.mjs';
 
@@ -36,6 +37,24 @@ test('registration immediately observes liveness only, without waiting for a fir
   assert.equal(receipt.callbacks['model.request'], undefined);
 });
 
+test('another same-version active instance preserves observed certification and has its own liveness receipt', async t => {
+  const f = await fixture(t);
+  t.after(f.cleanup);
+  const verifiedAt = new Date().toISOString();
+  await updateQuotaState(f.file, state => ({ ...state, runtime: { ...state.runtime,
+    hookVerified: true, verifiedAt } }));
+  t.after(await setupGovernor(f.ctx, { collect: async () => ({ snapshots: [], sources: {} }),
+    subscription: async () => f.auth.binding, transportSafety: async () => true }));
+  const { runtime, policy } = readQuotaState(f.file);
+  assert.equal(policy.mode, 'active');
+  assert.equal(runtime.hookVerified, true);
+  assert.equal(runtime.verifiedAt, verifiedAt);
+  assert.equal(runtime.instances.length, 2);
+  assert.notEqual(runtime.instances[0].instanceID, runtime.instances[1].instanceID);
+  assert.ok(runtime.instances.every(entry => entry.registeredAt && entry.callbacks.heartbeat
+    && !entry.callbacks.heartbeat.liveSubscription));
+});
+
 test('background delegation has an explicit foreground recovery path and reserves nothing before routing', async t => {
   const f = await fixture(t);
   t.after(f.cleanup);
@@ -45,7 +64,7 @@ test('background delegation has an explicit foreground recovery path and reserve
     error.message.includes('background-lifecycle-unverified; use background=false')
       && !error.message.includes('private-do-not-log'));
   assert.equal(readQuotaState(f.file).decisions.length, 0);
-  assert.equal(readQuotaState(f.file).leases.length, 0);
+  assert.equal((readQuotaState(f.file).leases ?? []).length, 0);
   event.input.background = false;
   await f.tools['execute.before'](event);
   assert.equal(event.input.model, 'openai/gpt-6.1-sol#medium');
@@ -66,7 +85,7 @@ test('pre-routing runtime and agent denials are distinguishable and do not discl
     model: { providerID: 'openai', id: 'gpt-6.1-sol' } }), /runtime-version-unverified/);
 });
 
-async function fixture(t, mode = 'active', payment = { certified: true }, collect = async () => ({ snapshots: [], sources: {} }), event) {
+async function fixture(t, mode = 'active', payment = { certified: true }, collect = async () => ({ snapshots: [], sources: {} }), event, version = '2.2.5') {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'quota-runtime-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
   const file = path.join(dir, 'state.json');
@@ -77,7 +96,7 @@ async function fixture(t, mode = 'active', payment = { certified: true }, collec
     { provider: 'openai', connection: 'a'.repeat(64), source: 'LIVE', at: new Date(now).toISOString(), windows: {
       weekly: { used: 20, resetAt: new Date(now + 604800000).toISOString(), limitWindowSeconds: 604800 } } },
   ] }));
-  const ctx = { app: { version: '2.2.5' }, options: { stateFile: file },
+  const ctx = { app: { version }, options: { stateFile: file },
     agent: { get: async ({ agentID }) => ({ data: { model: agentID === 'general'
       ? { providerID: 'opencode-go', id: 'qwen3.7-plus' }
       : { providerID: 'openai', id: 'gpt-6.1-sol', variant: agentID === 'build' ? 'low' : 'medium' } } }) },
@@ -94,6 +113,131 @@ async function fixture(t, mode = 'active', payment = { certified: true }, collec
     ...(payment ? { goPaymentSafety: async () => payment } : {}), transportSafety: async () => true });
   return { hooks, tools, commands, file, ctx, auth, cleanup };
 }
+
+for (const outcome of ['succeeded', 'failed', 'interrupted']) {
+  test(`2.3.2 background reservation survives tool return and child steps until execution ${outcome}`, async t => {
+    const bus = new EventEmitter();
+    const f = await fixture(t, 'active', { certified: true }, undefined, {
+      subscribe: async function* ({ signal }) {
+        for await (const [event] of on(bus, 'event', { signal })) yield event;
+      },
+    }, '2.3.2');
+    t.after(f.cleanup);
+    const started = Date.now();
+    let child = { time: { busy: started } };
+    f.ctx.session.get = async () => child;
+    const event = { tool: 'subagent', id: 'async', sessionID: 'parent',
+      input: { agent: 'general', background: true } };
+    await f.tools['execute.before'](event);
+    await f.tools['execute.after']({ ...event, status: 'completed',
+      result: { metadata: { sessionID: 'child', status: 'running' } } });
+    assert.equal(readQuotaState(f.file).leases.length, 1);
+    assert.equal(readQuotaState(f.file).leases[0].sessionID, 'child');
+    bus.emit('event', { type: 'session.step.ended', created: Date.now(), data: { sessionID: 'child' } });
+    await new Promise(setImmediate);
+    assert.equal(readQuotaState(f.file).leases.length, 1, 'a tool step is not the end of child work');
+    await assert.rejects(f.tools['execute.before']({ ...event, id: 'second' }), /BEST_QUOTA_BLOCKED/);
+    if (outcome === 'interrupted') await updateQuotaState(f.file, state => ({ ...state, policy: { mode: 'disabled' } }));
+    child = { time: { busy: started, idle: Date.now() + 1 } };
+    bus.emit('event', { type: `session.execution.${outcome}`, created: child.time.idle, data: { sessionID: 'child' } });
+    await new Promise(setImmediate);
+    assert.equal(readQuotaState(f.file).leases.length, 0);
+    await updateQuotaState(f.file, state => ({ ...state, policy: { mode: 'active' } }));
+    await f.tools['execute.before']({ ...event, id: 'after-completion', input: { agent: 'general', background: false } });
+  });
+}
+
+test('2.3.2 reconciles completion before tool return; missing correlation holds capacity', async t => {
+  const f = await fixture(t, 'active', { certified: true }, undefined, { subscribe: async function* () {} }, '2.3.2');
+  t.after(f.cleanup);
+  f.ctx.session.get = async () => ({ time: { busy: Date.now() - 1000, idle: Date.now() + 1 } });
+  const event = { tool: 'subagent', id: 'fast', sessionID: 'parent', input: { agent: 'general' } };
+  await f.tools['execute.before'](event);
+  await f.tools['execute.after']({ ...event, status: 'completed', result: { metadata: { sessionID: 'child' } } });
+  assert.equal(readQuotaState(f.file).leases.length, 0);
+  await f.tools['execute.before']({ ...event, id: 'ambiguous' });
+  await assert.rejects(f.tools['execute.after']({ ...event, id: 'ambiguous', status: 'completed', result: {} }),
+    /delegation-lifecycle-unverified/);
+  assert.equal(readQuotaState(f.file).leases.length, 1);
+});
+
+test('2.3.2 joins a running child without self-blocking; stale and unrelated completion cannot release it', async t => {
+  const bus = new EventEmitter();
+  const f = await fixture(t, 'active', { certified: true }, undefined, {
+    subscribe: async function* ({ signal }) {
+      for await (const [event] of on(bus, 'event', { signal })) yield event;
+    },
+  }, '2.3.2');
+  t.after(f.cleanup);
+  const started = Date.now();
+  let child = { agent: 'general', model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'medium' },
+    outcome: 'succeeded', time: { busy: started, idle: started - 1000 } };
+  f.ctx.session.get = async () => child;
+  const event = { tool: 'subagent', id: 'initial', sessionID: 'parent', input: { agent: 'general' } };
+  await f.tools['execute.before'](event);
+  const result = { metadata: { sessionID: 'child', status: 'running' } };
+  await f.tools['execute.after']({ ...event, status: 'completed', result });
+  await updateQuotaState(f.file, state => {
+    state.snapshots.find(snapshot => snapshot.provider === 'openai').windows.weekly.used = 90;
+    state.policy.expectedPercentByKind = { coding: { openai: 6 } };
+    state.leases.push({ id: 'existing-request', provider: 'openai', scope: 'admission',
+      percent: 6, sessionID: 'child', ownerPid: process.pid, at: new Date().toISOString(),
+      expiresAt: new Date(Date.now() + 900000).toISOString() });
+    return state;
+  });
+  const resume = { ...event, id: 'join', input: { agent: 'general', sessionID: 'child' } };
+  await f.tools['execute.before'](resume);
+  await f.tools['execute.after']({ ...resume, status: 'completed', result });
+  assert.equal(readQuotaState(f.file).leases.filter(lease => lease.scope === 'routing').length, 1,
+    'joining the same child must keep exactly one capacity slot');
+  assert.equal(readQuotaState(f.file).leases.length, 2);
+  for (const [sessionID, created] of [['child', started - 1000], ['unrelated', Date.now()]]) {
+    bus.emit('event', { type: 'session.execution.succeeded', created, data: { sessionID } });
+    await new Promise(setImmediate);
+  }
+  assert.equal(readQuotaState(f.file).leases.length, 2);
+  child = { ...child, time: { busy: started, idle: Date.now() + 1 } };
+  bus.emit('event', { type: 'session.execution.succeeded', created: child.time.idle, data: { sessionID: 'child' } });
+  await new Promise(setImmediate);
+  assert.equal(readQuotaState(f.file).leases.length, 0);
+});
+
+test('delayed terminal reconciliation preserves a newer same-session admission', async t => {
+  const bus = new EventEmitter();
+  const f = await fixture(t, 'active', { certified: true }, undefined, {
+    subscribe: async function* ({ signal }) {
+      for await (const [event] of on(bus, 'event', { signal })) yield event;
+    },
+  }, '2.3.2');
+  t.after(f.cleanup);
+  f.ctx.session.get = async () => ({ time: { busy: Date.now() } });
+  const event = { tool: 'subagent', id: 'dispatch', sessionID: 'parent', input: { agent: 'general' } };
+  await f.tools['execute.before'](event);
+  await f.tools['execute.after']({ ...event, status: 'completed', result: { metadata: { sessionID: 'child' } } });
+  const created = Date.now();
+  let observed, release;
+  const reading = new Promise(resolve => { observed = resolve; });
+  f.ctx.session.get = async () => {
+    observed();
+    return new Promise(resolve => { release = () => resolve({ time: { busy: created - 100, idle: created } }); });
+  };
+  bus.emit('event', { type: 'session.execution.succeeded', created, data: { sessionID: 'child' } });
+  await reading;
+  await new Promise(resolve => setTimeout(resolve, 5));
+  await f.hooks['model.request']({ sessionID: 'child', agent: 'general', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'medium' } });
+  const reservation = readQuotaState(f.file).leases.find(lease => lease.scope === 'admission');
+  assert.ok(Date.parse(reservation.at) > created);
+  release();
+  await new Promise(setImmediate);
+  assert.ok(readQuotaState(f.file).leases.some(lease => lease.id === reservation.id),
+    'an old execution cannot release budget reserved by the next request');
+  bus.emit('event', { type: 'session.step.ended', created: Date.now() + 1,
+    data: { sessionID: 'child', tokens: { input: 1, output: 2 } } });
+  await new Promise(setImmediate);
+  assert.ok(readQuotaState(f.file).usage.some(entry => entry.requests === 0 && entry.output === 2),
+    'an old execution cannot erase the next request telemetry');
+});
 
 test('internal instance receipt records actual host and observed callbacks without promoting injected tests to live proof', async t => {
   const f = await fixture(t, 'monitor');

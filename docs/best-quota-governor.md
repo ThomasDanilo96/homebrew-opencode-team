@@ -143,8 +143,14 @@ Contratti verificati nel sorgente ufficiale tag `v2.2.5` e nel binario:
   completamento reale anche durante disabled, non alla sola scadenza temporale.
   Dopo crash si recuperano solo quando il processo proprietario è certamente
   terminato; un caso ambiguo resta bloccato, visibile in `doctor`.
-- In active le deleghe background non sono ammesse: l'enforcement usa il ciclo
-  foreground nativo verificato, coerente con Hybrid. Nessun orchestratore aggiunto.
+- Su 2.2.5/2.2.7, in active le deleghe background non sono qualificate:
+  `background-lifecycle-unverified; use background=false` indica il percorso
+  foreground supportato. Su 2.3.2 il tool è sempre asincrono, anche con
+  `background=false`: la riserva resta associata al `sessionID` nativo del child
+  fino al termine della sua esecuzione, non al ritorno del tool. Step intermedi,
+  vecchi outcome e completamenti di altri child non liberano la riserva.
+  Identità o stato lifecycle non verificabili mantengono la riserva. Nessun
+  orchestratore aggiunto.
 - Disabled mantiene hook inerti per consentire riattivazione nello stesso processo.
   Monitor registra ma non modifica routing/retry; gli errori di osservazione sono
   segnalati senza esporre dettagli di autenticazione.
@@ -153,6 +159,38 @@ I model/agent transforms e `model.reload` sono disponibili ma non vengono usati
 per rimuovere modelli durante il lavoro: altererebbe le sessioni selezionate.
 Ogni nuova scelta legge l'inventario nativo corrente; un reset richiede dati reali
 nuovi prima di riammettere il lavoro. La qualificazione non vale per altre versioni.
+
+### Hotfix nuove chat BEST — 19 novembre 2026
+
+- Causa osservata: nuove istanze su OpenCode **2.3.2**, mentre l'allow-list
+  comprendeva soltanto 2.2.5/2.2.7. `model.request` veniva rifiutato prima della
+  decisione di ammissione. L'invalidazione della certificazione precedente al
+  cambio versione era corretta: non è stata rimossa.
+- La 2.3.2 rende asincrono anche `background=false`. Non basta consentire la
+  versione: la riserva deve seguire il child, comprese riprese e interruzioni.
+  Un join sostituisce atomicamente il solo slot del child e non riconta la sua
+  riserva percentuale. Callback vecchie non cancellano budget o telemetria nuovi.
+- Bootstrap: heartbeat immediato dopo registrazione completa dei hook, con
+  `liveSubscription=false`. Nessun campione di trasporto o certificato inventato.
+- RED: quattro regressioni iniziali fallite (`admission-denied`, liveness assente,
+  cause generiche); ulteriori regressioni hanno riprodotto background negato,
+  doppio conteggio della riserva propria e cancellazione ritardata di
+  admission/telemetria. GREEN: **11 regressioni mirate**, exit 0.
+- `node --test --test-name-pattern='runtime coverage|heartbeat receipt'
+  tests/best-quota-cli.test.mjs`: **3/3 PASS**, exit 0; processi/location multipli,
+  PID riutilizzati, callback scadute e fixture non promosse a prova live.
+- `node --test tests/best-quota-native.test.mjs`: **PASS**, exit 0, su 2.3.2;
+  chat nuova, quote sintetiche 46% settimanale OpenAI / 5% mensile Go,
+  delega con child deliberatamente trattenuto, resume, restart isolato,
+  EXHAUSTED/UNKNOWN, retry e canale API non autorizzato.
+- `bash bin/opencode-team best quota verify-runtime`: **PASS**, exit 0;
+  certificazione del contratto runtime osservato, non del trasporto simulato.
+  Stato rilevato: mode **active**, operational **ACTIVE**, coverage **PASS**,
+  nessun blocker. L'ultima tutela della telemetria è stata verificata con la
+  regressione mirata, senza ripetere la qualificazione nativa.
+- `node --check shared/best-quota-runtime.mjs` e `git diff --check`: exit 0.
+  Nessuna misura di coverage, typecheck o lint globale; nessun audit generale,
+  inferenza Go/FREE, cambio modelli/account/permessi o pubblicazione release.
 
 ## Consumo 4–5 novembre: aggregati nativi
 
