@@ -687,6 +687,15 @@ test('a delegated child prompt is skipped so execute.before stays its only route
   assert.equal(routingDecisions(f.file).length, 1, 'the child adds no second routing decision');
 });
 
+test('Build keeps an explicitly selected Medium on the configured subscription', async t => {
+  const f = await fixture(t);
+  f.ctx.session.get = async () => promptSession({ agent: 'build',
+    model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'medium' } });
+  f.ctx.session.switchModel = async () => { assert.fail('must not reset the selected variant'); };
+  await f.hooks.prompt({ sessionID: 'ses_build' });
+  assert.equal(routingDecisions(f.file).at(-1).applied, 'openai/gpt-6.1-sol#medium');
+});
+
 test('active prompt stops a Build turn with no admissible provider instead of dispatching unregulated', async t => {
   const f = await fixture(t);
   await updateQuotaState(f.file, state => {
