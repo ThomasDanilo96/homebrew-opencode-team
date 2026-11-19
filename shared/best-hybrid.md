@@ -36,8 +36,8 @@ minimalism review. Do not add another review system.
 
 This supplement applies only to BEST. Execute the ChatGPT mandate; validate it
 against real code, security and contracts rather than planning it all over again.
-These assignments supersede the older BEST model examples in shared instructions:
-Build is OpenAI Sol Low; General is Go Qwen3.7 Plus; Explore is Go MiMo Flash;
+Build defaults to OpenAI Sol Medium; select Low for simple work.
+General is Go Qwen3.7 Plus; Explore is Go MiMo Flash;
 Specialist and Reviewer are Sol Medium; Visual Designer is Go GLM-5.3-Flash.
 MiniMax M3 remains quarantined from implementation and automatic fallbacks;
 unchanged hidden summary/compaction roles are retained only for continuity.
@@ -77,10 +77,7 @@ unchanged hidden summary/compaction roles are retained only for continuity.
 - For articulated mandates, track each required outcome and its acceptance check.
   Before final delivery, compare actual results against the original requirements,
   including integration, tests and authorized rollout. Continue any actionable
-  item now, not as a recommendation in the final answer. A production blocker
-  does not block authorized isolated fixtures, implementation or tests. Stop
-  only when every remaining item is verified or has a concrete blocker of its
-  own; preserve verified progress and name each missing prerequisite.
+  item now, not as a recommendation in the final answer.
 - If a required tool is absent, a child hands the missing check back to Build.
   Build uses an authorized alternative or reports the missing prerequisite.
   Use only advertised tools; do not guess aliases or bypass permissions.
@@ -100,8 +97,7 @@ compaction retain MiniMax M3 until exact continuity is verified for a replacemen
 Handoffs must retain exact numeric constraints, public contracts, security decisions,
 file ownership, incomplete children and pending work, not just their general intent.
 
-Build stays Sol Low. Specialist/Reviewer stay Medium; do not escalate to High/Max
-without a concrete reason and authorization. Use native summary/compaction and
+Use native summary/compaction and
 existing subscription connections. Report measured tokens/cache/time when useful,
 but never infer monetary savings or quota remaining from model names or call counts.
 

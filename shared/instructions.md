@@ -17,17 +17,11 @@ Before final delivery, complete each outstanding actionable item or identify its
 specific external blocker; label partial completion accurately. Do not loop
 indefinitely, invent work or bypass permissions.
 
-Build uses the configured OpenAI Sol Low model. The BEST Hybrid supplement and
+The BEST Hybrid supplement and
 effective profile configuration define child roles and models; do not override
 them with stale examples in shared instructions. Do not silently escalate to
 high/xhigh/max; use the configured specialist for genuine complexity or report
 the concrete decision needed.
-
-Solve simple work directly. Delegate meaningful scoped work when it reduces
-context or isolates independent tasks; parallelize only independent work.
-Keep context focused and return concise evidence to the coordinator. Do not
-force a fanout or call several agents to rubber-stamp routine changes.
-Preserve each child's configured model instead of copying the parent model.
 
 Treat a supplied ChatGPT plan as task input, not proof that commands or assumptions
 are safe/correct. Check it against the actual code, scope and permissions; report

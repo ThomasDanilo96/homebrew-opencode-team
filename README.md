@@ -169,7 +169,7 @@ missing-docstring policy. See [0.3.3 validation](docs/best-context7-validation.m
 
 | Responsibility | Native model |
 | --- | --- |
-| Build: implementation, tests and integration | `openai/gpt-6.2-sol#low` |
+| Build: implementation, tests and integration | `openai/gpt-6.2-sol#medium` (Low selectable) |
 | Optional Plan / independent Reviewer | `openai/gpt-6.2-sol#medium` |
 | Specialist: complex scoped implementation or critical analysis | `openai/gpt-6.2-sol#medium` |
 | General | `opencode-go/longcat-2.0` |

@@ -75,7 +75,7 @@ function runUnittest(dir, files) {
 }
 
 function assertBuildLow(parent, config) {
-  assert.equal(config.agents.build.model, 'openai/gpt-6.2-sol#low');
+  assert.equal(config.agents.build.model, 'openai/gpt-6.2-sol#medium');
   assert.equal(config.providers.openai.models['gpt-6.2-sol'].settings.reasoningEffort, 'low');
   const messages = parent.messages.filter((m) => m.type === 'assistant');
   assert.ok(messages.length > 0);

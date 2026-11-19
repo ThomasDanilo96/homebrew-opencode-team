@@ -367,9 +367,9 @@ export async function setupGovernor(ctx, dependencies = {}) {
       const configured = await configuredModel(session.agent);
       if (!configured) return;
       const selected = session.model && `${session.model.providerID}/${session.model.id}`;
-      const useMedium = session.agent === 'build' && selected?.startsWith('openai/')
-        && selected === configured.split('#')[0] && session.model.variant === 'medium';
-      const models = [candidate(session.agent, useMedium ? `${selected}#medium` : configured)];
+      const keepVariant = session.agent === 'build' && selected?.startsWith('openai/')
+        && selected === configured.split('#')[0] && ['low', 'medium'].includes(session.model.variant);
+      const models = [candidate(session.agent, keepVariant ? `${selected}#${session.model.variant}` : configured)];
       // The same bounded cross-provider choice a new delegation gets: only
       // General may leave its configured provider, and only toward OpenAI.
       if (session.agent === 'general') {

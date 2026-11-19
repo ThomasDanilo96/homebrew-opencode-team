@@ -572,7 +572,7 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE assigns verified fre
     assert.equal(c.$schema, 'https://opencode.ai/config.json');
     assert.equal(c.model, profile === 'best' ? 'openai/gpt-6.2-sol' : 'team-free/deepseek-v4.1-flash-free');
     const expected = profile === 'best' ? {
-      build: 'openai/gpt-6.2-sol#low', general: 'opencode-go/qwen3.7-plus',
+      build: 'openai/gpt-6.2-sol#medium', general: 'opencode-go/qwen3.7-plus',
       explore: 'opencode-go/mimo-v2.6-flash', title: 'openai/gpt-6-luna#low',
       summary: 'opencode-go/minimax-m3', compaction: 'opencode-go/minimax-m3',
       plan: 'openai/gpt-6.2-sol#medium', reviewer: 'openai/gpt-6.2-sol#medium',
@@ -686,7 +686,7 @@ test('BEST Hybrid specialist inherits its coordinator override, FREE ignores it'
   f.env.OPENCODE_TEAM_BEST_MODEL = 'openai/another-coordinator';
   ok(f.run('setup'));
   const best = f.config('best');
-  assert.equal(best.agents.build.model, 'openai/another-coordinator#low');
+  assert.equal(best.agents.build.model, 'openai/another-coordinator#medium');
   assert.equal(best.agents.plan.model, 'openai/another-coordinator#medium');
   assert.equal(best.agents.reviewer.model, 'openai/another-coordinator#medium');
   assert.equal(best.agents.specialist.model, 'openai/another-coordinator#medium',
@@ -856,7 +856,7 @@ test('FREE Hybrid: verified free catalog, role models, native delegation, read-o
   // (7) BEST untouched: the GPT-6.2 Sol coordinator and its supplement still generate.
   const best = f.config('best');
   assert.equal(best.model, 'openai/gpt-6.2-sol');
-  assert.equal(best.agents.build.model, 'openai/gpt-6.2-sol#low');
+  assert.equal(best.agents.build.model, 'openai/gpt-6.2-sol#medium');
   assert.ok(fs.readFileSync(path.join(f.team, 'config/best/v2/AGENTS.md'), 'utf8').includes('## BEST strict minimalism'));
   // (8) FREE packaging: AGENTS.md carries the FREE Hybrid supplement and no BEST policy.
   const freeInstructions = fs.readFileSync(path.join(f.team, 'config/free/v2/AGENTS.md'), 'utf8');
@@ -1065,7 +1065,7 @@ test('explicit coordinator and worker model choices update only their roles with
   assert.equal(f.config('best').agents.title.model, 'openai/gpt-6-luna#low');
   assert.equal(f.config('best').agents.summary.model, 'opencode-go/minimax-m3');
   assert.equal(f.config('best').agents.compaction.model, 'opencode-go/minimax-m3');
-  assert.equal(f.config('best').agents.build.model, 'openai/another-coordinator#low');
+  assert.equal(f.config('best').agents.build.model, 'openai/another-coordinator#medium');
   assert.equal(f.config('best').agents.reviewer.model, 'openai/another-coordinator#medium');
   assert.equal(f.config('best').providers.openai.models['another-coordinator'].settings.reasoningEffort, 'low');
   f.env.OPENCODE_TEAM_BEST_GO_MODEL = 'opencode/paid-model';

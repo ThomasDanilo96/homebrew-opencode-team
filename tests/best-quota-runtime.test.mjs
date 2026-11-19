@@ -687,13 +687,34 @@ test('a delegated child prompt is skipped so execute.before stays its only route
   assert.equal(routingDecisions(f.file).length, 1, 'the child adds no second routing decision');
 });
 
-test('Build keeps an explicitly selected Medium on the configured subscription', async t => {
+test('Specialist and Reviewer route and admit their configured Sol Medium', async t => {
   const f = await fixture(t);
-  f.ctx.session.get = async () => promptSession({ agent: 'build',
-    model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'medium' } });
+  for (const agent of ['specialist', 'reviewer']) {
+    const event = { tool: 'subagent', id: agent, sessionID: 'parent', input: { agent } };
+    await f.tools['execute.before'](event);
+    assert.equal(event.input.model, 'openai/gpt-6.1-sol#medium');
+    const request = { sessionID: agent, agent, kind: 'primary',
+      model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'medium' } };
+    await f.hooks['model.request'](request);
+    assert.equal(readQuotaState(f.file).decisions.at(-1).blocked, false);
+    await f.tools['execute.after'](event);
+    // End the synthetic request before testing another worker on the same slot.
+    await updateQuotaState(f.file, state => ({ ...state,
+      leases: state.leases.filter(lease => lease.sessionID !== agent) }));
+  }
+});
+
+test('Build keeps Low or Medium on the configured subscription', async t => {
+  const f = await fixture(t);
   f.ctx.session.switchModel = async () => { assert.fail('must not reset the selected variant'); };
-  await f.hooks.prompt({ sessionID: 'ses_build' });
-  assert.equal(routingDecisions(f.file).at(-1).applied, 'openai/gpt-6.1-sol#medium');
+  for (const variant of ['low', 'medium']) {
+    f.ctx.agent.get = async () => ({ data: { model: { providerID: 'openai', id: 'gpt-6.1-sol',
+      variant: variant === 'low' ? 'medium' : 'low' } } });
+    f.ctx.session.get = async () => promptSession({ agent: 'build',
+      model: { providerID: 'openai', id: 'gpt-6.1-sol', variant } });
+    await f.hooks.prompt({ sessionID: 'ses_build' });
+    assert.equal(routingDecisions(f.file).at(-1).applied, `openai/gpt-6.1-sol#${variant}`);
+  }
 });
 
 test('active prompt stops a Build turn with no admissible provider instead of dispatching unregulated', async t => {

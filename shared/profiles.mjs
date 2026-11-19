@@ -381,7 +381,7 @@ function configuration(profile) {
   const model = profile === 'best' ? bestModel : freeCoordinator;
   const agents = Object.fromEntries(['build', 'plan', 'explore', 'general', 'reviewer', 'title', 'summary', 'compaction'].map((id) => [id, { model }]));
   if (profile === 'best') {
-    agents.build.model = `${bestModel}#low`;
+    agents.build.model = `${bestModel}#medium`;
     agents.build.description = 'Coordinate structured work through native subagents; implement small tasks directly';
     agents.build.permissions = [rule('subagent', 'deny'),
       ...['explore', 'general', 'specialist', 'reviewer', 'visual-designer'].map((id) => rule('subagent', 'allow', id))];
