@@ -294,10 +294,22 @@ test('native V2 quota gates existing sessions and native children before local t
   assert.equal((readQuotaState(file).leases ?? []).length, 0, 'foreground and request lifecycle release every reservation');
   t.diagnostic(`PASS: new active chat at 46% weekly / 5% monthly admits first request; ${asyncChildren ? 'native background delegation completes' : 'explicit background denial recovers through native foreground delegation'}`);
   // Restore the original scripted routing probes.
-  respond = body => {
+  let finishExplore;
+  const exploreHeld = new Promise(resolve => { finishExplore = resolve; });
+  let exploreResultReceived = false;
+  t.after(() => finishExplore());
+  respond = async body => {
     const user = body.messages.findLastIndex(m => m.role === 'user');
     const text = JSON.stringify(body.messages[user]?.content);
-    if (text.includes('CHILD_ONLY')) return { content: 'CHILD_DONE' };
+    if (text.includes('CHILD_ONLY')) {
+      if (asyncChildren) await exploreHeld;
+      return { content: 'CHILD_DONE' };
+    }
+    if (text.includes('<subagent ')) {
+      assert.ok(text.includes('CHILD_DONE'), 'native continuation includes the child result');
+      exploreResultReceived = true;
+      return { content: 'PARENT_DONE' };
+    }
     if (body.messages.slice(user + 1).some(m => m.role === 'tool')) return { content: 'PARENT_DONE' };
     if (!text.includes('EXPLORE_NATIVE_PROBE')) return { content: 'HEALTHY_DONE' };
     return { tool_calls: [{ index: 0, id: 'delegate', type: 'function', function: { name: 'subagent',
@@ -307,7 +319,13 @@ test('native V2 quota gates existing sessions and native children before local t
   const { data: exploreParent } = await api('POST', '/api/session', { title: 'Explore probe', location: { directory: dir } });
   const beforeExplore = models.length;
   assert.equal(await prompt(exploreParent.id, 'EXPLORE_NATIVE_PROBE'), 'succeeded', errors);
+  if (asyncChildren) {
+    assert.equal(readQuotaState(file).leases.filter(lease => lease.scope === 'routing').length, 1,
+      'foreground tool returned while required child was still held');
+    finishExplore();
+  }
   await settleDelegation(exploreParent.id, beforeExplore + delegationRequests);
+  if (asyncChildren) assert.ok(exploreResultReceived);
   const exploreChild = (await api('GET', '/api/session?limit=20')).data.find(s => s.parentID === exploreParent.id);
   assert.equal(exploreChild?.agent, 'explore');
   assert.equal(exploreChild.model.variant, 'low');

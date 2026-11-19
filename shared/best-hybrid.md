@@ -54,10 +54,13 @@ unchanged hidden summary/compaction roles are retained only for continuity.
   `subagent:false` run directly; they do not disable Build's native delegation.
 - Do not manufacture lanes to reach a fixed count. If fewer independent jobs exist, state
   the concrete dependency, shared-file conflict or context overhead and use fewer.
-- Launch ready required lanes together as concurrent native foreground subagent
-  calls in one response, so the CLI waits for their results without busywork.
-  Use background only for optional non-blocking work; a required background child
-  must complete before final delivery. Dependent work stays sequential;
+- Launch ready independent lanes together with native `subagent` calls.
+  On OpenCode 2.3.2, even `background: false` may return a child session ID
+  before the work finishes. Treat that result as dispatch, not completion.
+  Continue independent work; use the native completion notification to inspect
+  and integrate the result before proceeding with dependent work. If only
+  required children remain, yield to native continuation without reporting
+  final delivery or polling the children. Dependent work stays sequential;
   discovery must precede any implementation that needs its findings. An independent
   analysis may run alongside implementations only when it needs no changing files.
 - Give every writer exclusive file ownership, a bounded goal, necessary context
@@ -74,8 +77,10 @@ unchanged hidden summary/compaction roles are retained only for continuity.
 - For articulated mandates, track each required outcome and its acceptance check.
   Before final delivery, compare actual results against the original requirements,
   including integration, tests and authorized rollout. Continue any actionable
-  item; report only genuine blockers with the missing prerequisite. A child's
-  completion, a passing test, or elapsed time does not close the mandate.
+  item now, not as a recommendation in the final answer. A production blocker
+  does not block authorized isolated fixtures, implementation or tests. Stop
+  only when every remaining item is verified or has a concrete blocker of its
+  own; preserve verified progress and name each missing prerequisite.
 - If a required tool is absent, a child hands the missing check back to Build.
   Build uses an authorized alternative or reports the missing prerequisite.
   Use only advertised tools; do not guess aliases or bypass permissions.
