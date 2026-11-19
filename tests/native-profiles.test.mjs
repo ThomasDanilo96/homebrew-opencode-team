@@ -643,6 +643,7 @@ test('BEST Hybrid specialist reuses general, denies only question/subagent and i
   const free = f.config('free');
   const specialist = best.agents.specialist;
   assert.equal(best.experimental.subagent_depth, 1);
+  assert.equal(best.experimental.todo, true);
   for (const name of ['explore', 'general', 'specialist', 'reviewer', 'visual-designer']) {
     assert.equal(best.agents[name].mode, 'subagent');
     assert.equal(permissionEffect(best, 'build', 'subagent', name, f.home), 'allow');
@@ -807,6 +808,7 @@ test('FREE Hybrid: verified free catalog, role models, native delegation, read-o
   assert.equal(free.agents.explore.mode, 'subagent');
   assert.equal(free.agents.general.mode, 'subagent');
   assert.equal(free.experimental.subagent_depth, 1, 'no recursive delegation');
+  assert.equal(free.experimental.todo, undefined);
   // (3) Reviewer read-only: no write or delegation escapes.
   const reviewer = free.agents.reviewer.permissions;
   for (const action of ['shell', 'edit', 'write', 'subagent', 'execute', 'patch']) {

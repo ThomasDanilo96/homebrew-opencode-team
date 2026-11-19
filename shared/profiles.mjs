@@ -447,7 +447,7 @@ function configuration(profile) {
     environment: { PATH: '/opt/homebrew/opt/node@22/bin:{env:PATH}' },
   };
   // Depth 1 keeps subagents from spawning subagents in both profiles.
-  config.experimental = { subagent_depth: 1 };
+  config.experimental = { subagent_depth: 1, ...(profile === 'best' ? { todo: true } : {}) };
   if (profile === 'best') {
     config.plugins = [{ package: path.join(packageRoot, 'shared/best-quota-plugin'),
       options: { stateFile: path.join(roots.state, 'best/quota/state.json') } }];

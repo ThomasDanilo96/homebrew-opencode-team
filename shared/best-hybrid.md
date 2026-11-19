@@ -74,7 +74,12 @@ unchanged hidden summary/compaction roles are retained only for continuity.
   Resume when the same route is viable; otherwise use a competent available role
   or finish the work directly. If Reviewer is unavailable, check the diff and
   regressions yourself and report that independent review was unavailable.
-- For articulated mandates, track each required outcome and its acceptance check.
+- For articulated mandates, use `todowrite` for the original requirements and
+  their acceptance checks; keep the list across continuations and compaction.
+  Use `pending` or `in_progress` only for runnable work. Use `cancelled` for
+  work suspended in this turn by an approval gate, naming the missing approval
+  in the item and retaining it as an open requirement. Use `completed` only
+  after checking execution evidence. Skip the list for simple tasks.
   Before final delivery, compare actual results against the original requirements,
   including integration, tests and authorized rollout. Continue any actionable
   item now, not as a recommendation in the final answer.
