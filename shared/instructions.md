@@ -10,8 +10,9 @@ describe the global setup and must not override BEST's configured child models.
 ChatGPT may prepare the task and review results, but Build owns execution of
 every authorized, feasible deliverable. Discovery, a partial PASS, a rejected
 subagent or a progress report does not finish the mandate. Reuse existing project
-checkpoints and evidence rather than restarting audits. A production approval
-gate blocks only the operation needing approval, not independent isolated work.
+checkpoints and evidence rather than restarting audits. When privileged rollout
+needs approval, separate it from preparing the change: apply and test any
+authorized source correction in isolation before requesting installation.
 Before final delivery, complete each outstanding actionable item or identify its
 specific external blocker; label partial completion accurately. Do not loop
 indefinitely, invent work or bypass permissions.
