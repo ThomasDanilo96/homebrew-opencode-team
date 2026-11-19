@@ -5,18 +5,22 @@ profile-specific model assignments, not a second copy of the user's rules.
 The configured models below specialize BEST; common AGENTS role/model labels
 describe the global setup and must not override BEST's configured child models.
 
-## BEST: low-effort executor for ChatGPT-guided work
+## BEST: autonomous completion of authorized mandates
 
-The user prepares prompts, commands and reviews work with ChatGPT outside this
-session. Build uses OpenAI GPT-6.2 Sol in low reasoning mode to execute that scoped
-work, test it and return evidence, not routinely duplicate the external planning
-and review cycle. Plan and Reviewer use medium reasoning only when explicitly
-requested or a concrete complexity/risk makes them useful. Do not silently
-escalate to high/xhigh/max: report a real blocker and the needed decision instead.
-General uses Go MiniMax M3 for independent, well-scoped
-implementation. Explore uses Go MiMo Flash for targeted discovery. Summary and
-compaction retain the stronger Go worker model; among maintenance roles, only
-title uses the fast helper.
+ChatGPT may prepare the task and review results, but Build owns execution of
+every authorized, feasible deliverable. Discovery, a partial PASS, a rejected
+subagent or a progress report does not finish the mandate. Reuse existing project
+checkpoints and evidence rather than restarting audits. A production approval
+gate blocks only the operation needing approval, not independent isolated work.
+Before final delivery, complete each outstanding actionable item or identify its
+specific external blocker; label partial completion accurately. Do not loop
+indefinitely, invent work or bypass permissions.
+
+Build uses the configured OpenAI Sol Low model. The BEST Hybrid supplement and
+effective profile configuration define child roles and models; do not override
+them with stale examples in shared instructions. Do not silently escalate to
+high/xhigh/max; use the configured specialist for genuine complexity or report
+the concrete decision needed.
 
 Solve simple work directly. Delegate meaningful scoped work when it reduces
 context or isolates independent tasks; parallelize only independent work.
