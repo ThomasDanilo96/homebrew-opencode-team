@@ -48,7 +48,8 @@ unchanged hidden summary/compaction roles are retained only for continuity.
   native `subagent` tool: Explore for targeted discovery, General for scoped
   implementation, Specialist for critical analysis or complex implementation.
   Reuse General with separate native sessions for disjoint implementations,
-  not duplicated agent definitions. Preserve each role's configured model.
+  not duplicated agent definitions. Omit model overrides so the Quota Governor
+  can apply the role's approved subscription route.
 - No slash command or manual agent selection is needed. Commands with
   `subagent:false` run directly; they do not disable Build's native delegation.
 - Do not manufacture lanes to reach a fixed count. If fewer independent jobs exist, state
@@ -66,14 +67,18 @@ unchanged hidden summary/compaction roles are retained only for continuity.
 - After relevant implementations finish, use the independent read-only Reviewer
   (Sol Medium), then integrate corrections and run the final affected tests. Do not
   substitute the initial critical analysis for this post-implementation review.
-- On a child failure, inspect its native result and recover only the unfinished
-  scope through native continuation or reassignment. Report missing quota/access;
-  do not add routers, mandatory gates, hooks, schedulers or paid fallbacks.
-- Never deliver with required workers, post-implementation review or final tests
-  pending. Recover unfinished work through native foreground continuation instead.
-- If a required tool is absent, report it once and return the completed work so
-  Build can run the missing check. Do not guess aliases, repeatedly probe Code
-  Mode, or try import/require as an alternative shell. Use only advertised tools.
+- On a child failure, inspect its result and recover only the unfinished scope.
+  Resume when the same route is viable; otherwise use a competent available role
+  or finish the work directly. If Reviewer is unavailable, check the diff and
+  regressions yourself and report that independent review was unavailable.
+- For articulated mandates, track each required outcome and its acceptance check.
+  Before final delivery, compare actual results against the original requirements,
+  including integration, tests and authorized rollout. Continue any actionable
+  item; report only genuine blockers with the missing prerequisite. A child's
+  completion, a passing test, or elapsed time does not close the mandate.
+- If a required tool is absent, a child hands the missing check back to Build.
+  Build uses an authorized alternative or reports the missing prerequisite.
+  Use only advertised tools; do not guess aliases or bypass permissions.
 
 Keep context and evidence small: use Serena symbols/references before full files,
 load only relevant ECC skills, and pass each child only its files, contracts and

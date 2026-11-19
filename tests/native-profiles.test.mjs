@@ -403,7 +403,7 @@ test('generated BEST permissions allow authorized work while FREE and read-only 
       assert.ok(!rules.some((r) => r.action === action && r.effect === 'allow'), `${id}: ${action}`);
     }
     for (const action of ['execute', 'serena_activate_project', 'serena_list_memories', 'serena_read_memory']) {
-      assert.equal(rules.some((r) => r.action === action && r.effect === 'allow'), id !== 'explore' || action !== 'execute', `${id}: ${action}`);
+      assert.equal(rules.some((r) => r.action === action && r.effect === 'allow'), id === 'plan' || action !== 'execute', `${id}: ${action}`);
     }
     assert.ok(f.config('free').agents[id].permissions.some((r) => r.action === 'external_directory' && r.effect === 'ask'));
   }
@@ -430,7 +430,7 @@ test('BEST asks for destructive shell operations and unknown directories without
     evaluate(agent, 'read', `${home}/Library/LaunchAgents/fixture.plist`, 'allow');
     evaluate(agent, 'edit', `${home}/Library/LaunchAgents/fixture.plist`, 'deny');
     evaluate(agent, 'edit', `${home}/.local/bin/fixture`, readonly ? 'deny' : 'allow');
-    for (const action of ['execute', 'serena_activate_project', 'serena_list_memories', 'serena_read_memory']) evaluate(agent, action, '*', agent === 'explore' && action === 'execute' ? 'deny' : 'allow');
+    for (const action of ['execute', 'serena_activate_project', 'serena_list_memories', 'serena_read_memory']) evaluate(agent, action, '*', ['explore', 'reviewer'].includes(agent) && action === 'execute' ? 'deny' : 'allow');
     if (readonly) {
       for (const action of ['edit', 'subagent', 'serena_replace_symbol_body', 'serena_write_memory', 'serena_delete_memory']) evaluate(agent, action, 'fixture', 'deny');
     }
@@ -530,7 +530,7 @@ test('native V2 resolves generated policies without executing shell resources', 
     for (const agent of ['plan', 'explore', 'reviewer']) {
       for (const action of ['shell', 'edit', 'subagent', 'serena_replace_symbol_body', 'serena_write_memory', 'serena_delete_memory']) evaluate(agent, action, 'fixture', 'deny');
       for (const command of [ordinaryGit[0], approvalCommands[0]]) evaluate(agent, 'shell', command, 'deny');
-      for (const action of ['execute', 'serena_activate_project', 'serena_list_memories', 'serena_read_memory']) evaluate(agent, action, '*', profile === 'best' && !(agent === 'explore' && action === 'execute') ? 'allow' : 'deny');
+      for (const action of ['execute', 'serena_activate_project', 'serena_list_memories', 'serena_read_memory']) evaluate(agent, action, '*', profile === 'best' && (agent === 'plan' || action !== 'execute') ? 'allow' : 'deny');
       evaluate(agent, 'serena_find_symbol', '*', 'allow');
       evaluate(agent, 'external_directory', '/development/fixture/*', 'ask');
       for (const directory of trustedExternal) evaluate(agent, 'external_directory', directory.replace(/^~/, f.home), profile === 'best' ? 'allow' : 'ask');

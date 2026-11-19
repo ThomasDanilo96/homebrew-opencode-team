@@ -230,8 +230,8 @@ replacement. FREE does not automatically gain this shared file.
 
 Build/General implement. Plan/Explore/Reviewer have deny-by-default read-only tool
 allowlists: no shell, edits, delegation or MCP mutators. Serena read tools are
-allowed individually. BEST also allows Code Mode; nested tools still enforce
-their own permissions. FREE keeps Code Mode disabled for read-only roles.
+allowed individually. Of these read-only roles, only BEST Plan can use Code Mode;
+Explore and Reviewer cannot. FREE disables Code Mode for all three roles.
 These permissions are **not an OS sandbox**. Build uses Serena's
 `initial_instructions`, relevant skills and TDD.
 

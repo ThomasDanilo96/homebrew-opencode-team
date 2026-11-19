@@ -358,7 +358,7 @@ function readonlyPermissions(profile, agent) {
     'serena_find_declaration', 'serena_find_implementations', 'serena_find_referencing_symbols',
     'serena_get_diagnostics_for_file', 'serena_search_for_pattern', 'serena_list_dir', 'serena_find_file'].map((a) => rule(a, 'allow')),
   ...(profile === 'best' ? [
-    rule('execute', agent === 'explore' ? 'deny' : 'allow'),
+    rule('execute', agent === 'plan' ? 'allow' : 'deny'),
     ...['serena_activate_project', 'serena_list_memories', 'serena_read_memory'].map((a) => rule(a, 'allow')),
     ...bestExternalPermissions,
   ] : [rule('external_directory', 'ask')]),
