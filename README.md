@@ -248,6 +248,12 @@ unchanged. Setup regenerates these native V2 rules, including agent exceptions.
 
 ## CLI and storage
 
+On OpenCode 2.3.2, start BEST with `opencode-team best` and use
+`/goal <objective>` for a multi-step mandate. Give the current checkpoint,
+remaining acceptance checks and the scope already authorized. The native
+reviewer can continue unfinished work; it cannot grant approvals. Use
+`/goal pause` to stop the goal. For simple tasks, send a normal prompt.
+
 ```sh
 opencode-team start best run "Explain this project"
 opencode-team best -s SESSION_ID

@@ -337,7 +337,11 @@ test('native V2 quota gates existing sessions and native children before local t
   if (asyncChildren) {
     const { data: goal } = await api('POST', '/api/session', { title: 'BEST goal probe', location: { directory: dir } });
     const evidence = path.join(dir, 'goal-evidence');
-    let turns = 0, reviews = 0, toolRequested = false;
+    const rollout = path.join(dir, 'goal-rollout');
+    fs.writeFileSync(rollout, 'awaiting approval');
+    const actions = ['printf prepared > goal-input',
+      'test "$(cat goal-input)" = prepared && printf verified > goal-evidence'];
+    let turns = 0, reviews = 0, checked = 0;
     respond = body => {
       const text = JSON.stringify(body.messages.at(-1));
       if (/verdict/.test(text)) {
@@ -346,23 +350,22 @@ test('native V2 quota gates existing sessions and native children before local t
           ? { verdict: 'continue', reason: 'Authorized check remains', next_step: 'Finish the authorized check only' }
           : { verdict: 'blocked', reason: 'Only the privileged operation remains' }) };
       }
-      if (turns === 1 && !toolRequested) {
-        toolRequested = true;
-        return { tool_calls: [{ index: 0, id: 'goal-check', type: 'function', function: {
-          name: 'shell', arguments: JSON.stringify({ command: 'printf verified > goal-evidence',
+      if (turns === 1 && checked < actions.length) {
+        const command = actions[checked++];
+        return { tool_calls: [{ index: 0, id: `goal-check-${checked}`, type: 'function', function: {
+          name: 'shell', arguments: JSON.stringify({ command,
             description: 'Record authorized isolated check', workdir: dir }),
         } }] };
       }
       turns++;
       return { content: turns === 1 ? 'Stopped before checking' : 'Authorized check finished; privileged operation not attempted' };
     };
-    assert.equal(await prompt(goal.id, 'Verify the local fixture; a privileged rollout is not authorized.', 'goal'), 'succeeded');
+    assert.equal(await prompt(goal.id, 'Prepare and verify the local fixture; replacing goal-rollout requires approval and is not authorized.', 'goal'), 'succeeded');
     assert.equal(turns, 2);
     assert.equal(reviews, 2);
     assert.equal(fs.readFileSync(evidence, 'utf8'), 'verified');
-    assert.equal(await prompt(goal.id, 'resume', 'goal'), 'succeeded');
-    assert.equal(reviews, 3, 'explicit resume reviews once before pausing again');
-    t.diagnostic('PASS: native /goal reviewer admitted; premature stop continued to a real local tool action');
+    assert.equal(fs.readFileSync(rollout, 'utf8'), 'awaiting approval');
+    t.diagnostic('PASS: native /goal recovered a premature stop, prepared and verified the fixture, and left rollout untouched');
     respond = () => ({ content: 'HEALTHY_DONE' });
   }
   const beforeHealthy = requests;
