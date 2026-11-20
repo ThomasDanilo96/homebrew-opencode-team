@@ -138,6 +138,7 @@ test('MiMo alone remains UNKNOWN and automatically excluded, not an independent 
     usage: [
       ['opencode-go', 'qwen3.7-plus'], ['opencode-go', 'glm-5.3-flash'],
       ['openai', 'gpt-6.1-sol', 'low'], ['openai', 'gpt-6.1-sol', 'medium'],
+      ['openai', 'gpt-6.2-sol', 'high'],
     ].map(([provider, model, variant]) => ({ provider, model: `${provider}/${model}`, connection,
       ...(variant ? { variant } : {}), at: new Date(now - 30000).toISOString(), requests: 1 })),
   }));

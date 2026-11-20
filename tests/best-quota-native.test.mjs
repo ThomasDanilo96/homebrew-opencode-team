@@ -570,6 +570,45 @@ test('native V2 quota gates existing sessions and native children before local t
         effort.model,
         'automatic effort must not overwrite the session selection');
     }
+    const heldAt = Date.now();
+    await updateQuotaState(file, state => {
+      state.snapshots = state.snapshots.filter(s => s.provider !== 'openai').concat(
+        [64, 65].map((used, index) => ({ provider: 'openai', connection: 'a'.repeat(64), source: 'LIVE',
+          at: new Date(heldAt - (1 - index) * 600000).toISOString(), windows: {
+            weekly: { used, resetAt: new Date(heldAt + 604800000).toISOString(), limitWindowSeconds: 604800 },
+          } })));
+      state.usage.push({ at: new Date(heldAt - 1000).toISOString(), provider: 'openai',
+        model: 'openai/gpt-6.2-sol', variant: 'medium', connection: 'a'.repeat(64),
+        requests: 0, durationMs: 1000, output: 1 });
+      state.leases = ['busy-one', 'busy-two'].map(id => ({ id, provider: 'openai', scope: 'admission',
+        sessionID: id, ownerPid: process.pid, percent: 15, at: new Date(heldAt).toISOString(),
+        expiresAt: new Date(heldAt + 900000).toISOString() }));
+      return state;
+    });
+    const { data: bounded } = await api('POST', '/api/session', {
+      title: 'Concurrent envelope fixture', location: { directory: dir },
+    });
+    assert.equal(await prompt(bounded.id, 'Inspect a critical boundary under concurrent load.',
+      undefined, { agents: [{ name: 'specialist' }] }), 'succeeded');
+    const boundedLog = await api('GET', `/api/session/${bounded.id}/context`);
+    assert.equal(boundedLog.data.findLast(message => message.type === 'assistant').model.variant, 'medium',
+      'native construction must use Medium when valid High reservations leave only five points');
+    const releaseDeadline = Date.now() + 5000;
+    while (readQuotaState(file).leases.some(lease => lease.sessionID === bounded.id)) {
+      assert.ok(Date.now() < releaseDeadline, 'native completion must release the request receipt');
+      await new Promise(resolve => setTimeout(resolve, 25));
+    }
+    assert.deepEqual(readQuotaState(file).leases.map(lease => lease.id).sort(), ['busy-one', 'busy-two']);
+    await api('POST', `/api/session/${bounded.id}/model`, {
+      model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'high' },
+    });
+    await assertBlocked(bounded.id, 'Explicit High must not silently downgrade.');
+    await updateQuotaState(file, state => {
+      state.snapshots.filter(s => s.provider === 'openai').forEach(s => { s.windows.weekly.used = 100; });
+      return state;
+    });
+    await assertBlocked(bounded.id, 'Exhausted quota must stay blocked.');
+    t.diagnostic('PASS: native High falls back to Medium under concurrency; exact release preserves other sessions; explicit High and exhaustion block');
     configuration.agents.build.model = configuredBuild;
     fs.writeFileSync(config, JSON.stringify(configuration));
     t.diagnostic('PASS: native automatic Low/Medium/High reach loopback with matching assistant models; session selections untouched');

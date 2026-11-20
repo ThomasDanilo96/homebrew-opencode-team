@@ -1317,3 +1317,77 @@ per questi moduli JavaScript. Review indipendente approvata dopo le correzioni.
 Il lettore quota di `f59587c` ha letto lo stato condiviso vivo con eventi High:
 rollback compatibile verificato. Hash delle configurazioni BEST/FREE e della
 guida personale FREE invariati; nessuna credenziale esportata o modificata.
+
+## 20 novembre 2026 — envelope coerente fra risoluzione e admission
+
+Questa correzione sostituisce la descrizione precedente della riserva solo su
+`model.request`: per Build 6.2 sul runtime 2.3.2 la scelta dell'effort e la riserva
+avvengono atomicamente in `experimental.model.resolve`, prima di costruire la
+richiesta. Nessun retry aggiunto, nessuna variazione di soglie o calibrazione.
+
+**Evidenze locali, senza inferenza:** lettura SQLite `mode=ro`/`query_only` e
+stato quota, senza modificare sessioni, lease o policy. Due fallimenti reali:
+
+| Sessione | Fallimento UTC | Ultima variante assistant registrata |
+|---|---|---|
+| `ses_e07746ed1ffeA1u9UB77LdeJKh` | 20 novembre, 14:10:09.426 | High |
+| `ses_e06c27ee9ffe0BjRmWeFaMzxck` | 20 novembre, 14:10:42.196 | High |
+
+Entrambi terminano con `calibrated-request-envelope`. Le decisioni adiacenti
+registrano `quota-headroom`, applicato a `openai/gpt-6.2-sol#high`.
+Ricostruendo forecast e calibrazione con soli campioni precedenti al fallimento:
+OpenAI weekly LIVE/FRESH, 65% usato, 35% residuo, reset
+`2026-11-22T17:24:12Z`; margine invariato 15 punti, envelope High 15,
+Medium 0,3291476445, Low 1,0984285452 punti. La sola finestra OpenAI disponibile
+nei campioni è weekly: non si inventano quote per finestre non restituite.
+Il margine è una preferenza di routing; il bootstrap High lo usa come minimo
+dell'envelope, non come ulteriore addebito.
+
+I lease storici non sono conservati: non è dimostrabile il totale concorrente
+esatto di ciascun fallimento. Una lettura successiva durante l'analisi ha
+osservato due prenotazioni High valide da 15 punti, PID proprietari vivi, nelle
+stesse due sessioni (14:25:36.766 e 14:26:05.043, scadenze 15 minuti dopo).
+Con 35 punti residui e 30 impegnati, High non passa mentre Medium può passare.
+Non vi è prova di lease obsoleti da eliminare; nessuno è stato rimosso.
+
+**Causa riprodotta:** il router escludeva tutti i lease della stessa sessione e
+sceglieva High senza riservarne il budget. Admission contava quei lease e poteva
+vedere ulteriori prenotazioni concorrenti; inoltre ricalcolava la stima dopo la
+preparazione, anche nei controlli HTTP/WebSocket. Due regressioni RED osservate:
+High anziché Medium con 30 punti prenotati, e tre High concorrenti su soli
+35 punti. Checkpoint RED: `6150972`.
+
+**Correzione minima nel runtime esistente:** risoluzione e prenotazione sotto lo
+stesso lock; admission e trasporto riusano solo il receipt vivo di quella
+richiesta e il suo envelope congelato, ricontrollando quota, account e sicurezza.
+High automatico può scendere a Medium e poi Low se presenti nell'inventario e
+ammissibili; nessuna sostituzione di selezioni esplicite, provider o modello.
+La ripresa di un subagente già in corso mantiene il trattamento preesistente.
+Eventi di completamento rilasciano le riserve terminate senza cancellare quelle
+di altre sessioni o di richieste successive. Schema persistente invariato:
+nessuna migrazione richiesta alle istanze già caricate.
+
+**Verifiche:** regressioni concorrenza, self-counting, variazione delle stime,
+rilascio, eventi ritardati, inventario nativo, quota esaurita e passaggio
+active→monitor/disabled durante la risoluzione. Suite guardata quota, CLI,
+essential e routing (`bash tests/guardrail/runner.sh quota --experimental-test-coverage tests/best-quota-cli.test.mjs tests/best-quota-essential.test.mjs tests/best-routing.test.mjs`):
+142/142 PASS, più 13 controlli OS; copertura linee runtime
+95,60%. Due fixture corrette senza indebolire asserzioni: inventario che
+dichiarava solo High ma aspettava Medium; scenario CLI “solo MiMo sconosciuto”
+privo del campione High introdotto in precedenza.
+Test server nativo 2.3.2 con sole risposte loopback: PASS, incluso downgrade
+automatico High→Medium sotto concorrenza, rilascio e blocchi espliciti/esaurimento.
+Sintassi Node e diff-check PASS; nessun build/typecheck/linter configurato per
+questi moduli. La copertura complessiva del run allargato, che include il grande
+dispatcher dei profili, è 77,06%: non è una dichiarazione di copertura globale ≥80%.
+`bash tests/guardrail/runner.sh best-native` PASS; review indipendente finale
+approvata dopo la regressione sul cambio di policy.
+
+**Attivazione:** il BEST locale già riferisce
+`shared/best-quota-plugin` nel checkout canonico, il cui entrypoint importa il
+runtime aggiornato. Nuove istanze BEST caricheranno questa correzione senza
+setup, modifiche di configurazione, launcher o reload. Istanze già caricate
+restano sul codice precedente fino al normale rinnovo: nessun riavvio o reload
+forzato. Nessuna inferenza reale eseguita per qualificare il nuovo codice; il
+test loopback non certifica OAuth live. FREE, credenziali, autorizzazioni,
+isolamento e conferme Extra Usage non modificati; nessuna pubblicazione.

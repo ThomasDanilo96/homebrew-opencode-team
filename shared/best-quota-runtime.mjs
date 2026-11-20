@@ -21,6 +21,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
   const pinned = new Map();
   const leases = new Map();
   const effortTurns = new Map();
+  const requestReservations = new Map();
   const asyncDelegation = ctx.app.version === '2.3.2';
   const active = state => state.policy?.mode === 'active';
   // A receipt belongs to one setup/cleanup lifecycle, not just a reusable PID.
@@ -115,11 +116,11 @@ export async function setupGovernor(ctx, dependencies = {}) {
     hookVerified: state.runtime?.version === ctx.app.version && state.runtime?.hookVerified === true,
   } })))();
   await guarded(() => refresh())();
-  async function choose(agent, models, leaseID, sessionID) {
+  async function choose(agent, models, leaseID, sessionID, reserveRequest = false) {
     await refresh();
     const { data: inventory } = await ctx.model.list();
     const goCertified = (await goPaymentSafety(readQuotaState(file))).certified === true;
-    let decision;
+    let decision, reservation;
     const state = await updateQuotaState(file, current => {
       const prediction = forecast(current, Date.now(), current.policy);
       const calibration = calibrateQuota(current);
@@ -134,10 +135,11 @@ export async function setupGovernor(ctx, dependencies = {}) {
       // other instances) so parallel terminals cannot spend one budget twice.
       const reserved = Object.fromEntries(['opencode-go', 'openai'].map(provider =>
         [provider, reservedPercent(current.leases.filter(lease =>
-          !sessionID || lease.sessionID !== sessionID), provider)]));
+          reserveRequest || !sessionID || lease.sessionID !== sessionID), provider)]));
       const candidates = models.filter(value => inventory.some(m => m.providerID === value.provider
         && m.id === value.model.split('/').slice(1).join('/').split('#')[0] && m.enabled !== false
-        && (value.model !== 'openai/gpt-6.2-sol#high' || m.variants?.some(variant => variant.id === 'high'))))
+        && (!(reserveRequest || value.model === 'openai/gpt-6.2-sol#high')
+          || m.variants?.some(variant => variant.id === value.model.split('#')[1]))))
         .filter(value => !leaseID || !active(current) || (current.leases ?? []).filter(l => l.provider === value.provider
             && l.scope !== 'admission' && (!sessionID || l.sessionID !== sessionID)).length
           < (value.provider === 'opencode-go' ? 2 : 1) * instanceCapacity)
@@ -160,6 +162,16 @@ export async function setupGovernor(ctx, dependencies = {}) {
       }
       if (!decision || decision.blocked) decision = decideQuota(routing);
       current.decisions.push({ ...decision, scope: 'routing', enforced: active(current) });
+      if (reserveRequest && active(current) && !decision.blocked) {
+        const cost = observedRequestCost(decision.candidate, current, prediction, calibration);
+        const percent = Math.max(decision.estimatedTaskPercent ?? 0, ...Object.values(cost));
+        const id = randomUUID();
+        current.leases.push({ id, provider: decision.candidate.provider, ownerPid: process.pid,
+          scope: 'admission', percent, sessionID, at: new Date().toISOString(),
+          expiresAt: new Date(Date.now() + requestLeaseMs).toISOString() });
+        reservation = { id, model: decision.candidate.model, cost,
+          connection: prediction.providers[decision.candidate.provider].connection, recorded: false };
+      }
       if (leaseID && active(current) && !decision.blocked) {
         current.leases ??= [];
         // A join is still one worker. Replace its capacity receipt atomically;
@@ -172,7 +184,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
       }
       return current;
     });
-    return { state, decision };
+    return { state, decision, reservation };
   }
   await ctx.tool.hook('execute.before', guarded(async event => {
     if (event.tool !== 'subagent') return;
@@ -202,7 +214,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
         if (active(readQuotaState(file))) blocked('resume-model-override');
         return;
       }
-      await checkRequest({ sessionID: event.input.sessionID, agent, kind: 'primary', model: child.model }, false);
+      await checkRequest({ sessionID: event.input.sessionID, agent, kind: 'primary', model: child.model }, false, false, undefined, true);
       const leaseID = randomUUID();
       const { state, decision } = await choose(agent, [candidate(agent, model)], leaseID, event.input.sessionID);
       if (active(state)) {
@@ -286,7 +298,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
       return current;
     });
   }
-  const checkRequest = async (event, record = true, transport = false, observation) => {
+  const checkRequest = async (event, record = true, transport = false, observation, joining = false) => {
     await refresh();
     const model = `${event.model.providerID}/${event.model.id}`;
     const state = readQuotaState(file);
@@ -316,7 +328,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
     const selected = candidate(event.agent || 'build', `${model}${event.model.variant ? `#${event.model.variant}` : ''}`);
     // One atomic read-decide-reserve cycle: parallel BEST instances see each
     // other's in-flight percent before their own quota snapshot is written.
-    let decision, leaseID;
+    let decision, leaseID, reservation;
     const observedState = await updateQuotaState(file, current => {
       // Same liveness rule as routing: an admission reservation whose owning
       // process is gone or whose deadline passed is already released, so a
@@ -326,30 +338,37 @@ export async function setupGovernor(ctx, dependencies = {}) {
       const provider = prediction.providers[event.model.providerID];
       if (provider.connection !== binding) blocked('account-changed');
       if (provider.confirmedExhausted || ['EXHAUSTED', 'UNKNOWN'].includes(provider.state)) blocked('quota-unavailable');
-      // A record=false observation must not count its own session's existing
-      // lease, or a retry could block the very request it is re-checking.
+      const pending = requestReservations.get(`${event.sessionID}:${event.kind}`);
+      // Reuse only this exact request's live receipt, never every reservation
+      // sharing its session. Recheck quota and account, not a changed estimate
+      // after the request (including its effort) has already been prepared.
+      const own = pending && (!record || !pending.recorded) && pending.model === selected.model
+        && pending.connection === binding && current.leases.find(lease => lease.id === pending.id);
       const held = reservedPercent((current.leases ?? []).filter(lease =>
-        record || !lease.sessionID || lease.sessionID !== event.sessionID), event.model.providerID);
-      const cost = observedRequestCost(selected, current, prediction, calibrateQuota(current));
+        lease.id !== own?.id && !(joining && lease.sessionID === event.sessionID)), event.model.providerID);
+      const cost = own ? pending.cost : observedRequestCost(selected, current, prediction, calibrateQuota(current));
       if (!fitsObservedRequest(cost, provider, held)) blocked('calibrated-request-envelope');
       decision = decideQuota({ kind: kinds[event.agent] ?? 'coding',
         candidates: [selected], forecast: prediction,
         options: { ...current.policy, reserved: { [event.model.providerID]: held } } });
       if (record) {
         current.decisions.push({ ...decision, scope: 'admission', enforced: true });
-        if (!decision.blocked) {
+        if (!decision.blocked && !own) {
           leaseID = randomUUID();
           current.leases ??= [];
           current.leases.push({ id: leaseID, provider: decision.candidate.provider, ownerPid: process.pid,
             scope: 'admission', percent: Math.max(decision.estimatedTaskPercent ?? 0, ...Object.values(cost)), sessionID: event.sessionID,
             at: new Date().toISOString(),
             expiresAt: new Date(Date.now() + requestLeaseMs).toISOString() });
+          reservation = { id: leaseID, model: selected.model, cost, connection: binding, recorded: true };
         }
+        if (!decision.blocked && own) reservation = { ...pending, recorded: true };
       }
       return current;
     });
     if (decision.blocked) blocked(decision.reason);
     if (!record) return;
+    requestReservations.set(`${event.sessionID}:${event.kind}`, reservation);
     await recordRequest(event, observedState, binding);
   };
   const observedRequest = (name, record, transport) => guarded(async event => {
@@ -425,10 +444,13 @@ export async function setupGovernor(ctx, dependencies = {}) {
     const base = 'openai/gpt-6.2-sol';
     const models = [candidate('build', `${base}#${variant}`)];
     if (!explicit && variant === 'high') models.push(candidate('build', `${base}#medium`));
-    // This is an existing parent request, not a new worker. model.request owns
-    // its atomic budget reservation; do not compete with its children for slots.
-    const { decision } = await choose('build', models, undefined, event.sessionID);
+    if (!explicit && variant !== 'low') models.push(candidate('build', `${base}#low`));
+    // Choose and reserve before native request construction, under the same
+    // lock as admission. Another session cannot spend the chosen envelope.
+    const { state: chosenState, decision, reservation } = await choose('build', models, undefined, event.sessionID, true);
+    if (!active(chosenState)) return;
     if (decision.blocked) blocked(decision.reason);
+    requestReservations.set(`${event.sessionID}:${event.kind}`, reservation);
     variant = decision.candidate.model.split('#')[1];
     event.model = { ...event.model, variant };
     effortTurns.set(event.sessionID, { busy, explicit, variant });
@@ -544,12 +566,17 @@ export async function setupGovernor(ctx, dependencies = {}) {
       }
       // An admission reservation covers one request; when the session's step or
       // execution ends the request is over, so its percent returns to the pool.
-      await updateQuotaState(file, state => {
+      const reconciled = await updateQuotaState(file, state => {
         state.leases = (state.leases ?? []).filter(lease =>
           !(lease.scope === 'admission' && lease.sessionID === event.data.sessionID
             && Date.parse(lease.at) < event.created) && !ended.has(lease.id));
         return state;
       });
+      const liveIDs = new Set(reconciled.leases.map(lease => lease.id));
+      for (const [key, receipt] of requestReservations) {
+        if (key.startsWith(`${event.data.sessionID}:`)
+            && !liveIDs.has(receipt.id)) requestReservations.delete(key);
+      }
       if (event.type === 'session.step.ended') {
         const request = pinned.get(`${event.data.sessionID}:primary`), tokens = event.data.tokens;
         if (request) await guarded(() => attest({ lifecycle: { type: event.type, at: new Date(event.created).toISOString() } }))();

@@ -823,7 +823,10 @@ test('native Build effort resolution applies Low, default Medium and qualified H
     model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } };
   await f.hooks['experimental.model.resolve'](continuedEvent);
   assert.equal(continuedEvent.model.variant, 'high', 'a running child does not block parent continuation');
-  assert.deepEqual(readQuotaState(f.file).leases.map(lease => lease.id), ['running-child']);
+  const live = readQuotaState(f.file).leases;
+  assert.deepEqual(live.filter(lease => lease.scope === 'routing').map(lease => lease.id), ['running-child']);
+  assert.equal(live.filter(lease => lease.scope === 'admission' && lease.sessionID === 'effort').length, 1,
+    'parent request holds its own budget receipt without consuming another worker slot');
   const count = routingDecisions(f.file).length;
   session.parentID = 'parent';
   assert.equal(await resolve(), 'medium', 'delegated children keep their dispatch model');
@@ -834,7 +837,8 @@ test('automatic High falls back on insufficient envelope, but EXHAUSTED and UNKN
   const f = await fixture(t, 'active', undefined, undefined, undefined, '2.3.2');
   await seedSolCalibration(f.file);
   f.ctx.agent.get = async () => ({ data: { model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } } });
-  f.ctx.model.list = async () => ({ data: [{ providerID: 'openai', id: 'gpt-6.2-sol', variants: [{ id: 'high' }] }] });
+  f.ctx.model.list = async () => ({ data: [{ providerID: 'openai', id: 'gpt-6.2-sol',
+    variants: ['low', 'medium', 'high'].map(id => ({ id })) }] });
   let busy = 1;
   f.ctx.session.get = async () => ({ agent: 'build', time: { busy: busy++ } });
   f.ctx.session.context = async () => [{ type: 'synthetic', metadata: { source: 'goal' } }];
@@ -918,6 +922,10 @@ test('automatic effort counts valid same-session leases and freezes its admitted
   f.ctx.session.get = async () => ({ agent: 'build', model: explicit.model, time: { busy: 2 } });
   await assert.rejects(f.hooks['experimental.model.resolve'](explicit), /BEST_QUOTA_BLOCKED/);
   assert.equal(explicit.model.variant, 'high', 'an explicit High cannot silently downgrade');
+  f.ctx.session.get = async () => ({ agent: 'build', time: { busy: 3 } });
+  f.ctx.model.list = async () => ({ data: [{ providerID: 'openai', id: 'gpt-6.2-sol', variants: [{ id: 'high' }] }] });
+  await assert.rejects(f.hooks['experimental.model.resolve']({ ...request, sessionID: 'unsupported-lower' }),
+    /BEST_QUOTA_BLOCKED/, 'fallback must not invent unavailable native variants');
 });
 
 test('concurrent native resolutions reserve once, fall back before preparation and release only completed requests', async t => {
@@ -953,6 +961,46 @@ test('concurrent native resolutions reserve once, fall back before preparation a
   });
   await assert.rejects(f.hooks['model.request'](next), /BEST_QUOTA_BLOCKED/);
   await assert.rejects(f.hooks['experimental.model.resolve']({ ...next, sessionID: 'exhausted' }), /BEST_QUOTA_BLOCKED/);
+});
+
+test('policy changes during model resolution leave effort untouched and lifecycle cleanup running', async t => {
+  const bus = new EventEmitter();
+  const f = await concurrentEffortFixture(t, {
+    subscribe: async function* ({ signal }) {
+      for await (const [event] of on(bus, 'event', { signal })) yield event;
+    },
+  });
+  const inventory = f.ctx.model.list;
+  for (const mode of ['monitor', 'disabled']) {
+    let entered, resume;
+    const waiting = new Promise(resolve => { entered = resolve; });
+    f.ctx.model.list = async () => {
+      entered();
+      await new Promise(resolve => { resume = resolve; });
+      return inventory();
+    };
+    await updateQuotaState(f.file, s => ({ ...s, policy: { ...s.policy, mode: 'active' } }));
+    const request = { sessionID: `mode-${mode}`, agent: 'build', kind: 'primary',
+      model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } };
+    const resolution = f.hooks['experimental.model.resolve'](request);
+    await waiting;
+    await updateQuotaState(f.file, s => ({ ...s, policy: { ...s.policy, mode } }));
+    resume();
+    await resolution;
+    assert.equal(request.model.variant, 'medium');
+    assert.equal(readQuotaState(f.file).leases.length, 0);
+    bus.emit('event', { type: 'session.step.ended', created: Date.now(), data: { sessionID: request.sessionID } });
+    await new Promise(setImmediate);
+  }
+  f.ctx.model.list = inventory;
+  await updateQuotaState(f.file, s => ({ ...s, policy: { ...s.policy, mode: 'active' } }));
+  const request = { sessionID: 'after-policy-change', agent: 'build', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } };
+  await f.hooks['experimental.model.resolve'](request);
+  assert.equal(readQuotaState(f.file).leases.length, 1);
+  bus.emit('event', { type: 'session.step.ended', created: Date.now() + 1, data: { sessionID: request.sessionID } });
+  await new Promise(setImmediate);
+  assert.equal(readQuotaState(f.file).leases.length, 0, 'policy race must not terminate the lifecycle subscriber');
 });
 
 test('active prompt stops a Build turn with no admissible provider instead of dispatching unregulated', async t => {
