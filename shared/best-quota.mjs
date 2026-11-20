@@ -16,6 +16,7 @@ const ACTIVITY_PROVIDERS = {
   'visual-glm': 'opencode-go',
   'coordination-sol-low': 'openai',
   'analysis-review-sol-medium': 'openai',
+  'reasoning-sol-high': 'openai',
 };
 const MAX_ENTRIES = 4096;
 const MAX_BYTES = 16 * 1024 * 1024;
@@ -254,6 +255,7 @@ export function classifyActivity(usage) {
     // identity and weekly quota; they do not identify the reasoning variant.
     if (usage.variant === 'low') result = 'coordination-sol-low';
     else if (usage.variant === 'medium') result = 'analysis-review-sol-medium';
+    else if (usage.variant === 'high' && usage.model === 'openai/gpt-6.2-sol') result = 'reasoning-sol-high';
   }
   return usage.activityClass === undefined || usage.activityClass === result ? result : 'unclassified';
 }

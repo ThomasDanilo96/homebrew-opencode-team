@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { EventEmitter, on } from 'node:events';
 import { setupGovernor } from '../shared/best-quota-runtime.mjs';
-import { updateQuotaState, readQuotaState } from '../shared/best-quota.mjs';
+import { updateQuotaState, readQuotaState, classifyActivity } from '../shared/best-quota.mjs';
 
 test('new 2.3.2 instance admits its first request with active persisted state without inventing certification', async t => {
   const f = await fixture(t);
@@ -753,7 +753,8 @@ test('High bootstrap reserves a conservative observed envelope and fails closed 
   await seedSolCalibration(f.file);
   await f.hooks['model.request'](request);
   const state = readQuotaState(f.file);
-  assert.equal(state.usage.at(-1).activityClass, 'reasoning-sol-high');
+  assert.equal(classifyActivity(state.usage.at(-1)), 'reasoning-sol-high');
+  assert.equal(state.usage.at(-1).activityClass, undefined, 'old running governors must still read the shared state');
   assert.ok(state.leases.find(l => l.sessionID === request.sessionID).percent >= 15);
   await updateQuotaState(f.file, s => ({ ...s, leases: [...s.leases, {
     id: 'other-high', scope: 'admission', provider: 'openai', percent: 66,

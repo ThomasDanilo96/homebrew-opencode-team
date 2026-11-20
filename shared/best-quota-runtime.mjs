@@ -67,6 +67,19 @@ export async function setupGovernor(ctx, dependencies = {}) {
   function observedRequestCost(value, state, prediction, calibration) {
     const [model, variant] = value.model.split('#');
     const name = classifyActivity({ provider: value.provider, model, variant });
+    if (name === 'reasoning-sol-high') {
+      // High has no measured multiplier. Reserve at least the existing safety
+      // margin (and two snapshot endpoints), or the largest observed Sol
+      // envelope over the full admission horizon, whichever is greater.
+      const estimates = ['coordination-sol-low', 'analysis-review-sol-medium', name]
+        .map(activity => estimateQuotaCost(calibration, activity, requestLeaseMs))
+        .filter(estimate => estimate.state === 'ESTIMATE');
+      if (!estimates.length) return null;
+      return Object.fromEntries(Object.keys(prediction.providers.openai.windows).map(window =>
+        [window, estimates.some(estimate => Number.isFinite(estimate.windows[window]))
+          ? Math.max(2, prediction.options.safetyMarginPercent, ...estimates.map(estimate => estimate.windows[window] ?? 0))
+          : Infinity]));
+    }
     if (name === 'unclassified') return {};
     const durations = state.usage.filter(u => u.durationMs > 0 && u.provider === value.provider && classifyActivity(u) === name
       && u.connection === prediction.providers[value.provider].connection
@@ -76,7 +89,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
     // not the entire duration of a historical turn or interrupted execution.
     return estimateQuotaCost(calibration, name, Math.min(Math.max(...durations), requestLeaseMs)).windows;
   }
-  const fitsObservedRequest = (cost, provider, held) => Object.entries(cost).every(([window, percent]) =>
+  const fitsObservedRequest = (cost, provider, held) => cost !== null && Object.entries(cost).every(([window, percent]) =>
     percent <= provider.windows[window]?.remaining - held);
   let refreshPromise, lastRefresh = 0;
   async function refresh(force = false) {
@@ -261,7 +274,10 @@ export async function setupGovernor(ctx, dependencies = {}) {
     pinned.set(`${event.sessionID}:${event.kind}`, { model, variant, activityClass, connection, startedAt: Date.now() });
     await updateQuotaState(file, current => {
       current.usage.push({ at, provider: event.model.providerID, model,
-        ...(variant ? { variant } : {}), ...(connection ? { connection } : {}), activityClass,
+        ...(variant ? { variant } : {}), ...(connection ? { connection } : {}),
+        // Older running instances accept the variant but not the new class enum.
+        // Infer High from its actual model/variant on read, without breaking them.
+        ...(activityClass === 'reasoning-sol-high' ? {} : { activityClass }),
         kind: kinds[event.agent] ?? 'coding', requests: 1 });
       return current;
     });
@@ -370,7 +386,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
       if (!configured) return;
       const selected = session.model && `${session.model.providerID}/${session.model.id}`;
       const keepVariant = session.agent === 'build' && selected?.startsWith('openai/')
-        && selected === configured.split('#')[0] && ['low', 'medium'].includes(session.model.variant);
+        && selected === configured.split('#')[0] && ['low', 'medium', 'high'].includes(session.model.variant);
       const models = [candidate(session.agent, keepVariant ? `${selected}#${session.model.variant}` : configured)];
       // The same bounded cross-provider choice a new delegation gets: only
       // General may leave its configured provider, and only toward OpenAI.
@@ -479,7 +495,8 @@ export async function setupGovernor(ctx, dependencies = {}) {
         if (request && tokens && event.created >= request.startedAt) await guarded(() => updateQuotaState(file, state => {
           state.usage.push({ at: new Date(event.created).toISOString(), provider: request.model.split('/')[0], model: request.model,
             ...(request.variant ? { variant: request.variant } : {}), ...(request.connection ? { connection: request.connection } : {}),
-            activityClass: request.activityClass, durationMs: event.created - request.startedAt, requests: 0,
+            ...(request.activityClass === 'reasoning-sol-high' ? {} : { activityClass: request.activityClass }),
+            durationMs: event.created - request.startedAt, requests: 0,
             input: tokens.input ?? 0, output: tokens.output ?? 0,
             cacheRead: tokens.cache?.read ?? 0, cacheWrite: tokens.cache?.write ?? 0 });
           return state;
