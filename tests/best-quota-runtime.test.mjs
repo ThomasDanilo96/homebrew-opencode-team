@@ -863,6 +863,98 @@ test('automatic High falls back on insufficient envelope, but EXHAUSTED and UNKN
   }
 });
 
+async function concurrentEffortFixture(t, event) {
+  const f = await fixture(t, 'active', undefined, undefined, event, '2.3.2');
+  await seedSolCalibration(f.file);
+  await updateQuotaState(f.file, state => {
+    const now = Date.now();
+    const snapshots = state.snapshots.filter(s => s.provider === 'openai');
+    snapshots[0].at = new Date(now - 300000).toISOString();
+    snapshots.forEach(s => { s.windows.weekly.used = 65; });
+    state.sources.openai = { status: 'LIVE', connection: 'a'.repeat(64) };
+    for (const variant of ['low', 'medium', 'high']) state.usage.push({
+      at: new Date(now - 1000).toISOString(), provider: 'openai', model: 'openai/gpt-6.2-sol',
+      variant, connection: 'a'.repeat(64), requests: 0, durationMs: 1000, output: 1,
+    });
+    return state;
+  });
+  f.ctx.agent.get = async () => ({ data: { model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } } });
+  f.ctx.model.list = async () => ({ data: [{ providerID: 'openai', id: 'gpt-6.2-sol',
+    variants: ['low', 'medium', 'high'].map(id => ({ id })) }] });
+  f.ctx.session.get = async () => ({ agent: 'build', time: { busy: 1 } });
+  f.ctx.session.context = async () => [{ type: 'synthetic', metadata: { source: 'goal' } }];
+  f.ctx.session.switchModel = async () => assert.fail('request routing must not change session selections');
+  return f;
+}
+
+test('automatic effort counts valid same-session leases and freezes its admitted envelope before transport', async t => {
+  const f = await concurrentEffortFixture(t);
+  const at = new Date().toISOString(), expiresAt = new Date(Date.now() + 60000).toISOString();
+  await updateQuotaState(f.file, s => ({ ...s, leases: ['parent', 'other'].map(sessionID => ({
+    id: `valid-${sessionID}`, provider: 'openai', scope: 'admission', percent: 15,
+    sessionID, ownerPid: process.pid, at, expiresAt,
+  })) }));
+  const request = { sessionID: 'parent', agent: 'build', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } };
+  await f.hooks['experimental.model.resolve'](request);
+  assert.equal(request.model.variant, 'medium', '35 remaining minus 30 valid reservations cannot admit High’s 15-point envelope');
+  const planned = readQuotaState(f.file).leases;
+  assert.equal(planned.length, 3, 'resolution atomically reserves the applicable Medium request');
+  assert.ok(planned.some(l => l.id === 'valid-parent') && planned.some(l => l.id === 'valid-other'));
+  // New observations change the next request's estimate, not a reservation
+  // already made before this request was built.
+  await updateQuotaState(f.file, s => ({ ...s, usage: [...s.usage, {
+    at: new Date().toISOString(), provider: 'openai', model: 'openai/gpt-6.2-sol',
+    variant: 'medium', connection: 'a'.repeat(64), requests: 0, durationMs: 900000, output: 1,
+  }] }));
+  await f.hooks['model.request'](request);
+  await f.hooks['http.request'](request);
+  await f.hooks['experimental.ws.handshake'](request);
+  assert.deepEqual(readQuotaState(f.file).leases.map(l => l.id), planned.map(l => l.id), 'no double reservation at admission or transport');
+  const lower = { ...request, sessionID: 'lower', model: { ...request.model } };
+  await f.hooks['experimental.model.resolve'](lower);
+  assert.equal(lower.model.variant, 'low', 'Low remains an actual bounded alternative if Medium no longer fits');
+  const explicit = { ...request, sessionID: 'explicit', model: { ...request.model, variant: 'high' } };
+  f.ctx.session.get = async () => ({ agent: 'build', model: explicit.model, time: { busy: 2 } });
+  await assert.rejects(f.hooks['experimental.model.resolve'](explicit), /BEST_QUOTA_BLOCKED/);
+  assert.equal(explicit.model.variant, 'high', 'an explicit High cannot silently downgrade');
+});
+
+test('concurrent native resolutions reserve once, fall back before preparation and release only completed requests', async t => {
+  const bus = new EventEmitter();
+  const f = await concurrentEffortFixture(t, {
+    subscribe: async function* ({ signal }) {
+      for await (const [event] of on(bus, 'event', { signal })) yield event;
+    },
+  });
+  const requests = ['one', 'two', 'three'].map(sessionID => ({ sessionID, agent: 'build', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } }));
+  await Promise.all(requests.map(r => f.hooks['experimental.model.resolve'](r)));
+  assert.deepEqual(requests.map(r => r.model.variant).sort(), ['high', 'high', 'medium']);
+  const planned = readQuotaState(f.file).leases;
+  assert.equal(planned.length, 3);
+  assert.ok(planned.reduce((sum, l) => sum + l.percent, 0) <= 35);
+  await Promise.all(requests.map(r => f.hooks['model.request'](r)));
+  assert.equal(readQuotaState(f.file).leases.length, 3);
+  const ended = Date.now();
+  bus.emit('event', { type: 'session.step.ended', created: ended, data: { sessionID: 'one' } });
+  await new Promise(setImmediate);
+  assert.deepEqual(readQuotaState(f.file).leases.map(l => l.sessionID).sort(), ['three', 'two']);
+  const next = { ...requests[0], model: { ...requests[0].model } };
+  await f.hooks['experimental.model.resolve'](next);
+  const renewed = readQuotaState(f.file).leases.find(l => l.sessionID === 'one');
+  assert.ok(renewed && renewed.id !== planned.find(l => l.sessionID === 'one').id);
+  bus.emit('event', { type: 'session.step.ended', created: ended, data: { sessionID: 'one' } });
+  await new Promise(setImmediate);
+  assert.ok(readQuotaState(f.file).leases.some(l => l.id === renewed.id), 'delayed completion must not release the next reservation');
+  await updateQuotaState(f.file, s => {
+    s.snapshots.filter(x => x.provider === 'openai').forEach(x => { x.windows.weekly.used = 100; });
+    return s;
+  });
+  await assert.rejects(f.hooks['model.request'](next), /BEST_QUOTA_BLOCKED/);
+  await assert.rejects(f.hooks['experimental.model.resolve']({ ...next, sessionID: 'exhausted' }), /BEST_QUOTA_BLOCKED/);
+});
+
 test('active prompt stops a Build turn with no admissible provider instead of dispatching unregulated', async t => {
   const f = await fixture(t);
   await updateQuotaState(f.file, state => {
