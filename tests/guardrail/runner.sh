@@ -141,7 +141,7 @@ if [ "${1:-}" = rollback ] && [ "$#" -eq 3 ]; then
 fi
 cd "$STAGING"
 target="${1:-all}"
-case "$target" in all|smoke|maintenance|benchmark|profile|qualification|homebrew|compatibility|rollback|best-routing|best-native|packaging) ;; *) echo "unknown target: $target" >&2; exit 2 ;; esac
+case "$target" in all|smoke|maintenance|benchmark|profile|qualification|homebrew|compatibility|rollback|best-routing|best-native|packaging|quota) ;; *) echo "unknown target: $target" >&2; exit 2 ;; esac
 
 echo "## guardrail: staging at $STAGING_REAL"
 echo "## guardrail: outside sentinel at $OUTSIDE_REAL"
@@ -153,6 +153,10 @@ run_suite /usr/bin/python3 -B tests/test_isolation.py -v 2>&1 || exit 1
 echo ""
 if [ "$target" = best-native ]; then
   run_suite node --test --test-name-pattern='BEST' tests/native-profiles.test.mjs
+  exit "$RC"
+fi
+if [ "$target" = quota ]; then
+  run_suite node --test tests/best-quota.test.mjs tests/best-quota-runtime.test.mjs
   exit "$RC"
 fi
 if [ "$target" = packaging ]; then

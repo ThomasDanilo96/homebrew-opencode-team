@@ -513,6 +513,7 @@ const CLASS_MODELS = {
   'visual-glm': ['opencode-go', 'opencode-go/glm-5.3-flash'],
   'coordination-sol-low': ['openai', 'openai/gpt-6.1-sol', 'low'],
   'analysis-review-sol-medium': ['openai', 'openai/gpt-6.1-sol', 'medium'],
+  'reasoning-sol-high': ['openai', 'openai/gpt-6.2-sol', 'high'],
 };
 function activity(activityClass, extra = {}) {
   const [provider, model, variant] = CLASS_MODELS[activityClass];
@@ -715,7 +716,7 @@ test('classifyActivity is public, shared with calibration, and does not invent S
     assert.equal(quota.classifyActivity({ provider: 'openai', model: 'openai/gpt-6.1-sol', variant }),
       variant === 'low' ? 'coordination-sol-low' : 'analysis-review-sol-medium');
   }
-  assert.equal(quota.classifyActivity({ provider: 'openai', model: 'openai/gpt-6.2-sol', variant: 'high' }), 'unclassified');
+  assert.equal(quota.classifyActivity({ provider: 'openai', model: 'openai/gpt-6.2-sol', variant: 'high' }), 'reasoning-sol-high');
   for (const usage of [null, {}, activity('coordination-sol-low', { variant: undefined, kind: 'coding' }),
     activity('coordination-sol-low', { variant: 'high' }), activity('coordination-sol-low', { provider: 'other' }),
     activity('coordination-sol-low', { provider: undefined }), activity('coding-qwen', { activityClass: 'visual-glm' })]) {

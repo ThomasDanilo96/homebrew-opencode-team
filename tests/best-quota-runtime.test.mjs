@@ -717,10 +717,11 @@ test('Specialist and Reviewer route and admit their configured Sol Medium', asyn
   }
 });
 
-test('Build keeps Low or Medium on the configured subscription', async t => {
+test('Build keeps explicit Low, Medium or High on the configured subscription', async t => {
   const f = await fixture(t);
   f.ctx.session.switchModel = async () => { assert.fail('must not reset the selected variant'); };
-  for (const variant of ['low', 'medium']) {
+  for (const variant of ['low', 'medium', 'high']) {
+    await seedSolCalibration(f.file);
     f.ctx.agent.get = async () => ({ data: { model: { providerID: 'openai', id: 'gpt-6.1-sol',
       variant: variant === 'low' ? 'medium' : 'low' } } });
     f.ctx.session.get = async () => promptSession({ agent: 'build',
@@ -728,6 +729,37 @@ test('Build keeps Low or Medium on the configured subscription', async t => {
     await f.hooks.prompt({ sessionID: 'ses_build' });
     assert.equal(routingDecisions(f.file).at(-1).applied, `openai/gpt-6.1-sol#${variant}`);
   }
+});
+
+async function seedSolCalibration(file) {
+  await updateQuotaState(file, state => {
+    const at = Date.now();
+    const ai = state.snapshots.find(s => s.provider === 'openai');
+    state.snapshots = state.snapshots.filter(s => s.provider !== 'openai');
+    state.snapshots.push({ ...structuredClone(ai), at: new Date(at - 60000).toISOString() },
+      { ...structuredClone(ai), at: new Date(at).toISOString() });
+    state.usage.push({ at: new Date(at - 30000).toISOString(), provider: 'openai',
+      model: 'openai/gpt-6.2-sol', variant: 'medium', connection: 'a'.repeat(64), requests: 1 });
+    return state;
+  });
+}
+
+test('High bootstrap reserves a conservative observed envelope and fails closed without calibration', async t => {
+  const f = await fixture(t);
+  f.ctx.agent.get = async () => ({ data: { model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } } });
+  const request = { sessionID: 'high-probe', agent: 'build', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'high' } };
+  await assert.rejects(f.hooks['model.request'](request), /calibrated-request-envelope/);
+  await seedSolCalibration(f.file);
+  await f.hooks['model.request'](request);
+  const state = readQuotaState(f.file);
+  assert.equal(state.usage.at(-1).activityClass, 'reasoning-sol-high');
+  assert.ok(state.leases.find(l => l.sessionID === request.sessionID).percent >= 15);
+  await updateQuotaState(f.file, s => ({ ...s, leases: [...s.leases, {
+    id: 'other-high', scope: 'admission', provider: 'openai', percent: 66,
+    at: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(), ownerPid: process.pid,
+  }] }));
+  await assert.rejects(f.hooks['model.request']({ ...request, sessionID: 'second' }), /calibrated-request-envelope/);
 });
 
 test('active prompt stops a Build turn with no admissible provider instead of dispatching unregulated', async t => {
