@@ -63,6 +63,8 @@ formula.install
   assert.equal(JSON.parse(quota.stdout).mode, 'monitor', 'uninitialized governor observes but never silently activates');
   assert.equal(fs.readFileSync(path.join(temp, 'libexec/shared/skills/documentation-lookup.md'), 'utf8'),
     fs.readFileSync(path.join(root, 'shared/skills/documentation-lookup.md'), 'utf8'));
+  assert.equal(fs.readFileSync(path.join(temp, 'libexec/shared/skills/release-preparation.md'), 'utf8'),
+    fs.readFileSync(path.join(root, 'shared/skills/release-preparation.md'), 'utf8'));
 });
 
 test('zsh completion registers only the supported launcher and offers only best/free profiles', () => {
@@ -234,6 +236,12 @@ test('release handoff binds archive, commit, source and complete operational ins
   const renderer = path.join(root, '.github/scripts/render-staging-formula.rb');
   const prepare = spawnSync('ruby', [renderer, '--handoff', archive, commit, source, bundle], { encoding: 'utf8' });
   assert.equal(prepare.status, 0, prepare.stderr);
+  const partial = path.join(temp, 'incomplete.tar.gz');
+  fs.writeFileSync(partial, git(['archive', '--format=tar.gz', '--prefix=candidate/', commit,
+    'VERSION', 'Formula', '.github', 'tests']));
+  const incompleteTree = spawnSync('ruby', [renderer, '--handoff', partial, commit, source,
+    path.join(temp, 'partial handoff')], { encoding: 'utf8' });
+  assert.match(incompleteTree.stderr, /ARCHIVE_TREE_MISMATCH/, 'a valid commit header does not prove a complete payload');
   const manifest = JSON.parse(fs.readFileSync(path.join(bundle, 'release.json'), 'utf8'));
   const verify = (sha = manifest.archive_sha256, ref = commit, tree = source) =>
     spawnSync('ruby', [renderer, '--verify', bundle, ref, sha, tree], { encoding: 'utf8' });
@@ -243,11 +251,66 @@ test('release handoff binds archive, commit, source and complete operational ins
   assert.doesNotMatch(valid.stdout, /RELEASE_PREPARATION=PASS/, 'identity alone is not packaging completion');
   assert.match(fs.readFileSync(path.join(bundle, 'OPERATIONS.md'), 'utf8'), new RegExp(commit));
   assert.match(fs.readFileSync(path.join(bundle, 'OPERATIONS.md'), 'utf8'), new RegExp(manifest.archive_sha256));
+  const relative = spawnSync('ruby', [renderer, '--verify', path.basename(bundle), commit, manifest.archive_sha256, source],
+    { cwd: temp, encoding: 'utf8' });
+  assert.equal(relative.status, 0, relative.stderr);
+  const instructionsFile = path.join(bundle, 'OPERATIONS.md');
+  const operations = fs.readFileSync(instructionsFile, 'utf8');
+  const install = [...operations.matchAll(/```sh\n([\s\S]*?)\n```/g)].at(-1)[1];
+  const mockBin = path.join(temp, 'mock-bin');
+  fs.mkdirSync(mockBin);
+  const marker = path.join(temp, 'brew-called');
+  const calls = path.join(temp, 'brew-calls');
+  fs.writeFileSync(path.join(mockBin, 'brew'), `#!/bin/sh
+set -eu
+case "$*" in
+  'tap-new --no-git opencode-team/staging')
+    test ! -e "$MOCK_TAP"
+    mkdir -p "$MOCK_TAP/Formula"
+    printf 'tap-new\\n' >> "$BREW_CALLS" ;;
+  '--repo opencode-team/staging')
+    test -d "$MOCK_TAP"
+    printf 'repo\\n' >> "$BREW_CALLS"
+    printf '%s\\n' "$MOCK_TAP" ;;
+  'install --formula opencode-team/staging/opencode-team-staging')
+    cmp "$EXPECTED_FORMULA" "$MOCK_TAP/Formula/opencode-team-staging.rb"
+    printf 'install\\n' >> "$BREW_CALLS"
+    : > "$BREW_CALLED" ;;
+  *) exit 86 ;;
+esac
+`, { mode: 0o755 });
+  const runInstall = () => spawnSync('/bin/sh', ['-c', install], { encoding: 'utf8',
+    env: { ...process.env, PATH: `${mockBin}:${process.env.PATH}`, BREW_CALLED: marker,
+      BREW_CALLS: calls, MOCK_TAP: path.join(temp, 'temporary tap'),
+      EXPECTED_FORMULA: path.join(bundle, 'opencode-team-staging.rb') } });
+  const installed = runInstall();
+  assert.equal(installed.status, 0, installed.stderr);
+  assert.ok(fs.existsSync(marker), 'the complete validated command reaches only the mocked installer');
+  assert.equal(fs.readFileSync(calls, 'utf8'), 'tap-new\nrepo\ninstall\n');
+  fs.unlinkSync(marker);
+  const verifierFile = path.join(bundle, 'verify-release.rb');
+  const verifierBytes = fs.readFileSync(verifierFile);
+  fs.writeFileSync(verifierFile, 'exit 0\n');
+  fs.appendFileSync(path.join(bundle, 'archive.tar.gz'), 'wrong archive');
+  assert.notEqual(runInstall().status, 0, 'the real generated command must authenticate its verifier before execution');
+  assert.equal(fs.existsSync(marker), false, 'a replaced verifier must not allow installation of another archive');
+  assert.equal(fs.readFileSync(calls, 'utf8'), 'tap-new\nrepo\ninstall\n', 'integrity failure precedes every Homebrew mutation');
+  fs.writeFileSync(verifierFile, verifierBytes);
+  fs.copyFileSync(archive, path.join(bundle, 'archive.tar.gz'));
+  const substituted = { ...manifest, source: `${source}-substituted` };
+  fs.writeFileSync(path.join(bundle, 'release.json'), JSON.stringify(substituted));
+  fs.writeFileSync(instructionsFile, operations.replaceAll(source.replaceAll(' ', '\\ '),
+    substituted.source.replaceAll(' ', '\\ ')));
+  assert.match(verify().stderr, /HANDOFF_SOURCE_MISMATCH/);
+  fs.writeFileSync(path.join(bundle, 'release.json'), JSON.stringify(manifest));
+  fs.writeFileSync(instructionsFile, operations);
   assert.notEqual(verify('a'.repeat(64)).status, 0, 'a command pinned to another archive must fail');
   assert.notEqual(verify(undefined, 'a'.repeat(40)).status, 0, 'a command pinned to another commit must fail');
   const bundledArchive = path.join(bundle, 'archive.tar.gz');
   fs.appendFileSync(bundledArchive, 'tamper');
   assert.match(verify().stderr, /ARCHIVE_SHA256_MISMATCH/);
+  assert.notEqual(runInstall().status, 0, 'the generated install command refuses a different archive');
+  assert.equal(fs.existsSync(marker), false);
   fs.copyFileSync(archive, bundledArchive);
   const code = path.join(source, 'shared/profiles.mjs');
   const before = fs.readFileSync(code);

@@ -402,6 +402,29 @@ current BEST instance coverage to be verified.
 The workflow deliberately separates candidate testing from publication. The
 following is the release procedure; completed gates are recorded in validation:
 
+For local preparation, freeze reviewed source in a commit first, then use the
+existing staging renderer to generate the complete archive-bound handoff:
+
+```sh
+commit="$(git rev-parse HEAD)"
+work="$(mktemp -d "${TMPDIR:-/tmp}/opencode-team-release.XXXXXXXX")"
+git archive --format=tar.gz --prefix=opencode-team-candidate/ "$commit" > "$work/source.tar.gz"
+ruby .github/scripts/render-staging-formula.rb --handoff "$work/source.tar.gz" "$commit" "$PWD" "$work/handoff"
+cat "$work/handoff/OPERATIONS.md"
+```
+
+Run the **complete preparation command generated in `OPERATIONS.md`**. It binds
+the existing guarded packaging tests to that commit, archive SHA-256 and source
+tree, and requires the formula, verifier and operational instructions before and
+after testing. Only `RELEASE_PREPARATION=PASS` completes this local preparation;
+plain packaging PASS or `HANDOFF_VALID` does not. Missing files, a different
+archive/commit, or source drift fail explicitly. The generated installation
+command independently rechecks identity and still requires separate GO.
+An intact older handoff remains valid for its pinned commit; these checks do not
+decide which version the operator authorizes.
+Local fixture PASS is not a real Homebrew installation, operational qualification
+or incident closure. Generation/testing does not install, run setup or publish.
+
 1. After approval, commit and push the reviewed source to `prerelease/vVERSION`
     using the candidate `VERSION`.
    Run **Homebrew Install** manually on that branch: Phase A installs the exact

@@ -121,9 +121,11 @@ jobs:
           # This digest belongs only to the disposable staging artifact and is never copied
           # into Formula/opencode-team.rb or used as a release checksum.
           staging_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
+          bundle="$RUNNER_TEMP/opencode-team-$version-handoff"
           ruby .github/scripts/render-staging-formula.rb \
-            Formula/opencode-team.rb "$formula" OpencodeTeamStaging "$version" \
-            "file://$archive" "$staging_sha256"
+            --handoff "$archive" "$candidate_sha" "$PWD" "$bundle"
+          cp "$bundle/opencode-team-staging.rb" "$formula"
+          printf 'CANDIDATE_ARCHIVE_SHA256=%s\n' "$staging_sha256" >> "$GITHUB_ENV"
           ruby -c "$formula"
 
       - name: Install and test isolated staging formula
@@ -145,6 +147,9 @@ jobs:
           test -f "$package_root/shared/ecc.lock"
           gitleaks dir "$package_root"
           bash "$package_root/tests/guardrail/runner.sh" smoke
+          bundle="$RUNNER_TEMP/opencode-team-$version-handoff"
+          ruby .github/scripts/render-staging-formula.rb --verify "$bundle" "$GITHUB_SHA" "$CANDIDATE_ARCHIVE_SHA256" "$PWD"
+          echo "RELEASE_PREPARATION=PASS commit=$GITHUB_SHA sha256=$CANDIDATE_ARCHIVE_SHA256 installation=CI_ONLY"
 
   official-archive-validation:
     needs: [source-validation, release_state]

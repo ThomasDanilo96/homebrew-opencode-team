@@ -100,6 +100,13 @@ if 'bash "$package_root/tests/guardrail/runner.sh" smoke' not in staging:
     raise SystemExit("Phase A must use the guardrail runner smoke target instead of raw setup-smoke.sh")
 if 'bash "$package_root/tests/setup-smoke.sh"' in staging:
     raise SystemExit("Phase A must not call installed setup-smoke.sh directly (use guardrail runner)")
+if '--handoff "$archive" "$candidate_sha" "$PWD" "$bundle"' not in staging:
+    raise SystemExit("Phase A must generate complete commands from the committed archive")
+handoff_check = 'ruby .github/scripts/render-staging-formula.rb --verify "$bundle" "$GITHUB_SHA" "$CANDIDATE_ARCHIVE_SHA256" "$PWD"'
+if handoff_check not in staging or staging.index(handoff_check) < staging.index('bash "$package_root/tests/guardrail/runner.sh" smoke'):
+    raise SystemExit("Phase A must verify the handoff after installed packaging checks")
+if staging.index("RELEASE_PREPARATION=PASS") < staging.index(handoff_check):
+    raise SystemExit("Phase A cannot complete preparation before the handoff check")
 
 official = text.split("  official-archive-validation:\n", 1)[1].split("  clean-install:\n", 1)[0]
 if "github.event_name == 'push' && github.ref_type == 'tag'" not in official or 'archive_url="https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v$version.tar.gz"' not in official:

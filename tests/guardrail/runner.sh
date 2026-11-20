@@ -18,6 +18,17 @@ REPO="$(cd -P "$GUARDRAIL_DIR/../.." && pwd)"
 PROFILE_SRC="$GUARDRAIL_DIR/profile.sb"
 SANDBOX_EXEC="/usr/bin/sandbox-exec"
 
+# An archive-bound release run must be complete before testing, and stay so
+# afterward. Plain packaging remains available but never declares release ready.
+HANDOFF=""
+if [ "${1:-}" = packaging ] && [ "$#" -ne 1 ]; then
+  [ "$#" -eq 4 ] || { echo "Use runner.sh packaging BUNDLE COMMIT SHA256" >&2; exit 2; }
+  HANDOFF="$(cd -P "$2" && pwd)"
+  HANDOFF_COMMIT="$3"
+  HANDOFF_SHA="$4"
+  ruby "$REPO/.github/scripts/render-staging-formula.rb" --verify "$HANDOFF" "$HANDOFF_COMMIT" "$HANDOFF_SHA" "$REPO"
+fi
+
 if [ ! -x "$SANDBOX_EXEC" ]; then
   echo "guardrail FAIL: sandbox-exec required at $SANDBOX_EXEC" >&2
   echo "guardrail: OS-level isolation unavailable; refusing to run unguarded." >&2
@@ -161,7 +172,12 @@ if [ "$target" = quota ]; then
   exit "$RC"
 fi
 if [ "$target" = packaging ]; then
-  run_suite node --test tests/packaging.test.mjs
+  run_suite node --test tests/packaging.test.mjs || exit "$RC"
+  run_suite bash tests/homebrew-workflow.test.sh || exit "$RC"
+  if [ -n "$HANDOFF" ]; then
+    ruby "$REPO/.github/scripts/render-staging-formula.rb" --verify "$HANDOFF" "$HANDOFF_COMMIT" "$HANDOFF_SHA" "$REPO"
+    printf 'RELEASE_PREPARATION=PASS commit=%s sha256=%s installation=NOT_AUTHORIZED\n' "$HANDOFF_COMMIT" "$HANDOFF_SHA"
+  fi
   exit "$RC"
 fi
 if [ "$target" = best-routing ]; then
