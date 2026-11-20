@@ -360,7 +360,14 @@ test('native V2 quota gates existing sessions and native children before local t
       turns++;
       return { content: turns === 1 ? 'Stopped before checking' : 'Authorized check finished; privileged operation not attempted' };
     };
-    assert.equal(await prompt(goal.id, 'Prepare and verify the local fixture; replacing goal-rollout requires approval and is not authorized.', 'goal'), 'succeeded');
+    const objective = 'Prepare and verify the local fixture; replacing goal-rollout requires approval and is not authorized.';
+    const { data: direct } = await api('POST', '/api/session', { title: 'BEST direct mandate probe', location: { directory: dir } });
+    assert.equal(await prompt(direct.id, objective), 'succeeded');
+    assert.equal(turns, 1, 'a normal prompt stops without activating GoalPlugin');
+    assert.equal(reviews, 0);
+    assert.equal(fs.existsSync(evidence), false);
+    turns = 0;
+    assert.equal(await prompt(goal.id, objective, 'goal'), 'succeeded');
     assert.equal(turns, 2);
     assert.equal(reviews, 2);
     assert.equal(fs.readFileSync(evidence, 'utf8'), 'verified');

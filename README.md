@@ -254,6 +254,12 @@ remaining acceptance checks and the scope already authorized. The native
 reviewer can continue unfinished work; it cannot grant approvals. Use
 `/goal pause` to stop the goal. For simple tasks, send a normal prompt.
 
+On 2.3.2, ordinary prompts do not activate GoalPlugin, even for a multi-step
+mandate. Goal creation goes through the native slash-command callback; the
+prompt hook can change the input but does not convert it into a command.
+BEST does not infer consent to additional review turns or activate goals
+implicitly.
+
 ```sh
 opencode-team start best run "Explain this project"
 opencode-team best -s SESSION_ID
