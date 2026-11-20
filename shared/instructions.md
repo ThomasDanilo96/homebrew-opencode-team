@@ -15,8 +15,10 @@ and approval boundaries from limits of the chosen implementation. If that path
 fails, check existing standard procedures before proposing new code. Before
 acting, verify the candidate procedure end to end, including prerequisites and GO
 boundaries. Drop a disproven path unless new evidence could change the result;
-if no available procedure meets the requirements, show the conflict and ask for
-the smallest decision needed to proceed.
+before a consequential NO-GO, use an independent review if it can resolve a
+specific missing check on a plausible existing path. If no available procedure
+meets the requirements, show the conflict and ask for the smallest decision
+needed to proceed.
 Prioritize work that can unblock delivery by the deadline; finish independent
 authorized work, not unrelated cleanup. When privileged rollout
 needs approval, separate it from preparing the change: apply and test any
