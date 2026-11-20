@@ -763,6 +763,82 @@ test('High bootstrap reserves a conservative observed envelope and fails closed 
   await assert.rejects(f.hooks['model.request']({ ...request, sessionID: 'second' }), /calibrated-request-envelope/);
 });
 
+test('native Build effort resolution applies Low, default Medium and qualified High without changing the session selection', async t => {
+  const f = await fixture(t);
+  await seedSolCalibration(f.file);
+  f.ctx.agent.get = async () => ({ data: { model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } } });
+  f.ctx.model.list = async () => ({ data: [{ providerID: 'openai', id: 'gpt-6.2-sol',
+    variants: ['low', 'medium', 'high'].map(id => ({ id })) }] });
+  let session = { agent: 'build', time: { busy: 1 } };
+  let messages = [{ type: 'user', text: 'Reply exactly OK' }];
+  f.ctx.session.get = async () => session;
+  f.ctx.session.context = async () => messages;
+  f.ctx.session.switchModel = async () => assert.fail('automatic effort must not overwrite user/session selections');
+  const resolve = async () => {
+    const event = { sessionID: 'effort', agent: 'build', kind: 'primary',
+      model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } };
+    await f.hooks['experimental.model.resolve'](event);
+    await f.hooks['model.request'](event);
+    await updateQuotaState(f.file, s => ({ ...s, leases: [] }));
+    return event.model.variant;
+  };
+  assert.equal(await resolve(), 'low');
+  messages = [{ type: 'synthetic', metadata: { source: 'goal' } }];
+  assert.equal(await resolve(), 'low', 'tool/goal activity must not flap effort during the same execution');
+  session.time.busy++;
+  assert.equal(await resolve(), 'medium', 'an unqualified High falls back');
+  await updateQuotaState(f.file, s => ({ ...s, sources: { openai: { status: 'LIVE', connection: 'a'.repeat(64) } },
+    usage: [...s.usage, { at: new Date().toISOString(), provider: 'openai', model: 'openai/gpt-6.2-sol',
+      variant: 'high', connection: 'a'.repeat(64), requests: 0, durationMs: 1000, output: 10 }] }));
+  session.time.busy++;
+  assert.equal(await resolve(), 'high');
+  session.time.busy++;
+  messages = [{ type: 'user', text: 'Implement this change.' }];
+  assert.equal(await resolve(), 'medium');
+  for (const variant of ['low', 'medium', 'high']) {
+    session = { ...session, time: { busy: session.time.busy + 1 },
+      model: { providerID: 'openai', id: 'gpt-6.2-sol', variant } };
+    assert.equal(await resolve(), variant, 'explicit choice wins over automatic signals');
+  }
+  const count = routingDecisions(f.file).length;
+  session.parentID = 'parent';
+  assert.equal(await resolve(), 'medium', 'delegated children keep their dispatch model');
+  assert.equal(routingDecisions(f.file).length, count);
+});
+
+test('automatic High falls back on insufficient envelope, but EXHAUSTED and UNKNOWN block every effort', async t => {
+  const f = await fixture(t);
+  await seedSolCalibration(f.file);
+  f.ctx.agent.get = async () => ({ data: { model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } } });
+  f.ctx.model.list = async () => ({ data: [{ providerID: 'openai', id: 'gpt-6.2-sol', variants: [{ id: 'high' }] }] });
+  let busy = 1;
+  f.ctx.session.get = async () => ({ agent: 'build', time: { busy: busy++ } });
+  f.ctx.session.context = async () => [{ type: 'synthetic', metadata: { source: 'goal' } }];
+  await updateQuotaState(f.file, s => {
+    s.sources.openai = { status: 'LIVE', connection: 'a'.repeat(64) };
+    s.usage.push({ at: new Date().toISOString(), provider: 'openai', model: 'openai/gpt-6.2-sol',
+      variant: 'high', connection: 'a'.repeat(64), requests: 0, durationMs: 1000, output: 10 });
+    s.snapshots.filter(x => x.provider === 'openai').forEach(x => { x.windows.weekly.used = 90; });
+    return s;
+  });
+  const event = () => ({ sessionID: 'fallback', agent: 'build', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } });
+  const e = event();
+  await f.hooks['experimental.model.resolve'](e);
+  assert.equal(e.model.variant, 'medium');
+  for (const state of ['EXHAUSTED', 'UNKNOWN']) {
+    await updateQuotaState(f.file, s => {
+      if (state === 'EXHAUSTED') s.snapshots.filter(x => x.provider === 'openai').forEach(x => { x.windows.weekly.used = 100; });
+      else s.snapshots = s.snapshots.filter(x => x.provider !== 'openai');
+      return s;
+    });
+    await assert.rejects(f.hooks['experimental.model.resolve'](event()), /BEST_QUOTA_BLOCKED/);
+    for (const variant of ['low', 'medium', 'high']) await assert.rejects(f.hooks['model.request']({
+      ...event(), model: { ...event().model, variant },
+    }), /BEST_QUOTA_BLOCKED/);
+  }
+});
+
 test('active prompt stops a Build turn with no admissible provider instead of dispatching unregulated', async t => {
   const f = await fixture(t);
   await updateQuotaState(f.file, state => {
