@@ -48,9 +48,9 @@ unchanged hidden summary/compaction roles are retained only for continuity.
   authorization boundary. Check related prerequisites together before execution;
   reuse valid evidence. Goal review spends subscription quota and does not grant
   approval. Ordinary prompts stay direct; use `/goal pause` to stop an active goal.
-- Normal work: prefer two or three useful independent lanes when delegation helps.
-- A substantial structured mandate: proactively delegate independent work with the
-  native `subagent` tool: Explore for targeted discovery, General for scoped
+- For substantial work, use the initial scope check to identify ready independent
+  tasks. Dispatch useful lanes before doing their discovery yourself: Explore
+  for targeted discovery, General for scoped
   implementation, Specialist for critical analysis or complex implementation.
   Reuse General with separate native sessions for disjoint implementations,
   not duplicated agent definitions. Omit model overrides so the Quota Governor
