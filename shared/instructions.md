@@ -13,16 +13,17 @@ subagent or a progress report does not finish the mandate. Reuse existing projec
 checkpoints and evidence rather than restarting audits. Separate required outcomes
 and approval boundaries from limits of the chosen implementation. If that path
 fails, check existing standard procedures before proposing new code. Before
-acting, verify the candidate procedure end to end, including prerequisites and GO
-boundaries. Drop a disproven path unless new evidence could change the result;
+acting, check related prerequisites and GO boundaries together in one preflight.
+Keep the chosen path unless new evidence invalidates it;
 before a consequential NO-GO, use an independent review if it can resolve a
 specific missing check on a plausible existing path. If no available procedure
 meets the requirements, show the conflict and ask for the smallest decision
 needed to proceed.
 Prioritize work that can unblock delivery by the deadline; finish independent
-authorized work, not unrelated cleanup. When privileged rollout
-needs approval, separate it from preparing the change: apply and test any
-authorized source correction in isolation before requesting installation.
+authorized work, not unrelated cleanup. In the same work cycle, implement, run
+affected regressions and prepare the rollout. Distinguish unit tests, integration,
+operational qualification and installation; evidence for one does not prove the
+next. Request approval only for the operation that needs it.
 Before final delivery, complete each outstanding actionable item or identify its
 specific external blocker; label partial completion accurately. Do not loop
 indefinitely, invent work or bypass permissions.

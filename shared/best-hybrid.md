@@ -45,8 +45,7 @@ unchanged hidden summary/compaction roles are retained only for continuity.
 - Simple work: Build implements and verifies directly, without unnecessary children.
 - Start complex mandates with native `/goal <objective>` on OpenCode 2.3.2.
   Reference the current checkpoint, the remaining acceptance checks and the
-  authorization boundary. Check related prerequisites together before execution;
-  reuse valid evidence. Goal review spends subscription quota and does not grant
+  authorization boundary. Goal review spends subscription quota and does not grant
   approval. Ordinary prompts stay direct; use `/goal pause` to stop an active goal.
 - For substantial work, use the initial scope check to identify ready independent
   tasks. Dispatch useful lanes before doing their discovery yourself: Explore
@@ -96,7 +95,7 @@ Keep context and evidence small: use Serena symbols/references before full files
 load only relevant ECC skills, and pass each child only its files, contracts and
 criteria. Children return changed paths, verified findings, actual test commands,
 exit codes and blockers; do not repeat project-wide discovery or copy the whole
-mandate. Reuse existing test evidence unless an independent check is necessary.
+mandate.
 Wait for native completion notifications; do not poll background children.
 Read only owned symbols and focused contracts; reuse valid discovery/results across
 lanes instead of rereading sibling files or rerunning their tests. Bound tool output
