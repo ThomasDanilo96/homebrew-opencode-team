@@ -778,10 +778,11 @@ test('a live reservation from another instance stops this one from double-spendi
   assert.equal(leases[0].id, 'other-instance-go');
 });
 
-test('a calibrated next-request envelope must fit every residual window, even when raw quota state is NORMAL', async t => {
+test('a bounded calibrated request can use the routing margin but not another request’s reserved budget', async t => {
   const f = await fixture(t);
   await updateQuotaState(f.file, state => {
     const ai = state.snapshots.find(s => s.provider === 'openai');
+    ai.windows.weekly.used = 59;
     const at = Date.now();
     ai.at = new Date(at).toISOString();
     state.snapshots.push({ ...structuredClone(ai), at: new Date(at - 60000).toISOString() });
@@ -789,6 +790,18 @@ test('a calibrated next-request envelope must fit every residual window, even wh
       variant: 'low', activityClass: 'coordination-sol-low', connection: 'a'.repeat(64), durationMs: 3600000, requests: 0 });
     return state;
   });
-  await assert.rejects(f.hooks['model.request']({ sessionID: 'large-next', agent: 'build', kind: 'primary',
-    model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'low' } }), /calibrated-request-envelope/);
+  const request = { sessionID: 'first', agent: 'build', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.1-sol', variant: 'low' } };
+  const outcomes = await Promise.allSettled([f.hooks['model.request'](request),
+    f.hooks['model.request']({ ...request, sessionID: 'second' })]);
+  assert.equal(outcomes.filter(result => result.status === 'fulfilled').length, 1);
+  assert.match(outcomes.find(result => result.status === 'rejected').reason.message, /calibrated-request-envelope/);
+  const [lease] = readQuotaState(f.file).leases;
+  assert.ok(lease.percent > 26 && lease.percent <= 41);
+  await updateQuotaState(f.file, state => {
+    state.leases = [];
+    for (const snapshot of state.snapshots.filter(s => s.provider === 'openai')) snapshot.windows.weekly.used = 80;
+    return state;
+  });
+  await assert.rejects(f.hooks['model.request'](request), /calibrated-request-envelope/);
 });

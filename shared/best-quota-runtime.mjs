@@ -63,21 +63,21 @@ export async function setupGovernor(ctx, dependencies = {}) {
     try { process.kill(pid, 0); return true; }
     catch (error) { return error.code !== 'ESRCH'; }
   };
-  function fitsObservedRequest(value, state, prediction, calibration, held = 0) {
+  const requestLeaseMs = 15 * 60000;
+  function observedRequestCost(value, state, prediction, calibration) {
     const [model, variant] = value.model.split('#');
     const name = classifyActivity({ provider: value.provider, model, variant });
-    if (name === 'unclassified') return true;
+    if (name === 'unclassified') return {};
     const durations = state.usage.filter(u => u.durationMs > 0 && u.provider === value.provider && classifyActivity(u) === name
       && u.connection === prediction.providers[value.provider].connection
       && Date.parse(u.at) >= Date.parse(prediction.at) - prediction.options.smoothingMs).map(u => u.durationMs);
-    if (!durations.length) return true;
-    // A conservative scenario for the next request, not an asserted bound on
-    // an unbounded task's duration or a token-to-allowance conversion.
-    const cost = estimateQuotaCost(calibration, name, Math.max(...durations));
-    return cost.state !== 'ESTIMATE' || Object.entries(cost.windows).every(([window, percent]) =>
-      percent <= prediction.providers[value.provider].windows[window]?.remaining
-        - (value.agent === 'explore' && name === 'discovery-mimo' ? held : prediction.options.safetyMarginPercent));
+    if (!durations.length) return {};
+    // Reserve the observed scenario for at most the admission lease horizon,
+    // not the entire duration of a historical turn or interrupted execution.
+    return estimateQuotaCost(calibration, name, Math.min(Math.max(...durations), requestLeaseMs)).windows;
   }
+  const fitsObservedRequest = (cost, provider, held) => Object.entries(cost).every(([window, percent]) =>
+    percent <= provider.windows[window]?.remaining - held);
   let refreshPromise, lastRefresh = 0;
   async function refresh(force = false) {
     if (refreshPromise) return refreshPromise;
@@ -131,7 +131,8 @@ export async function setupGovernor(ctx, dependencies = {}) {
         // automatic MiMo routing; independent candidates remain eligible.
         .filter(value => classifyActivity({ provider: value.provider, model: value.model.split('#')[0] }) !== 'discovery-mimo'
           || calibration.classes['discovery-mimo'].state !== 'UNKNOWN')
-        .filter(value => !active(current) || fitsObservedRequest(value, current, prediction, calibration, reserved[value.provider]));
+        .filter(value => !active(current) || fitsObservedRequest(observedRequestCost(value, current, prediction, calibration),
+          prediction.providers[value.provider], reserved[value.provider]));
       const routing = { kind: kinds[agent] ?? 'coding', candidates,
         forecast: prediction,
         previous: current.decisions.findLast(d => d.scope === 'routing' && d.candidate?.agent === agent),
@@ -309,7 +310,8 @@ export async function setupGovernor(ctx, dependencies = {}) {
       // lease, or a retry could block the very request it is re-checking.
       const held = reservedPercent((current.leases ?? []).filter(lease =>
         record || !lease.sessionID || lease.sessionID !== event.sessionID), event.model.providerID);
-      if (!fitsObservedRequest(selected, current, prediction, calibrateQuota(current), held)) blocked('calibrated-request-envelope');
+      const cost = observedRequestCost(selected, current, prediction, calibrateQuota(current));
+      if (!fitsObservedRequest(cost, provider, held)) blocked('calibrated-request-envelope');
       decision = decideQuota({ kind: kinds[event.agent] ?? 'coding',
         candidates: [selected], forecast: prediction,
         options: { ...current.policy, reserved: { [event.model.providerID]: held } } });
@@ -319,9 +321,9 @@ export async function setupGovernor(ctx, dependencies = {}) {
           leaseID = randomUUID();
           current.leases ??= [];
           current.leases.push({ id: leaseID, provider: decision.candidate.provider, ownerPid: process.pid,
-            scope: 'admission', percent: decision.estimatedTaskPercent ?? 0, sessionID: event.sessionID,
+            scope: 'admission', percent: Math.max(decision.estimatedTaskPercent ?? 0, ...Object.values(cost)), sessionID: event.sessionID,
             at: new Date().toISOString(),
-            expiresAt: new Date(Date.now() + 15 * 60000).toISOString() });
+            expiresAt: new Date(Date.now() + requestLeaseMs).toISOString() });
         }
       }
       return current;
