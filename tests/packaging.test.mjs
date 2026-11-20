@@ -209,3 +209,61 @@ formula.install
   assert.equal(smoke.status, 0, smoke.stderr + smoke.stdout);
   assert.match(smoke.stdout, /PACKAGING CONFIG SMOKE PASS/);
 });
+
+test('release handoff binds archive, commit, source and complete operational instructions', t => {
+  const temp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'release-handoff-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const source = path.join(temp, 'source with spaces');
+  fs.mkdirSync(source);
+  for (const name of ['bin', 'shared', 'tests', 'Formula', 'completions', '.github', 'VERSION']) {
+    fs.cpSync(path.join(root, name), path.join(source, name), { recursive: true });
+  }
+  const git = args => {
+    const r = spawnSync('git', ['-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid',
+      '-c', 'commit.gpgsign=false', ...args], { maxBuffer: 16 * 1024 * 1024 });
+    assert.equal(r.status, 0, r.stderr.toString());
+    return r.stdout;
+  };
+  git(['init', '-b', 'master']);
+  git(['add', '.']);
+  git(['commit', '-m', 'Frozen packaging fixture']);
+  const commit = git(['rev-parse', 'HEAD']).toString().trim();
+  const archive = path.join(temp, 'candidate.tar.gz');
+  fs.writeFileSync(archive, git(['archive', '--format=tar.gz', '--prefix=candidate/', commit]));
+  const bundle = path.join(temp, 'handoff with spaces');
+  const renderer = path.join(root, '.github/scripts/render-staging-formula.rb');
+  const prepare = spawnSync('ruby', [renderer, '--handoff', archive, commit, source, bundle], { encoding: 'utf8' });
+  assert.equal(prepare.status, 0, prepare.stderr);
+  const manifest = JSON.parse(fs.readFileSync(path.join(bundle, 'release.json'), 'utf8'));
+  const verify = (sha = manifest.archive_sha256, ref = commit, tree = source) =>
+    spawnSync('ruby', [renderer, '--verify', bundle, ref, sha, tree], { encoding: 'utf8' });
+  const valid = verify();
+  assert.equal(valid.status, 0, valid.stderr);
+  assert.match(valid.stdout, /HANDOFF_VALID/);
+  assert.doesNotMatch(valid.stdout, /RELEASE_PREPARATION=PASS/, 'identity alone is not packaging completion');
+  assert.match(fs.readFileSync(path.join(bundle, 'OPERATIONS.md'), 'utf8'), new RegExp(commit));
+  assert.match(fs.readFileSync(path.join(bundle, 'OPERATIONS.md'), 'utf8'), new RegExp(manifest.archive_sha256));
+  assert.notEqual(verify('a'.repeat(64)).status, 0, 'a command pinned to another archive must fail');
+  assert.notEqual(verify(undefined, 'a'.repeat(40)).status, 0, 'a command pinned to another commit must fail');
+  const bundledArchive = path.join(bundle, 'archive.tar.gz');
+  fs.appendFileSync(bundledArchive, 'tamper');
+  assert.match(verify().stderr, /ARCHIVE_SHA256_MISMATCH/);
+  fs.copyFileSync(archive, bundledArchive);
+  const code = path.join(source, 'shared/profiles.mjs');
+  const before = fs.readFileSync(code);
+  fs.appendFileSync(code, '\n// fixture drift\n');
+  assert.match(verify().stderr, /SOURCE_MISMATCH/);
+  fs.writeFileSync(code, before);
+  const instructions = path.join(bundle, 'OPERATIONS.md');
+  const text = fs.readFileSync(instructions);
+  fs.unlinkSync(instructions);
+  assert.match(verify().stderr, /MISSING_HANDOFF_FILE.*OPERATIONS/);
+  const incomplete = spawnSync('bash', [path.join(root, 'tests/guardrail/runner.sh'), 'packaging',
+    bundle, commit, manifest.archive_sha256], { encoding: 'utf8' });
+  assert.notEqual(incomplete.status, 0);
+  assert.doesNotMatch(incomplete.stdout, /RELEASE_PREPARATION=PASS|Isolation negative-control suite/);
+  fs.writeFileSync(instructions, text);
+  fs.unlinkSync(path.join(bundle, 'opencode-team-staging.rb'));
+  assert.match(verify().stderr, /MISSING_HANDOFF_FILE.*opencode-team-staging/);
+  assert.equal(fs.existsSync(path.join(temp, 'installed.marker')), false, 'handoff generation never installs');
+});
