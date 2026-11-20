@@ -430,19 +430,24 @@ export async function setupGovernor(ctx, dependencies = {}) {
   // HTTP attempt and WebSocket handshake as well, without changing either.
   await ctx.session.hook('http.request', observedRequest('http.request', false, true));
   await ctx.session.hook('experimental.ws.handshake', observedRequest('experimental.ws.handshake', false, true));
-  await ctx.session.hook('retry', guarded(event => {
+  const quotaRetry = guarded(event => {
     if (!active(readQuotaState(file))) return;
     const status = event.error?.status;
-    // Denials and provider-class failures that signal budget or permission
-    // problems are not transient: retrying would consume the shared budget
-    // without a new admission decision. Transient 5xx keeps the native retry
-    // policy — every physical attempt still passes `http.request` admission,
-    // so a retry can never reach transport without a fresh quota check.
+    // Transient failures still pass transport admission on each attempt.
     if (event.error?.message?.includes('BEST_QUOTA_BLOCKED') || status === 429
         || status === 402 || status === 403) {
       event.decision = { retry: false };
     }
-  }));
+  });
+  await ctx.session.hook('retry', event => {
+    // A provider safety denial can first surface as a WebSocket transport error.
+    if (event.error?.code === 'misalignment_policy_violation'
+        || /\bmisalignment_policy_violation\b/.test(event.error?.message ?? '')) {
+      event.decision = { retry: false };
+      return;
+    }
+    return quotaRetry(event);
+  });
   await ctx.command.transform(editor => editor.add({ name: 'best-quota-refresh',
     description: 'Refresh subscription limits without inference', execute: guarded(() => refresh(true)) }));
   // Event lifecycle is optional only in isolated unit tests. The native plugin

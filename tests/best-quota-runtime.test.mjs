@@ -373,6 +373,19 @@ test('monitor records decisions but does not change execution; retry governor ne
   const retry = { error: { message: 'BEST_QUOTA_BLOCKED', status: 429 }, decision: { retry: true, delay: 0 } };
   await f.hooks.retry(retry);
   assert.equal(retry.decision.retry, true, 'monitor must not alter retries');
+  const safety = { error: { type: 'provider.transport',
+    message: 'misalignment_policy_violation: Potentially unintended activity' }, decision: { retry: true } };
+  await f.hooks.retry(safety);
+  assert.equal(safety.decision.retry, false, 'provider safety denials are terminal even in monitor');
+  await updateQuotaState(f.file, state => ({ ...state, policy: { ...state.policy, mode: 'active' } }));
+  const invalid = { error: { type: 'provider.invalid-request', code: 'misalignment_policy_violation' },
+    decision: { retry: true } };
+  await f.hooks.retry(invalid);
+  assert.deepEqual(invalid.decision, { retry: false });
+  const transient = { error: { type: 'provider.transport', status: 503 },
+    decision: { retry: true, delay: 1000 } };
+  await f.hooks.retry(transient);
+  assert.deepEqual(transient.decision, { retry: true, delay: 1000 });
 });
 
 test('stale telemetry suspends the next model boundary of both admitted and new tasks', async t => {
