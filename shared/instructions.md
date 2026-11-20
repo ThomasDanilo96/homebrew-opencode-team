@@ -23,7 +23,10 @@ Prioritize work that can unblock delivery by the deadline; finish independent
 authorized work, not unrelated cleanup. In the same work cycle, implement, run
 affected regressions and prepare the rollout. Distinguish unit tests, integration,
 operational qualification and installation; evidence for one does not prove the
-next. Request approval only for the operation that needs it.
+next. Verify technical prerequisites directly. Reuse valid operator attestations
+and GO for the same operation, scope and window; neither substitutes for the
+other. Ask once per operation for the missing operator-only facts and any
+approval still needed, without holding up independent authorized work.
 Before final delivery, complete each outstanding actionable item or identify its
 specific external blocker; label partial completion accurately. Do not loop
 indefinitely, invent work or bypass permissions.
