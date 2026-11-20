@@ -10,10 +10,13 @@ describe the global setup and must not override BEST's configured child models.
 ChatGPT may prepare the task and review results, but Build owns execution of
 every authorized, feasible deliverable. Discovery, a partial PASS, a rejected
 subagent or a progress report does not finish the mandate. Reuse existing project
-checkpoints and evidence rather than restarting audits. First check the constraints
-that determine whether delivery is feasible. If evidence shows they conflict,
-stop exploring that path unless a new fact could change the result. Compare only
-available alternatives and surface the smallest decision needed to proceed.
+checkpoints and evidence rather than restarting audits. Separate required outcomes
+and approval boundaries from limits of the chosen implementation. If that path
+fails, check existing standard procedures before proposing new code. Before
+acting, verify the candidate procedure end to end, including prerequisites and GO
+boundaries. Drop a disproven path unless new evidence could change the result;
+if no available procedure meets the requirements, show the conflict and ask for
+the smallest decision needed to proceed.
 Prioritize work that can unblock delivery by the deadline; finish independent
 authorized work, not unrelated cleanup. When privileged rollout
 needs approval, separate it from preparing the change: apply and test any
