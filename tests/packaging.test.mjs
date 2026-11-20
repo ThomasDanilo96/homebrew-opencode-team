@@ -92,9 +92,9 @@ test('published archive identity stays immutable while candidate versions can ad
   const url = source.match(/^  url "([^"]+)"$/m)[1];
   const sha = source.match(/^  sha256 "([0-9a-f]{64})"$/m)[1];
   // Pin the published archive, not HEAD: CI must not compare a commit to itself.
-  const publishedVersion = '0.3.9';
+  const publishedVersion = '0.3.10';
   const oldURL = `https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v${publishedVersion}.tar.gz`;
-  const oldSHA = '18fb283d5b33ec2a672363649b16ae56c33450a678e7b131ed818d3505423bd8';
+  const oldSHA = '3859941792fa7897dfa555838f394946933a5b70dc7932ee621e107a21b6bf20';
   const version = fs.readFileSync(path.join(root, 'VERSION'), 'utf8').trim();
   assert.match(version, /^\d+\.\d+\.\d+$/);
   const compare = (a, b) => a.split('.').reduce((order, part, i) => order || Math.sign(Number(part) - Number(b.split('.')[i])), 0);

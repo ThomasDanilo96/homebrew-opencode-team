@@ -391,10 +391,9 @@ pending rollout checks](docs/validation.md), and [V2 compatibility/sources](docs
 
 ## Release preparation
 
-`VERSION` is **0.3.10**, a locally qualified candidate carrying the GPT-6.2 Sol
-BEST routing (`7cf02bf`) and the FREE Hybrid transformation. The stable
-formula URL/checksum remain pinned to published **0.3.9** until the release gates
-pass. Do not use the local staging checksum as an official release checksum.
+`VERSION` identifies the source release. The stable formula is updated separately
+after the immutable tag archive has been downloaded and hashed. Do not use a
+local staging checksum as an official release checksum.
 See [Quota Governor diagnostics](docs/best-quota-governor.md). The user Extra
 Usage OFF declaration is now persistent and revocable (no 1-hour expiry), so it
 no longer blocks publication; global activation and local upgrade still require
@@ -404,7 +403,7 @@ The workflow deliberately separates candidate testing from publication. The
 following is the release procedure; completed gates are recorded in validation:
 
 1. After approval, commit and push the reviewed source to `prerelease/vVERSION`
-    using the candidate `VERSION` (currently `0.3.10`).
+    using the candidate `VERSION`.
    Run **Homebrew Install** manually on that branch: Phase A installs the exact
    candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
 2. Only after Phase A succeeds, authorize the immutable `vVERSION` tag on the
