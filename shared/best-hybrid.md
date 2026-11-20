@@ -44,9 +44,11 @@ unchanged hidden summary/compaction roles are retained only for continuity.
 
 - Simple work: Build implements and verifies directly, without unnecessary children.
 - Start complex mandates with native `/goal <objective>` on OpenCode 2.3.2.
-  Reference the current checkpoint, the remaining acceptance checks and the
-  authorization boundary. Goal review spends subscription quota and does not grant
-  approval. Ordinary prompts stay direct; use `/goal pause` to stop an active goal.
+  Reference the checkpoint and bound each deliverable with acceptance checks.
+  Close it once those checks pass; do not expand it to fill time waiting for GO.
+  If a continuation requests work beyond those checks, report the outstanding
+  gate instead of adding checks. Goal review does not grant approval.
+  Ordinary prompts stay direct; use `/goal pause` to stop an active goal.
 - For substantial work, use the initial scope check to identify ready independent
   tasks. Dispatch useful lanes before doing their discovery yourself: Explore
   for targeted discovery, General for scoped
