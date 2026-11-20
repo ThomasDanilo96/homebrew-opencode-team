@@ -1265,8 +1265,8 @@ padre non consuma uno slot subagente: la riserva percentuale resta su
 Per compatibilità con istanze già caricate e rollback, gli eventi High salvano
 modello e variante, omettendo il nuovo enum opzionale `activityClass`: i nuovi
 lettori inferiscono High da quei campi; i vecchi continuano a leggere lo stato.
-I vecchi processi non acquisiscono automaticamente il nuovo router; nessuna
-sessione esistente viene riscritta o riavviata. Il profilo locale già riferisce
+I plugin già caricati mantengono il proprio codice fino al normale reload; nessun
+reload forzato, riscrittura o riavvio di sessioni esistenti. Il profilo locale già riferisce
 questo plugin nel checkout canonico: nessun setup o cambio configurazione necessario.
 
 **Qualifica reale:** un primo tentativo è stato fermato prima dell'invio da
