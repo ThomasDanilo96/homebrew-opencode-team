@@ -1249,9 +1249,9 @@ richiesta, non la selezione persistente della sessione:
 - Le varianti esplicite Low/Medium/High sono preservate: High esplicito passa
   o viene bloccato, mai sostituito silenziosamente. Una selezione del solo
   modello, normalizzata dal runtime come `default`, non fissa l'effort.
-- L'effort resta stabile nel ciclo di esecuzione; un nuovo limite può degradare
-  High automatico a Medium al confine della richiesta successiva. Non si
-  rialza fino al ciclo seguente. HTTP/retry non cambiano effort.
+- La classificazione resta stabile nel ciclo di esecuzione, ma l'ammissione si
+  rivaluta a ogni richiesta: High automatico può passare a Medium o tornare a
+  High. HTTP e retry non cambiano l'effort di una richiesta già preparata.
 
 High ha la classe `reasoning-sol-high`. Il bootstrap non assume un moltiplicatore:
 riserva il massimo fra margine di sicurezza esistente, due punti di incertezza
@@ -1259,8 +1259,8 @@ degli endpoint e gli envelope Sol osservati su uno scenario di 15 minuti
 (orizzonte del lease, non durata prevista). Senza calibrazione disponibile o con
 finestre insufficienti High non passa. Restano binding OAuth, trasporto verificato,
 riserve atomiche condivise e blocchi EXHAUSTED/UNKNOWN/stale. La risoluzione del
-padre non consuma uno slot subagente: la riserva percentuale resta su
-`model.request`. Nessun nuovo classificatore LLM, scheduler o stato persistente.
+padre non consuma uno slot subagente: la riserva percentuale avviene prima della
+preparazione nativa. Nessun nuovo classificatore LLM o scheduler.
 
 Per compatibilità con istanze già caricate e rollback, gli eventi High salvano
 modello e variante, omettendo il nuovo enum opzionale `activityClass`: i nuovi
@@ -1360,12 +1360,16 @@ High anziché Medium con 30 punti prenotati, e tre High concorrenti su soli
 **Correzione minima nel runtime esistente:** risoluzione e prenotazione sotto lo
 stesso lock; admission e trasporto riusano solo il receipt vivo di quella
 richiesta e il suo envelope congelato, ricontrollando quota, account e sicurezza.
-High automatico può scendere a Medium e poi Low se presenti nell'inventario e
-ammissibili; nessuna sostituzione di selezioni esplicite, provider o modello.
+High automatico può scendere a Medium se ammissibile. Nelle richieste successive
+della stessa esecuzione si rivaluta High; Low resta riservato alle richieste
+classificate come semplici. Nessuna sostituzione di selezioni esplicite, provider
+o modello.
 La ripresa di un subagente già in corso mantiene il trattamento preesistente.
 Eventi di completamento rilasciano le riserve terminate senza cancellare quelle
-di altre sessioni o di richieste successive. Schema persistente invariato:
-nessuna migrazione richiesta alle istanze già caricate.
+di altre sessioni o di richieste successive. I lease di admission registrano il
+costo per finestra, senza addebitare il massimo a tutte le finestre. Il massimo
+resta come riserva conservativa per i lease precedenti, le finestre non presenti
+nella riserva e i lettori precedenti; nessuna migrazione dello stato.
 
 **Verifiche:** regressioni concorrenza, self-counting, variazione delle stime,
 rilascio, eventi ritardati, inventario nativo, quota esaurita e passaggio
@@ -1391,3 +1395,11 @@ restano sul codice precedente fino al normale rinnovo: nessun riavvio o reload
 forzato. Nessuna inferenza reale eseguita per qualificare il nuovo codice; il
 test loopback non certifica OAuth live. FREE, credenziali, autorizzazioni,
 isolamento e conferme Extra Usage non modificati; nessuna pubblicazione.
+
+**Verifica del follow-up:** 147 test quota/CLI/essential/routing e 13 controlli
+di isolamento PASS; test nativo 2.3.2 con trasporto loopback PASS. Riprodotta
+anche una gara macOS sul lock: `lstat` può restituire il vecchio inode già
+scollegato (`nlink=0`); l'acquisizione esclusiva resta affidata a `O_EXCL`.
+Il lettore precedente (`26dd27c`) ha letto e riscritto uno stato sintetico con
+lease per finestra; rimane il massimo conservativo e la policy resta `active`.
+Nessun rollback applicato allo stato o al runtime live.

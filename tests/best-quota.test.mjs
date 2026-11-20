@@ -370,6 +370,27 @@ test('independent processes serialize updates through the same lock', async (t) 
   assert.equal((await readQuotaState(file)).usage.length, 48);
 });
 
+test('lock acquisition tolerates a holder unlinking the lock during lstat', async t => {
+  const { file } = fixture(t);
+  await updateQuotaState(file, state => state);
+  const lock = `${file}.lock`;
+  fs.writeFileSync(lock, '', { mode: 0o600 });
+  const lstat = fs.lstatSync;
+  let raced = false;
+  t.mock.method(fs, 'lstatSync', (name, ...args) => {
+    const stat = lstat(name, ...args);
+    if (name === lock) {
+      fs.unlinkSync(lock);
+      stat.nlink = 0;
+      raced = true;
+    }
+    return stat;
+  });
+  await updateQuotaState(file, state => ({ ...state, policy: { mode: 'active' } }));
+  assert.ok(raced);
+  assert.equal(readQuotaState(file).policy.mode, 'active');
+});
+
 test('existing non-private state directories are rejected without changing permissions', async (t) => {
   const { dir } = fixture(t);
   const publicDir = path.join(dir, 'public');

@@ -767,15 +767,15 @@ test('native Build effort resolution applies Low, default Medium and qualified H
   await seedSolCalibration(f.file);
   f.ctx.agent.get = async () => ({ data: { model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } } });
   f.ctx.model.list = async () => ({ data: [{ providerID: 'openai', id: 'gpt-6.2-sol',
-    variants: ['low', 'medium', 'high'].map(id => ({ id })) }] });
+    variants: ['low', 'medium', 'high', 'xhigh'].map(id => ({ id })) }] });
   let session = { agent: 'build', time: { busy: 1 } };
   let messages = [{ type: 'user', text: 'Reply exactly OK' }];
   f.ctx.session.get = async () => session;
   f.ctx.session.context = async () => messages;
   f.ctx.session.switchModel = async () => assert.fail('automatic effort must not overwrite user/session selections');
-  const resolve = async () => {
+  const resolve = async (variant = 'medium') => {
     const event = { sessionID: 'effort', agent: 'build', kind: 'primary',
-      model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } };
+      model: { providerID: 'openai', id: 'gpt-6.2-sol', variant } };
     await f.hooks['experimental.model.resolve'](event);
     await f.hooks['model.request'](event);
     await updateQuotaState(f.file, s => ({ ...s, leases: [] }));
@@ -814,6 +814,9 @@ test('native Build effort resolution applies Low, default Medium and qualified H
       model: { providerID: 'openai', id: 'gpt-6.2-sol', variant } };
     assert.equal(await resolve(), variant, 'explicit choice wins over automatic signals');
   }
+  session.model.variant = 'xhigh';
+  assert.equal(await resolve('xhigh'), 'xhigh', 'non-automatic variants pass through unchanged');
+  session.model.variant = 'high';
   await updateQuotaState(f.file, s => ({ ...s, leases: [{
     id: 'running-child', provider: 'openai', scope: 'routing', sessionID: 'child',
     ownerPid: process.pid, at: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(),
@@ -916,16 +919,135 @@ test('automatic effort counts valid same-session leases and freezes its admitted
   await f.hooks['experimental.ws.handshake'](request);
   assert.deepEqual(readQuotaState(f.file).leases.map(l => l.id), planned.map(l => l.id), 'no double reservation at admission or transport');
   const lower = { ...request, sessionID: 'lower', model: { ...request.model } };
+  await assert.rejects(f.hooks['experimental.model.resolve'](lower), /BEST_QUOTA_BLOCKED/,
+    'a complex mandate must not use Low merely because Low fits');
+  assert.equal(readQuotaState(f.file).leases.length, planned.length);
+  f.ctx.session.context = async () => [{ type: 'user', text: 'Reply exactly OK' }];
   await f.hooks['experimental.model.resolve'](lower);
-  assert.equal(lower.model.variant, 'low', 'Low remains an actual bounded alternative if Medium no longer fits');
+  assert.equal(lower.model.variant, 'low', 'Low remains available for a mandate classified as simple');
   const explicit = { ...request, sessionID: 'explicit', model: { ...request.model, variant: 'high' } };
   f.ctx.session.get = async () => ({ agent: 'build', model: explicit.model, time: { busy: 2 } });
   await assert.rejects(f.hooks['experimental.model.resolve'](explicit), /BEST_QUOTA_BLOCKED/);
   assert.equal(explicit.model.variant, 'high', 'an explicit High cannot silently downgrade');
   f.ctx.session.get = async () => ({ agent: 'build', time: { busy: 3 } });
+  f.ctx.session.context = async () => [{ type: 'synthetic', metadata: { source: 'goal' } }];
   f.ctx.model.list = async () => ({ data: [{ providerID: 'openai', id: 'gpt-6.2-sol', variants: [{ id: 'high' }] }] });
   await assert.rejects(f.hooks['experimental.model.resolve']({ ...request, sessionID: 'unsupported-lower' }),
     /BEST_QUOTA_BLOCKED/, 'fallback must not invent unavailable native variants');
+});
+
+test('a complex execution can return to High after its temporary Medium envelope clears', async t => {
+  const bus = new EventEmitter();
+  const f = await concurrentEffortFixture(t, {
+    subscribe: async function* ({ signal }) {
+      for await (const [event] of on(bus, 'event', { signal })) yield event;
+    },
+  });
+  const request = { sessionID: 'continued', agent: 'build', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } };
+  await updateQuotaState(f.file, s => {
+    s.snapshots.filter(x => x.provider === 'openai').forEach(x => { x.windows.weekly.used = 90; });
+    return s;
+  });
+  await f.hooks['experimental.model.resolve'](request);
+  assert.equal(request.model.variant, 'medium');
+  await f.hooks['model.request'](request);
+  bus.emit('event', { type: 'session.step.ended', created: Date.now() + 1, data: { sessionID: request.sessionID } });
+  await new Promise(setImmediate);
+  assert.equal(readQuotaState(f.file).leases.length, 0);
+  await updateQuotaState(f.file, s => {
+    s.snapshots.filter(x => x.provider === 'openai').forEach(x => { x.windows.weekly.used = 65; });
+    return s;
+  });
+  await f.hooks['experimental.model.resolve'](request);
+  assert.equal(request.model.variant, 'high', 'the previous fallback must not replace the mandate effort');
+  await f.hooks['model.request'](request);
+});
+
+test('a tight window reported after High resolution blocks the prepared transport', async t => {
+  const f = await concurrentEffortFixture(t);
+  const request = { sessionID: 'new-window', agent: 'build', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } };
+  await f.hooks['experimental.model.resolve'](request);
+  assert.equal(request.model.variant, 'high');
+  await f.hooks['model.request'](request);
+  await updateQuotaState(f.file, s => {
+    for (const snapshot of s.snapshots.filter(x => x.provider === 'openai')) {
+      snapshot.windows.rolling = { ...snapshot.windows.weekly, used: 99, limitWindowSeconds: 18000 };
+    }
+    return s;
+  });
+  await assert.rejects(f.hooks['http.request'](request), /calibrated-request-envelope/);
+  const medium = { ...request, sessionID: 'removed-window', model: { ...request.model, variant: 'medium' } };
+  f.ctx.session.get = async () => ({ agent: 'build', model: medium.model, time: { busy: 2 } });
+  await updateQuotaState(f.file, s => {
+    for (const snapshot of s.snapshots.filter(x => x.provider === 'openai')) snapshot.windows.rolling.used = 60;
+    return s;
+  });
+  await f.hooks['experimental.model.resolve'](medium);
+  await f.hooks['model.request'](medium);
+  await updateQuotaState(f.file, s => {
+    for (const snapshot of s.snapshots.filter(x => x.provider === 'openai')) delete snapshot.windows.rolling;
+    return s;
+  });
+  await f.hooks['http.request'](medium);
+});
+
+test('automatic High qualification uses the account current at the routing lock', async t => {
+  const f = await concurrentEffortFixture(t);
+  const model = { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' };
+  const prepared = { sessionID: 'prepared-on-first-account', agent: 'build', kind: 'primary', model };
+  await f.hooks['experimental.model.resolve'](prepared);
+  assert.equal(prepared.model.variant, 'high');
+  const inventory = f.ctx.model.list;
+  f.ctx.model.list = async () => {
+    const connection = f.auth.binding = 'b'.repeat(64);
+    await updateQuotaState(f.file, s => {
+      s.sources.openai.connection = connection;
+      for (const snapshot of s.snapshots.filter(x => x.provider === 'openai')) snapshot.connection = connection;
+      for (const usage of s.usage.filter(x => x.provider === 'openai' && x.variant === 'medium')) usage.connection = connection;
+      return s;
+    });
+    return inventory();
+  };
+  const request = { sessionID: 'changed-account', agent: 'build', kind: 'primary', model };
+  await f.hooks['experimental.model.resolve'](request);
+  assert.equal(request.model.variant, 'medium', 'only the previous account completed High');
+  await assert.rejects(f.hooks['model.request'](prepared), /account-changed/);
+  await f.hooks['model.request'](request);
+});
+
+test('a reservation in a generous window does not consume that percent in every window', async t => {
+  const f = await concurrentEffortFixture(t);
+  const at = new Date().toISOString(), expiresAt = new Date(Date.now() + 60000).toISOString();
+  await updateQuotaState(f.file, s => {
+    const snapshots = s.snapshots.filter(x => x.provider === 'openai');
+    for (const [index, snapshot] of snapshots.entries()) {
+      snapshot.windows.weekly.used = 92;
+      snapshot.windows.rolling = { ...snapshot.windows.weekly, used: index ? 83 : 78, limitWindowSeconds: 18000 };
+    }
+    s.leases = [{ id: 'multiwindow', provider: 'openai', scope: 'admission', percent: 10,
+      percentByWindow: { rolling: 10, weekly: 2 }, ownerPid: process.pid, at, expiresAt }];
+    return s;
+  });
+  const request = { sessionID: 'second-window', agent: 'build', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } };
+  await f.hooks['experimental.model.resolve'](request);
+  assert.equal(request.model.variant, 'medium');
+  await f.hooks['model.request'](request);
+  await f.hooks['http.request'](request);
+  const leases = readQuotaState(f.file).leases;
+  assert.equal(leases.length, 2);
+  const reserved = leases.find(lease => lease.sessionID === request.sessionID);
+  assert.ok(reserved.percentByWindow.rolling > reserved.percentByWindow.weekly);
+  assert.equal(reserved.percent, reserved.percentByWindow.rolling);
+  // An older instance can drop the optional map; its scalar remains fail-closed.
+  await updateQuotaState(f.file, s => {
+    delete s.leases[0].percentByWindow;
+    return s;
+  });
+  await assert.rejects(f.hooks['experimental.model.resolve']({ ...request, sessionID: 'legacy-scalar' }),
+    /BEST_QUOTA_BLOCKED/);
 });
 
 test('concurrent native resolutions reserve once, fall back before preparation and release only completed requests', async t => {

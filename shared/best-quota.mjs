@@ -441,9 +441,9 @@ export function liveLeases(leases, now = Date.now()) {
 }
 
 // Percent points of one provider already committed by in-flight requests.
-export function reservedPercent(leases, provider) {
+export function reservedPercent(leases, provider, window) {
   return (Array.isArray(leases) ? leases : []).reduce((total, lease) =>
-    total + (lease.provider === provider && finite(lease.percent) ? lease.percent : 0), 0);
+    total + (lease.provider === provider ? lease.percentByWindow?.[window] ?? lease.percent ?? 0 : 0), 0);
 }
 
 export function decideQuota({ kind, candidates, forecast: prediction, previous, now = Date.now(), options = {} }) {
@@ -458,8 +458,9 @@ export function decideQuota({ kind, candidates, forecast: prediction, previous, 
   // Percent points already committed by other instances' in-flight work. The
   // shared state file is the only place these are counted, so parallel BEST
   // terminals cannot each spend the same remaining headroom.
-  const reserved = provider => {
-    const value = options.reserved?.[provider];
+  const reserved = (provider, window) => {
+    const configured = options.reserved?.[provider];
+    const value = object(configured) ? configured[window] : configured;
     return finite(value) && value > 0 ? Math.min(value, 100) : 0;
   };
   const estimates = cleanExpectedEstimates(options.expectedPercentByKind);
@@ -476,22 +477,22 @@ export function decideQuota({ kind, candidates, forecast: prediction, previous, 
     if (!provider || !['NORMAL', 'CAUTION', 'CRITICAL'].includes(provider.state) || !object(provider.windows) || !Object.keys(provider.windows).length) return false;
     try {
       if (now - timestamp(provider.at) > staleAfterMs || timestamp(provider.at) > now) return false;
-      const held = reserved(candidate.provider);
       // Every window must still hold real budget after in-flight reservations:
       // the most restrictive one governs, and a reset in one window never renews
       // another (a weekly reset does not restore an exhausted month). The safety
       // margin is a routing preference only; necessity may spend budget down to 0%.
-      return Object.values(provider.windows).every(window => !['EXHAUSTED', 'UNKNOWN'].includes(window.state)
+      return Object.entries(provider.windows).every(([key, window]) => !['EXHAUSTED', 'UNKNOWN'].includes(window.state)
         && window.freshness === 'FRESH' && timestamp(window.resetAt) > now && finite(window.used) && finite(window.remaining)
-        && window.remaining - held > 0 && window.remaining - held >= (estimate(candidate) ?? 0));
+        && window.remaining - reserved(candidate.provider, key) > 0
+        && window.remaining - reserved(candidate.provider, key) >= (estimate(candidate) ?? 0));
     } catch { return false; }
   };
   const available = eligible.filter(admission);
   if (!available.length) return block('quota-unavailable');
-  const budget = candidate => Math.min(...Object.values(prediction.providers[candidate.provider].windows)
-    .map(window => Math.max(0, window.remaining - safetyMarginPercent - reserved(candidate.provider))));
-  const score = candidate => Math.min(...Object.values(prediction.providers[candidate.provider].windows).map(window => {
-    const headroom = Math.max(0, window.remaining - safetyMarginPercent - reserved(candidate.provider));
+  const budget = candidate => Math.min(...Object.entries(prediction.providers[candidate.provider].windows)
+    .map(([key, window]) => Math.max(0, window.remaining - safetyMarginPercent - reserved(candidate.provider, key))));
+  const score = candidate => Math.min(...Object.entries(prediction.providers[candidate.provider].windows).map(([key, window]) => {
+    const headroom = Math.max(0, window.remaining - safetyMarginPercent - reserved(candidate.provider, key));
     if (window.observedPerHour > 0 && window.sustainablePerHour > 0) {
       const pacingHeadroom = Math.max(0, 100 * (1 - window.observedPerHour / window.sustainablePerHour));
       return Math.min(headroom, pacingHeadroom);
@@ -521,7 +522,7 @@ export function decideQuota({ kind, candidates, forecast: prediction, previous, 
 }
 
 // Reject symlinks in *every* existing path component, not just the final file.
-function checkPath(file, create = false) {
+function checkPath(file, create = false, contendedLock = false) {
   if (typeof file !== 'string' || !file || file.includes('\0')) throw new Error('unsafe quota path');
   const absolute = path.resolve(file);
   const parts = absolute.split(path.sep).filter(Boolean);
@@ -544,7 +545,12 @@ function checkPath(file, create = false) {
       if (i === parts.length - 2 && ((stat.mode & 0o077) !== 0 || stat.uid !== process.getuid())) {
         throw new Error('quota directory must be private (0700) and owned by the current user');
       }
-    } else if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid()) throw new Error('unsafe quota file or hardlink');
+    } else {
+      // macOS can report the old regular inode after another writer unlinks
+      // its lock. O_EXCL still decides who owns the current directory entry.
+      if (contendedLock && stat.isFile() && stat.nlink === 0 && stat.uid === process.getuid()) continue;
+      if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid()) throw new Error('unsafe quota file or hardlink');
+    }
   }
   return absolute;
 }
@@ -689,6 +695,19 @@ function cleanState(value, now) {
       // Percent points this in-flight request already committed to the shared
       // budget. Absent means the request committed nothing measurable.
       if (lease.percent !== undefined) result.percent = number(lease.percent, 'lease percent', 0, 100);
+      if (lease.percentByWindow !== undefined) {
+        if (!object(lease.percentByWindow) || lease.scope !== 'admission' || !finite(result.percent)) {
+          throw new Error('invalid lease window envelope');
+        }
+        const entries = Object.entries(lease.percentByWindow);
+        if (!entries.length || entries.length > 64 || entries.some(([key, percent]) =>
+          !/^[a-z][a-z0-9_]{0,47}$/.test(key) || ['constructor', 'prototype'].includes(key)
+          || !finite(percent) || percent < 0 || percent > result.percent)
+          || Math.max(...entries.map(([, percent]) => percent)) !== result.percent) {
+          throw new Error('invalid lease window envelope');
+        }
+        result.percentByWindow = Object.fromEntries(entries);
+      }
       if (lease.sessionID !== undefined) {
         if (typeof lease.sessionID !== 'string' || !/^[a-z0-9][a-z0-9._:-]{0,127}$/i.test(lease.sessionID)) throw new Error('invalid lease session');
         result.sessionID = lease.sessionID;
@@ -787,7 +806,7 @@ export async function updateQuotaState(file, callback, options = {}) {
   const deadline = performance.now() + lockTimeoutMs;
   while (descriptor === undefined) {
     checkPath(absolute);
-    checkPath(lock);
+    checkPath(lock, false, true);
     try { descriptor = fs.openSync(lock, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600); }
     catch (error) {
       if (error.code !== 'EEXIST') throw error;

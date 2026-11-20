@@ -92,7 +92,17 @@ export async function setupGovernor(ctx, dependencies = {}) {
     return estimateQuotaCost(calibration, name, Math.min(Math.max(...durations), requestLeaseMs)).windows;
   }
   const fitsObservedRequest = (cost, provider, held) => cost !== null && Object.entries(cost).every(([window, percent]) =>
-    percent <= provider.windows[window]?.remaining - held);
+    percent <= provider.windows[window]?.remaining - held[window]);
+  const heldByWindow = (leases, provider, prediction) => Object.fromEntries(
+    Object.keys(prediction.providers[provider].windows ?? {}).map(window =>
+      [window, reservedPercent(leases, provider, window)]));
+  const reservationEnvelope = (decision, cost, provider) => {
+    const percentByWindow = Object.fromEntries(Object.keys(provider.windows).map(window =>
+      [window, Math.max(decision.estimatedTaskPercent ?? 0, cost[window] ?? 0)]));
+    // Older writers discard unknown fields and continue charging the largest
+    // reservation to all windows. Missing windows must use that same fallback.
+    return { percent: Math.max(...Object.values(percentByWindow)), percentByWindow };
+  };
   let refreshPromise, lastRefresh = 0;
   async function refresh(force = false) {
     if (refreshPromise) return refreshPromise;
@@ -116,7 +126,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
     hookVerified: state.runtime?.version === ctx.app.version && state.runtime?.hookVerified === true,
   } })))();
   await guarded(() => refresh())();
-  async function choose(agent, models, leaseID, sessionID, reserveRequest = false) {
+  async function choose(agent, models, leaseID, sessionID, reserveRequest) {
     await refresh();
     const { data: inventory } = await ctx.model.list();
     const goCertified = (await goPaymentSafety(readQuotaState(file))).certified === true;
@@ -134,8 +144,9 @@ export async function setupGovernor(ctx, dependencies = {}) {
       // Percent points already committed by in-flight admissions (this and
       // other instances) so parallel terminals cannot spend one budget twice.
       const reserved = Object.fromEntries(['opencode-go', 'openai'].map(provider =>
-        [provider, reservedPercent(current.leases.filter(lease =>
-          reserveRequest || !sessionID || lease.sessionID !== sessionID), provider)]));
+        [provider, heldByWindow(current.leases.filter(lease =>
+          reserveRequest || !sessionID || lease.sessionID !== sessionID), provider, prediction)]));
+      const openaiSource = current.sources.openai;
       const candidates = models.filter(value => inventory.some(m => m.providerID === value.provider
         && m.id === value.model.split('/').slice(1).join('/').split('#')[0] && m.enabled !== false
         && (!(reserveRequest || value.model === 'openai/gpt-6.2-sol#high')
@@ -144,6 +155,11 @@ export async function setupGovernor(ctx, dependencies = {}) {
             && l.scope !== 'admission' && (!sessionID || l.sessionID !== sessionID)).length
           < (value.provider === 'opencode-go' ? 2 : 1) * instanceCapacity)
         .filter(value => !active(current) || value.provider !== 'opencode-go' || goCertified)
+        .filter(value => reserveRequest !== 'automatic' || value.model !== 'openai/gpt-6.2-sol#high'
+          || (openaiSource?.status === 'LIVE' && openaiSource.connection
+            && openaiSource.connection === prediction.providers.openai.connection
+            && current.usage.some(usage => usage.connection === openaiSource.connection && usage.output > 0
+              && usage.durationMs > 0 && classifyActivity(usage) === 'reasoning-sol-high')))
         // No invented starting allowance for discovery. This excludes only
         // automatic MiMo routing; independent candidates remain eligible.
         .filter(value => classifyActivity({ provider: value.provider, model: value.model.split('#')[0] }) !== 'discovery-mimo'
@@ -164,12 +180,13 @@ export async function setupGovernor(ctx, dependencies = {}) {
       current.decisions.push({ ...decision, scope: 'routing', enforced: active(current) });
       if (reserveRequest && active(current) && !decision.blocked) {
         const cost = observedRequestCost(decision.candidate, current, prediction, calibration);
-        const percent = Math.max(decision.estimatedTaskPercent ?? 0, ...Object.values(cost));
+        const envelope = reservationEnvelope(decision, cost, prediction.providers[decision.candidate.provider]);
         const id = randomUUID();
         current.leases.push({ id, provider: decision.candidate.provider, ownerPid: process.pid,
-          scope: 'admission', percent, sessionID, at: new Date().toISOString(),
+          scope: 'admission', ...envelope,
+          sessionID, at: new Date().toISOString(),
           expiresAt: new Date(Date.now() + requestLeaseMs).toISOString() });
-        reservation = { id, model: decision.candidate.model, cost,
+        reservation = { id, model: decision.candidate.model, cost: envelope.percentByWindow,
           connection: prediction.providers[decision.candidate.provider].connection, recorded: false };
       }
       if (leaseID && active(current) && !decision.blocked) {
@@ -339,14 +356,18 @@ export async function setupGovernor(ctx, dependencies = {}) {
       if (provider.connection !== binding) blocked('account-changed');
       if (provider.confirmedExhausted || ['EXHAUSTED', 'UNKNOWN'].includes(provider.state)) blocked('quota-unavailable');
       const pending = requestReservations.get(`${event.sessionID}:${event.kind}`);
+      if (pending?.model === selected.model && pending.connection !== binding) blocked('account-changed');
       // Reuse only this exact request's live receipt, never every reservation
       // sharing its session. Recheck quota and account, not a changed estimate
       // after the request (including its effort) has already been prepared.
       const own = pending && (!record || !pending.recorded) && pending.model === selected.model
-        && pending.connection === binding && current.leases.find(lease => lease.id === pending.id);
-      const held = reservedPercent((current.leases ?? []).filter(lease =>
-        lease.id !== own?.id && !(joining && lease.sessionID === event.sessionID)), event.model.providerID);
-      const cost = own ? pending.cost : observedRequestCost(selected, current, prediction, calibrateQuota(current));
+        && current.leases.find(lease => lease.id === pending.id);
+      const held = heldByWindow(current.leases.filter(lease =>
+        lease.id !== own?.id && !(joining && lease.sessionID === event.sessionID)), event.model.providerID, prediction);
+      // The frozen envelope covers the original windows; newly reported ones
+      // must fit the conservative scalar already held on behalf of this request.
+      const cost = own ? Object.fromEntries(Object.keys(provider.windows).map(window =>
+        [window, pending.cost[window] ?? own.percent])) : observedRequestCost(selected, current, prediction, calibrateQuota(current));
       if (!fitsObservedRequest(cost, provider, held)) blocked('calibrated-request-envelope');
       decision = decideQuota({ kind: kinds[event.agent] ?? 'coding',
         candidates: [selected], forecast: prediction,
@@ -355,12 +376,12 @@ export async function setupGovernor(ctx, dependencies = {}) {
         current.decisions.push({ ...decision, scope: 'admission', enforced: true });
         if (!decision.blocked && !own) {
           leaseID = randomUUID();
-          current.leases ??= [];
+          const envelope = reservationEnvelope(decision, cost, provider);
           current.leases.push({ id: leaseID, provider: decision.candidate.provider, ownerPid: process.pid,
-            scope: 'admission', percent: Math.max(decision.estimatedTaskPercent ?? 0, ...Object.values(cost)), sessionID: event.sessionID,
+            scope: 'admission', ...envelope, sessionID: event.sessionID,
             at: new Date().toISOString(),
             expiresAt: new Date(Date.now() + requestLeaseMs).toISOString() });
-          reservation = { id: leaseID, model: selected.model, cost, connection: binding, recorded: true };
+          reservation = { id: leaseID, model: selected.model, cost: envelope.percentByWindow, connection: binding, recorded: true };
         }
         if (!decision.blocked && own) reservation = { ...pending, recorded: true };
       }
@@ -418,7 +439,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
     const previous = effortTurns.get(event.sessionID);
     const busy = session.time?.busy ?? 0;
     const continued = previous?.busy === busy && previous.explicit === explicit;
-    let variant = continued ? previous.variant : session.model?.variant ?? 'medium';
+    let effort = continued ? previous.effort : session.model?.variant ?? 'medium';
     if (!continued && !explicit) {
       const messages = await ctx.session.context({ sessionID: event.sessionID });
       const start = messages.findLastIndex(message => message.type === 'user'
@@ -434,26 +455,20 @@ export async function setupGovernor(ctx, dependencies = {}) {
       // files and attached specialist skills retain the Medium default.
       const simple = task?.type === 'user' && !task.files?.length && !task.skills?.length && !task.agents?.length
         && /^(?:reply exactly|respond exactly|rispondi esattamente)\s+\S+[.!]?$/i.test(task.text?.trim() ?? '');
-      variant = complex ? 'high' : simple ? 'low' : 'medium';
+      effort = complex ? 'high' : simple ? 'low' : 'medium';
     }
-    const connection = state.sources.openai?.connection;
-    const highQualified = state.sources.openai?.status === 'LIVE' && typeof connection === 'string'
-      && state.usage.some(usage => usage.connection === connection && usage.output > 0 && usage.durationMs > 0
-        && classifyActivity(usage) === 'reasoning-sol-high');
-    if (!explicit && variant === 'high' && !highQualified) variant = 'medium';
     const base = 'openai/gpt-6.2-sol';
-    const models = [candidate('build', `${base}#${variant}`)];
-    if (!explicit && variant === 'high') models.push(candidate('build', `${base}#medium`));
-    if (!explicit && variant !== 'low') models.push(candidate('build', `${base}#low`));
+    const models = [candidate('build', `${base}#${effort}`)];
+    if (!explicit && effort === 'high') models.push(candidate('build', `${base}#medium`));
     // Choose and reserve before native request construction, under the same
     // lock as admission. Another session cannot spend the chosen envelope.
-    const { state: chosenState, decision, reservation } = await choose('build', models, undefined, event.sessionID, true);
+    const { state: chosenState, decision, reservation } = await choose(
+      'build', models, undefined, event.sessionID, explicit ? 'explicit' : 'automatic');
     if (!active(chosenState)) return;
     if (decision.blocked) blocked(decision.reason);
     requestReservations.set(`${event.sessionID}:${event.kind}`, reservation);
-    variant = decision.candidate.model.split('#')[1];
-    event.model = { ...event.model, variant };
-    effortTurns.set(event.sessionID, { busy, explicit, variant });
+    event.model = { ...event.model, variant: decision.candidate.model.split('#')[1] };
+    effortTurns.set(event.sessionID, { busy, explicit, effort });
     await recordApplied(decision);
   }));
   // Regulation must reach the request, not only the record. This native prompt
