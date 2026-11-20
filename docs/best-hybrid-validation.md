@@ -405,3 +405,26 @@ One attempt, 90 seconds, at most 12 aggregate native model steps and three child
 stop at the first retry, permission/auth/provider error, with no paid fallback.
 Capture native exports/events and actual model IDs. Only this separately authorized
 observation can close real Sol's autonomous-dispatch acceptance.
+
+## Operational completion regression — 2026-11-20
+
+Real precedent: `docs/maintenance/opencode-team-036-reliability-audit.md`,
+sections 8–9, ended with local checks PASS but global PARTIAL / NO-GO:
+installation, overnight qualification and incident effects remained open.
+The existing completion rule distinguished test and installation gates, but did
+not explicitly prohibit equating service availability with incident closure.
+The correction consolidates that rule in `shared/instructions.md`.
+
+One native BEST behavioral check, exit 0, archived session
+`ses_e07696476ffe6B56XcJsOvuVCW` (`best run --archived --format json`).
+The simulated prompt supplied valid unit/integration PASS and rollout preparation,
+operational qualification not run, installation unauthorized, service available,
+incident still quarantined, recovery incomplete and unauthorized, with journals
+and receipts retained and no remaining executable authorized work.
+
+Observed: BEST reported code complete and rollout ready, qualification not run,
+installation awaiting explicit GO, service available but incident administratively
+open in quarantine, recovery awaiting separate GO and closure conditional on
+procedure verification. No global PASS or incident closure; no tool calls or
+repeated tests. This is a reporting regression, not a real installation, recovery
+or operational qualification. No other behavioral checks were run.
