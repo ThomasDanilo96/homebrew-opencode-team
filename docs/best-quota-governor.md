@@ -1231,4 +1231,89 @@ servizi, daemon, scheduler o database nuovi.
   verifica `activation.status` può risultare `BLOCKED` da
   `SUBSCRIPTION_QUOTAS_UNVERIFIED` (dati quota stale > 15 minuti perché
   l'istanza BEST non ha raccolto da ultimo) — gate preesistente e
-  indipendente dal hotfix, che si dissolve alla prossima raccolta.
+   indipendente dal hotfix, che si dissolve alla prossima raccolta.
+
+### 15. BEST Sol effort — qualifica locale del 20 novembre 2026
+
+Solo Build GPT-6.2 Sol su OpenCode 2.3.2 usa il confine nativo
+`experimental.model.resolve` del Governor. La decisione cambia il modello della
+richiesta, non la selezione persistente della sessione:
+
+- **Low:** una risposta singola inequivocabile (`Reply exactly TOKEN` e
+  equivalenti), senza allegati, agenti o skill. Non è una soglia sulla lunghezza.
+- **Medium:** default per lavoro non classificato positivamente.
+- **High:** mandato nativo `/goal`, allegati specialistici (`agent.name` o
+  `skill.id` sicurezza/architettura), oppure più task eseguibili nel mandato.
+  Serve una risposta High osservata per la stessa connessione OAuth e quota
+  ammissibile. Altrimenti la scelta automatica resta Medium.
+- Le varianti esplicite Low/Medium/High sono preservate: High esplicito passa
+  o viene bloccato, mai sostituito silenziosamente. Una selezione del solo
+  modello, normalizzata dal runtime come `default`, non fissa l'effort.
+- L'effort resta stabile nel ciclo di esecuzione; un nuovo limite può degradare
+  High automatico a Medium al confine della richiesta successiva. Non si
+  rialza fino al ciclo seguente. HTTP/retry non cambiano effort.
+
+High ha la classe `reasoning-sol-high`. Il bootstrap non assume un moltiplicatore:
+riserva il massimo fra margine di sicurezza esistente, due punti di incertezza
+degli endpoint e gli envelope Sol osservati su uno scenario di 15 minuti
+(orizzonte del lease, non durata prevista). Senza calibrazione disponibile o con
+finestre insufficienti High non passa. Restano binding OAuth, trasporto verificato,
+riserve atomiche condivise e blocchi EXHAUSTED/UNKNOWN/stale. La risoluzione del
+padre non consuma uno slot subagente: la riserva percentuale resta su
+`model.request`. Nessun nuovo classificatore LLM, scheduler o stato persistente.
+
+Per compatibilità con istanze già caricate e rollback, gli eventi High salvano
+modello e variante, omettendo il nuovo enum opzionale `activityClass`: i nuovi
+lettori inferiscono High da quei campi; i vecchi continuano a leggere lo stato.
+I vecchi processi non acquisiscono automaticamente il nuovo router; nessuna
+sessione esistente viene riscritta o riavviata. Il profilo locale già riferisce
+questo plugin nel checkout canonico: nessun setup o cambio configurazione necessario.
+
+**Qualifica reale:** un primo tentativo è stato fermato prima dell'invio da
+riserve concorrenti (`ses_e07463c31ffeS2u1nGqQiOOYUB`). Dopo nuova evidenza di
+headroom, una sola richiesta effettiva ha restituito `HIGH_OAUTH_OK`:
+`ses_e07420a86ffeRQH2GG4H8EPdN8`, modello registrato
+`openai/gpt-6.2-sol#high`, 48.234 input / 8 output, nessun tool,
+`model.request=PASSED` e handshake OAuth `liveSubscription=true`, modalità active.
+Low automatico reale: `ses_e073e90ebffer9hEWjWHQaKlLE`, variante `low`,
+48.350 input / 7 output, selezione persistente assente.
+
+**Unico confronto:** stessa fixture port, file iniziali e mandato; correzione,
+RED/GREEN con test congelati, riuso della precedente evidenza integration,
+bundle con SHA-256, installazione non autorizzata. Medium preesistente
+`ses_e07b5398dffeDcUv32gkR9Q85b`; High
+`ses_e0740e2d0ffelsMfz52DrgP1ok`.
+
+| Misura osservata | Medium | High |
+|---|---:|---:|
+| Requisiti autorizzati completati | sì | sì |
+| Richieste modello | 13 | 14 |
+| Durata primo/ultimo messaggio assistant | 57,318 s | 66,488 s |
+| Token input / output | 59.351 / 931 | 60.079 / 1.017 |
+| Token cache-read / reasoning | 651.008 / 0 | 704.768 / 83 |
+| Test unitari | un RED, un GREEN | un RED, un GREEN |
+| Report intermedi / deleghe | 0 / 0 | 0 / 0 |
+
+La delegazione era vietata dal mandato della fixture: non è misurata la sua
+qualità. High ha separato più comandi shell (8 anziché 6), non aggiunto verifiche
+unitarie. Nessun vantaggio dimostrato: non si promuove High a default.
+Le osservazioni quota condivisa adiacenti al confronto sono 62% prima e dopo:
+risoluzione e concorrenza impediscono di attribuire una percentuale al trial,
+non significano consumo zero. Cache, istruzioni e carico non costituiscono un
+A/B controllato; il risultato non prova prestazioni generali dei due effort.
+
+**Regressioni:** RED osservato per downgrade/classificazione/bootstrap e router
+mancante; ulteriore RED nativo ha individuato la variante implicita `default`.
+Finale: `bash tests/guardrail/runner.sh quota --experimental-test-coverage`,
+100/100 + 13 controlli OS PASS, copertura linee 96,15% sui tre moduli quota
+(runtime 93,28%). `node --test tests/best-quota-native.test.mjs`: PASS, con
+Low/Medium/High effettivi in loopback, selezioni intatte, subagenti, goal,
+restart, 503/429 e rifiuto API-key. I fixture sintetici non qualificano OAuth.
+Un precedente run ha esposto un errore intermittente nel test multiprocesso
+preesistente (`unsafe quota file or hardlink`); riesecuzione circoscritta e run
+finale PASS, senza cambiare quel test o i controlli filesystem.
+Sintassi Node e `git diff --check` PASS; nessun build/typecheck/linter configurato
+per questi moduli JavaScript. Review indipendente approvata dopo le correzioni.
+Il lettore quota di `f59587c` ha letto lo stato condiviso vivo con eventi High:
+rollback compatibile verificato. Hash delle configurazioni BEST/FREE e della
+guida personale FREE invariati; nessuna credenziale esportata o modificata.

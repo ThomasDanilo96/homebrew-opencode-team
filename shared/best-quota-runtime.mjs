@@ -20,6 +20,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
   const transportSafety = dependencies.transportSafety ?? verifySubscriptionTransport;
   const pinned = new Map();
   const leases = new Map();
+  const effortTurns = new Map();
   const asyncDelegation = ctx.app.version === '2.3.2';
   const active = state => state.policy?.mode === 'active';
   // A receipt belongs to one setup/cleanup lifecycle, not just a reusable PID.
@@ -135,8 +136,9 @@ export async function setupGovernor(ctx, dependencies = {}) {
         [provider, reservedPercent(current.leases.filter(lease =>
           !sessionID || lease.sessionID !== sessionID), provider)]));
       const candidates = models.filter(value => inventory.some(m => m.providerID === value.provider
-        && m.id === value.model.split('/').slice(1).join('/').split('#')[0] && m.enabled !== false))
-        .filter(value => !active(current) || (current.leases ?? []).filter(l => l.provider === value.provider
+        && m.id === value.model.split('/').slice(1).join('/').split('#')[0] && m.enabled !== false
+        && (value.model !== 'openai/gpt-6.2-sol#high' || m.variants?.some(variant => variant.id === 'high'))))
+        .filter(value => !leaseID || !active(current) || (current.leases ?? []).filter(l => l.provider === value.provider
             && l.scope !== 'admission' && (!sessionID || l.sessionID !== sessionID)).length
           < (value.provider === 'opencode-go' ? 2 : 1) * instanceCapacity)
         .filter(value => !active(current) || value.provider !== 'opencode-go' || goCertified)
@@ -148,7 +150,9 @@ export async function setupGovernor(ctx, dependencies = {}) {
           prediction.providers[value.provider], reserved[value.provider]));
       const routing = { kind: kinds[agent] ?? 'coding', candidates,
         forecast: prediction,
-        previous: current.decisions.findLast(d => d.scope === 'routing' && d.candidate?.agent === agent),
+        // A new Build execution may have different effort requirements. Provider
+        // hysteresis must not pin yesterday's Medium over today's qualified High.
+        previous: agent === 'build' ? undefined : current.decisions.findLast(d => d.scope === 'routing' && d.candidate?.agent === agent),
         options: { ...current.policy, reserved } };
       // Explore uses OpenAI only when the configured model cannot be admitted.
       if (candidates.some(value => value.model === exploreFallback) && agent === 'explore') {
@@ -156,7 +160,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
       }
       if (!decision || decision.blocked) decision = decideQuota(routing);
       current.decisions.push({ ...decision, scope: 'routing', enforced: active(current) });
-      if (active(current) && !decision.blocked) {
+      if (leaseID && active(current) && !decision.blocked) {
         current.leases ??= [];
         // A join is still one worker. Replace its capacity receipt atomically;
         // a delayed completion holding the old lease ID cannot release this run.
@@ -371,6 +375,65 @@ export async function setupGovernor(ctx, dependencies = {}) {
         mode: observation.mode, liveSubscription: Boolean(liveSubscription) } } });
     }
   });
+  async function recordApplied(decision) {
+    await updateQuotaState(file, current => {
+      const index = current.decisions.findLastIndex(entry => entry.scope === 'routing'
+        && entry.at === decision.at && entry.candidate?.model === decision.candidate.model && entry.applied === undefined);
+      if (index >= 0) current.decisions[index].applied = decision.candidate.model;
+      return current;
+    });
+  }
+  // Resolve the actual request rather than overwriting the user's session model.
+  // Unlike prompt admission, this native boundary also covers /goal synthetics.
+  if (ctx.app.version === '2.3.2') await ctx.session.hook('experimental.model.resolve', guarded(async event => {
+    if (event.agent !== 'build' || event.kind !== 'primary'
+        || event.model.providerID !== 'openai' || event.model.id !== 'gpt-6.2-sol') return;
+    const session = await ctx.session.get({ sessionID: event.sessionID });
+    if (!session || session.parentID) return;
+    const state = readQuotaState(file);
+    if (!active(state)) return;
+    if (session.model && (session.model.providerID !== 'openai' || session.model.id !== 'gpt-6.2-sol'
+        || (session.model.variant && !['default', 'low', 'medium', 'high'].includes(session.model.variant)))) return;
+    const explicit = ['low', 'medium', 'high'].includes(session.model?.variant)
+      ? `openai/gpt-6.2-sol#${session.model.variant}` : undefined;
+    const previous = effortTurns.get(event.sessionID);
+    const busy = session.time?.busy ?? 0;
+    const continued = previous?.busy === busy && previous.explicit === explicit;
+    let variant = continued ? previous.variant : session.model?.variant ?? 'medium';
+    if (!continued && !explicit) {
+      const messages = await ctx.session.context({ sessionID: event.sessionID });
+      const start = messages.findLastIndex(message => message.type === 'user'
+        || (message.type === 'synthetic' && message.metadata?.source === 'goal'));
+      const mandate = messages.slice(Math.max(0, start));
+      const complex = mandate.some(message => message.metadata?.source === 'goal'
+        || message.agents?.some(agent => ['specialist', 'plan', 'reviewer'].includes(agent.name))
+        || message.skills?.some(skill => ['security-review', 'architecture-decision-records'].includes(skill.id))
+        || message.content?.some(part => part.type === 'tool' && part.name === 'todowrite'
+          && part.state?.input?.todos?.filter(todo => ['pending', 'in_progress'].includes(todo.status)).length > 1));
+      const task = mandate[0];
+      // Only an unambiguous single response is automatically Low. Unknown work,
+      // files and attached specialist skills retain the Medium default.
+      const simple = task?.type === 'user' && !task.files?.length && !task.skills?.length && !task.agents?.length
+        && /^(?:reply exactly|respond exactly|rispondi esattamente)\s+\S+[.!]?$/i.test(task.text?.trim() ?? '');
+      variant = complex ? 'high' : simple ? 'low' : 'medium';
+    }
+    const connection = state.sources.openai?.connection;
+    const highQualified = state.sources.openai?.status === 'LIVE' && typeof connection === 'string'
+      && state.usage.some(usage => usage.connection === connection && usage.output > 0 && usage.durationMs > 0
+        && classifyActivity(usage) === 'reasoning-sol-high');
+    if (!explicit && variant === 'high' && !highQualified) variant = 'medium';
+    const base = 'openai/gpt-6.2-sol';
+    const models = [candidate('build', `${base}#${variant}`)];
+    if (!explicit && variant === 'high') models.push(candidate('build', `${base}#medium`));
+    // This is an existing parent request, not a new worker. model.request owns
+    // its atomic budget reservation; do not compete with its children for slots.
+    const { decision } = await choose('build', models, undefined, event.sessionID);
+    if (decision.blocked) blocked(decision.reason);
+    variant = decision.candidate.model.split('#')[1];
+    event.model = { ...event.model, variant };
+    effortTurns.set(event.sessionID, { busy, explicit, variant });
+    await recordApplied(decision);
+  }));
   // Regulation must reach the request, not only the record. This native prompt
   // hook runs before the runner resolves the turn's model, so switching the
   // session here is what the turn actually runs on. A subagent child was
@@ -384,9 +447,12 @@ export async function setupGovernor(ctx, dependencies = {}) {
       if (!session || session.parentID || !kinds[session.agent]) return;
       const configured = await configuredModel(session.agent);
       if (!configured) return;
+      // Build 6.2 is resolved once per execution, including goal continuations.
+      if (ctx.app.version === '2.3.2' && session.agent === 'build'
+          && configured.split('#')[0] === 'openai/gpt-6.2-sol') return;
       const selected = session.model && `${session.model.providerID}/${session.model.id}`;
       const keepVariant = session.agent === 'build' && selected?.startsWith('openai/')
-        && selected === configured.split('#')[0] && ['low', 'medium', 'high'].includes(session.model.variant);
+        && selected === configured.split('#')[0] && ['low', 'medium'].includes(session.model.variant);
       const models = [candidate(session.agent, keepVariant ? `${selected}#${session.model.variant}` : configured)];
       // The same bounded cross-provider choice a new delegation gets: only
       // General may leave its configured provider, and only toward OpenAI.
@@ -425,12 +491,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
         // The applied model is the evidence the report reads, so it is written
         // onto the very decision that recommended it — only when this turn
         // will really run on that recommendation.
-        await updateQuotaState(file, current => {
-          const index = current.decisions.findLastIndex(entry => entry.scope === 'routing'
-            && entry.at === decision.at && entry.candidate?.model === applied && entry.applied === undefined);
-          if (index >= 0) current.decisions[index].applied = applied;
-          return current;
-        });
+        await recordApplied(decision);
         outcome = 'APPLIED';
       } else outcome = 'MONITOR_OBSERVED';
     } catch (error) {
@@ -473,6 +534,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
   if (ctx.event) eventLoop = (async () => {
     const types = ['session.execution.succeeded', 'session.execution.failed', 'session.execution.interrupted', 'session.step.ended'];
     for await (const event of ctx.event.subscribe({ types, signal: controller.signal })) {
+      if (event.type !== 'session.step.ended') effortTurns.delete(event.data.sessionID);
       const ended = new Set();
       if (asyncDelegation && event.type !== 'session.step.ended') {
         for (const lease of readQuotaState(file).leases ?? []) {

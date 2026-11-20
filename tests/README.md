@@ -4,6 +4,7 @@
 bash tests/guardrail/runner.sh        # complete local mock suite
 bash tests/guardrail/runner.sh smoke  # installed candidate smoke
 bash tests/guardrail/runner.sh packaging  # formula/staging assets and installed fixture smoke
+bash tests/guardrail/runner.sh quota  # quota math, routing and subscription-safety mocks
 ```
 
 The runner requires macOS `/usr/bin/sandbox-exec`; absence is a nonzero failure,

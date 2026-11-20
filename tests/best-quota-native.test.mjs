@@ -119,7 +119,7 @@ test('native V2 quota gates existing sessions and native children before local t
       await new Promise(resolve => setTimeout(resolve, 250));
     }
   }
-  async function prompt(sessionID, text, command) {
+  async function prompt(sessionID, text, command, attachments = {}) {
     // A reused session retains its previous outcome while the next run starts.
     // Observe this execution's native lifecycle instead of polling stale state.
     const controller = new AbortController();
@@ -148,7 +148,7 @@ test('native V2 quota gates existing sessions and native children before local t
     })();
     try {
       await api('POST', `/api/session/${sessionID}/${command ? 'command' : 'prompt'}`,
-        command ? { text, name: command } : { text });
+        command ? { text, name: command } : { text, ...attachments });
       return await finished;
     } catch (error) {
       t.diagnostic(`Prompt ${text.slice(0, 80)} failed; recent loopback requests: ${JSON.stringify(recentRequests)}`);
@@ -525,6 +525,55 @@ test('native V2 quota gates existing sessions and native children before local t
   assert.equal(retainedChild.model.providerID, 'opencode-go', 'resuming an existing child must not rewrite its model');
   assert.equal((await api('GET', '/api/session?limit=20')).data.filter(s => s.parentID === parent.id).length, 2, 'denied resume must not create a replacement child');
   t.diagnostic('PASS: native sessionID resume denies an exhausted Go child while its healthy parent continues, without replacement');
+
+  if (asyncChildren) {
+    // Verify the real 2.3.2 resolve boundary and recorded effective variants.
+    // Models, quota, qualification evidence and transport remain loopback fixtures.
+    const configuredBuild = configuration.agents.build.model;
+    configuration.agents.build.model = 'openai/gpt-6.2-sol#medium';
+    configuration.providers.openai.models['gpt-6.2-sol'].variants =
+      ['low', 'medium', 'high'].map(id => ({ id, settings: { reasoningEffort: id } }));
+    fs.writeFileSync(config, JSON.stringify(configuration));
+    const knownEffort = instanceIDs();
+    await api('POST', '/api/location/reload' + query);
+    await waitForReplacement('automatic effort fixture', knownEffort);
+    await updateQuotaState(file, state => {
+      const at = Date.now();
+      const ai = state.snapshots.find(s => s.provider === 'openai');
+      ai.at = new Date(at).toISOString();
+      state.snapshots.push({ ...structuredClone(ai), at: new Date(at - 90000).toISOString() });
+      state.sources.openai = { status: 'LIVE', connection: 'a'.repeat(64) };
+      state.usage.push({ at: new Date(at - 45000).toISOString(), provider: 'openai',
+        model: 'openai/gpt-6.2-sol', variant: 'medium', connection: 'a'.repeat(64), requests: 1 },
+      { at: new Date(at).toISOString(), provider: 'openai', model: 'openai/gpt-6.2-sol',
+        variant: 'high', connection: 'a'.repeat(64), requests: 0, durationMs: 1000, output: 1 });
+      return state;
+    });
+    respond = () => ({ content: 'EFFORT_DONE' });
+    for (const [variant, text, attachments] of [
+      ['low', 'Reply exactly AUTO_LOW', {}],
+      ['medium', 'Ordinary implementation mandate.', {}],
+      ['high', 'Inspect a critical technical boundary.', { agents: [{ name: 'specialist' }] }],
+    ]) {
+      const { data: effort } = await api('POST', '/api/session', {
+        title: `Automatic ${variant} fixture`, agent: 'build', location: { directory: dir },
+        ...(variant === 'medium' ? { model: { providerID: 'openai', id: 'gpt-6.2-sol' } } : {}),
+      });
+      const before = requests;
+      assert.equal(await prompt(effort.id, text, undefined, attachments), 'succeeded');
+      assert.equal(requests, before + 1);
+      const context = await api('GET', `/api/session/${effort.id}/context`);
+      const reply = context.data.findLast(message => message.type === 'assistant');
+      assert.equal(reply.model.id, 'gpt-6.2-sol');
+      assert.equal(reply.model.variant, variant);
+      assert.deepEqual((await api('GET', `/api/session/${effort.id}`)).data.model,
+        effort.model,
+        'automatic effort must not overwrite the session selection');
+    }
+    configuration.agents.build.model = configuredBuild;
+    fs.writeFileSync(config, JSON.stringify(configuration));
+    t.diagnostic('PASS: native automatic Low/Medium/High reach loopback with matching assistant models; session selections untouched');
+  }
 
   // Production subscription validator, same provider ID and fresh old quota,
   // but the runtime connection now resolves to an API key. No credential saved.

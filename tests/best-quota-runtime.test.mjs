@@ -717,11 +717,10 @@ test('Specialist and Reviewer route and admit their configured Sol Medium', asyn
   }
 });
 
-test('Build keeps explicit Low, Medium or High on the configured subscription', async t => {
+test('legacy Build keeps Low or Medium on the configured subscription', async t => {
   const f = await fixture(t);
   f.ctx.session.switchModel = async () => { assert.fail('must not reset the selected variant'); };
-  for (const variant of ['low', 'medium', 'high']) {
-    await seedSolCalibration(f.file);
+  for (const variant of ['low', 'medium']) {
     f.ctx.agent.get = async () => ({ data: { model: { providerID: 'openai', id: 'gpt-6.1-sol',
       variant: variant === 'low' ? 'medium' : 'low' } } });
     f.ctx.session.get = async () => promptSession({ agent: 'build',
@@ -764,7 +763,7 @@ test('High bootstrap reserves a conservative observed envelope and fails closed 
 });
 
 test('native Build effort resolution applies Low, default Medium and qualified High without changing the session selection', async t => {
-  const f = await fixture(t);
+  const f = await fixture(t, 'active', undefined, undefined, undefined, '2.3.2');
   await seedSolCalibration(f.file);
   f.ctx.agent.get = async () => ({ data: { model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } } });
   f.ctx.model.list = async () => ({ data: [{ providerID: 'openai', id: 'gpt-6.2-sol',
@@ -792,14 +791,39 @@ test('native Build effort resolution applies Low, default Medium and qualified H
       variant: 'high', connection: 'a'.repeat(64), requests: 0, durationMs: 1000, output: 10 }] }));
   session.time.busy++;
   assert.equal(await resolve(), 'high');
+  for (const attachment of [{ agents: [{ name: 'specialist' }] },
+    { skills: [{ id: 'security-review', name: 'security-review' }] }]) {
+    session.time.busy++;
+    messages = [{ type: 'user', text: 'Inspect this boundary.', ...attachment }];
+    assert.equal(await resolve(), 'high', 'native structured attachments must be recognized');
+  }
+  session.model = { providerID: 'openai', id: 'gpt-6.2-sol' };
+  session.time.busy++;
+  assert.equal(await resolve(), 'high', 'selecting the model without an effort does not pin a provider default');
+  session.model.variant = 'default';
+  session.time.busy++;
+  assert.equal(await resolve(), 'high', 'native default is not an explicit effort');
+  delete session.model;
   session.time.busy++;
   messages = [{ type: 'user', text: 'Implement this change.' }];
   assert.equal(await resolve(), 'medium');
+  await updateQuotaState(f.file, s => ({ ...s,
+    usage: s.usage.filter(u => u.variant !== 'high') }));
   for (const variant of ['low', 'medium', 'high']) {
     session = { ...session, time: { busy: session.time.busy + 1 },
       model: { providerID: 'openai', id: 'gpt-6.2-sol', variant } };
     assert.equal(await resolve(), variant, 'explicit choice wins over automatic signals');
   }
+  await updateQuotaState(f.file, s => ({ ...s, leases: [{
+    id: 'running-child', provider: 'openai', scope: 'routing', sessionID: 'child',
+    ownerPid: process.pid, at: new Date().toISOString(), expiresAt: new Date(Date.now() + 60000).toISOString(),
+  }] }));
+  session.time.busy++;
+  const continuedEvent = { sessionID: 'effort', agent: 'build', kind: 'primary',
+    model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } };
+  await f.hooks['experimental.model.resolve'](continuedEvent);
+  assert.equal(continuedEvent.model.variant, 'high', 'a running child does not block parent continuation');
+  assert.deepEqual(readQuotaState(f.file).leases.map(lease => lease.id), ['running-child']);
   const count = routingDecisions(f.file).length;
   session.parentID = 'parent';
   assert.equal(await resolve(), 'medium', 'delegated children keep their dispatch model');
@@ -807,7 +831,7 @@ test('native Build effort resolution applies Low, default Medium and qualified H
 });
 
 test('automatic High falls back on insufficient envelope, but EXHAUSTED and UNKNOWN block every effort', async t => {
-  const f = await fixture(t);
+  const f = await fixture(t, 'active', undefined, undefined, undefined, '2.3.2');
   await seedSolCalibration(f.file);
   f.ctx.agent.get = async () => ({ data: { model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' } } });
   f.ctx.model.list = async () => ({ data: [{ providerID: 'openai', id: 'gpt-6.2-sol', variants: [{ id: 'high' }] }] });

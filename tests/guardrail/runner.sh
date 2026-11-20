@@ -157,7 +157,7 @@ if [ "$target" = best-native ]; then
 fi
 if [ "$target" = quota ]; then
   shift
-  run_suite node --test "$@" tests/best-quota.test.mjs tests/best-quota-runtime.test.mjs
+  run_suite node --test "$@" tests/best-quota.test.mjs tests/best-quota-runtime.test.mjs tests/best-quota-sources.test.mjs
   exit "$RC"
 fi
 if [ "$target" = packaging ]; then
