@@ -1,5 +1,94 @@
 # BEST Quota Governor — 5 novembre 2026
 
+## Hotfix contesa quota — 25 novembre 2026
+
+**Causa riprodotta:** nessun lock persistente durante il controllo dello stato reale
+(3.984.396 byte, tre serie da 4.096 record, più processi BEST). Una finestra di
+osservazione di 10 secondi ha rilevato una sostituzione dello stato e circa 107 ms
+di lock. Il lock comprende lettura, doppia validazione e serializzazione dell'intero
+JSON, non soltanto write/fsync. Ogni evento lifecycle riscriveva inoltre lo stato
+anche senza lease corrispondenti, moltiplicando il lavoro fra location.
+
+Confronto locale sequenziale, stesso fixture sintetico **validato** da 3.852.766 byte,
+policy ACTIVE e lease preesistente: 8 processi × 9 aggiornamenti immediati,
+un terzo no-op; nessun ritardo artificiale. Baseline estratta dal commit
+`1e8c769`, stesso test corrente eseguito in directory temporanea, non worktree.
+
+| Misura | Prima | Dopo |
+| --- | ---: | ---: |
+| Aggiornamenti completati / tentati | 57 / 72 | 72 / 72 |
+| Errori `quota state locked` | 15 | 0 |
+| Mutazioni riuscite, tutte conservate | 36 | 48 |
+| No-op riusciti / sostituzioni inutili | 21 / 21 | 24 / 0 |
+| Lock occupato p95 | 186,41 ms | 178,95 ms |
+| Attesa lock p95 / massima (successi) | 1.119,86 / 1.549,40 ms | 3.916,78 / 7.795,54 ms |
+| fsync p95 per aggiornamento riuscito | 9,84 ms | 20,28 ms |
+| Completamenti riusciti al secondo | 6,14 | 6,33 |
+| Letture JSON concorrenti / errori | 1.031 / 0 | 1.336 / 0 |
+
+I timeout falliti non rientrano nelle attese dei successi della baseline.
+Non si rivendica una riduzione sostanziale del tempo di una mutazione: viene
+eliminato lavoro inutile e lasciata completare una coda che sta avanzando.
+Un precedente run GREEN dello stesso carico aveva attesa massima 9.379,82 ms:
+il tetto non deriva dal solo tempo di una scrittura. La variabilità del fsync
+è mantenuta nelle misure, non nascosta come presunto miglioramento.
+Il test lifecycle misura separatamente cinque eventi irrilevanti:
+prima cinque riscritture; dopo zero acquisizioni del lock e zero riscritture.
+
+Correzione nei soli moduli quota esistenti:
+
+- lifecycle senza lease pertinente: nessuna transazione; quando necessaria,
+  rivalutazione delle rimozioni sotto lock, mai persistenza dello snapshot esterno;
+- no-op generico: confronto con i byte persistiti, dopo validazione; inizializzazione,
+  pruning e ripristino dei permessi 0600 continuano a essere persistiti;
+- budget di inattività invariato a 2 s, rinnovato solo osservando una nuova generazione
+  del lock; tetto monotono totale 30 s, già massimo ammesso dall'opzione esistente.
+  `lockTimeoutMs` esplicito resta un limite totale non rinnovabile. Controllo anche
+  prima dei retry, se il lock nel frattempo diventa libero;
+- proprietario PID scritto nel lock. Recupero soltanto con `ESRCH`, ispezione da fd,
+  verifica finale di identità e guardia esclusiva fra reaper. Età, `EPERM` o metadati
+  ignoti non autorizzano rimozioni. Rilascio normale solo della propria identità.
+  Rename atomico, fsync del file e della directory e protezioni dei path conservati.
+
+Limiti intenzionali: un lock legacy vuoto/parziale o una guardia `.lock.reap`
+abbandonata rimangono fail-closed; non si può provarne automaticamente il proprietario.
+Nessun recupero ricorsivo della guardia. I vecchi moduli già caricati mantengono
+timeout e recupero precedenti fino al loro normale unload/reload: nessuna sessione
+è stata terminata o forzata a ricaricare. Non si certifica la sicurezza di vecchi
+reaper non aggiornati soltanto perché i nuovi sono corretti.
+
+Attivazione: BEST configura già il package locale
+`~/Sites/Github/brew-opencode-team/shared/best-quota-plugin`, che importa direttamente
+il runtime fratello. I launcher non riscrivono tale percorso durante il launch.
+Un server **isolato**, HOME/XDG/stato temporanei, binario ufficiale **2.3.2**, ha
+esposto via `/api/plugin` proprio quel `source.path`, plugin `active`, ricevuta
+`NATIVE_RUNTIME` e heartbeat ACTIVE. Nessuna inferenza né uso dello stato live.
+Il processo di prova è stato chiuso; i processi preesistenti sono rimasti attivi.
+È stata rilevata anche un'istanza reale `2.1.0-retention.2` non qualificata:
+il suo blocco di versione è distinto dalla contesa e non è stato aggirato.
+Controllo finale live: policy ancora ACTIVE, tutte e tre le serie a 4.096 record,
+nessun lock/guardia persistente e PID preesistenti 89804, 96907, 45791 ancora vivi.
+Le nuove ricevute di registrazione mostrano anche reload naturali del runtime:
+non è stato impartito alcun reload né si presume che ogni vecchio modulo sia
+stato sostituito soltanto dalla modifica del sorgente.
+
+Verifiche mirate:
+
+```sh
+node --test tests/best-quota-contention.test.mjs
+node --test --test-name-pattern='atomic persistence|concurrent updates|independent processes|lock acquisition|old locks|verified dead writer|recovery never|permission-denied|lock progress|competing reapers|free lock after|atomic write fsync|history retention' tests/best-quota.test.mjs
+node --test --test-name-pattern='unrelated lifecycle|background reservation|reconciles completion|concurrent subagents' tests/best-quota-runtime.test.mjs
+```
+
+21 test mirati verdi: multiprocesso, integrità/lease/ACTIVE, fsync fallito,
+proprietari vivi/morti/ignoti, reaper concorrenti, sostituzione d'identità,
+deadline esplicita/inattività/tetto totale, rilascio lifecycle.
+RED iniziale confermato e committato in `1e8c769`; nessuna protezione disattivata
+per ottenere GREEN. Nessun difetto di fixture scambiato per difetto runtime.
+Suite generali, build, typecheck, lint e coverage non eseguiti: incarico limitato
+alle verifiche mirate. Stato quota live, policy, FREE e configurazioni non riscritti;
+nessun push, reset quota o cancellazione di sessioni.
+
 ## Esito operativo aggiornato al 17 novembre 2026: HOTFIX 0.3.8 APPLICATO — blocco pre-dispatch reale in modalità active, 95/95 test, copertura PASS su entrambi i PID, installazione locale "local2" attiva su entrambi i launcher
 
 > **Nota storica (stato pre-hotfix):** la dicitura precedente "MONITOR ONLY — attivazione globale BLOCKED" e il paragrafo che segue descrivevano il candidato 0.3.8 **prima** del hotfix del 17 novembre 2026: enforcement in esecuzione ma senza effetto bloccante reale, margine di sicurezza 5, nessun run di test e nessuna certificazione della copertura. Il hotfix (sezione finale di questo documento) ha reso il governor effettivo: in modalità `active` le richieste non ammissibili vengono bloccate prima del dispatch, con riserva atomica del budget condiviso, margine 15% e copertura runtime PASS. **Non è ancora dichiarato ACTIVE:** l'unico blocco residuo è `GO_EXTRA_USAGE_CONFIRMATION_EXPIRED`, che richiede una nuova conferma umana "Extra Usage OFF" (entro 1 ora) eseguita tramite il nuovo CLI installato.

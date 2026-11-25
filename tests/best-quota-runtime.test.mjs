@@ -124,14 +124,18 @@ test('unrelated lifecycle events do not rewrite quota state', async t => {
   t.after(f.cleanup);
   const before = fs.readFileSync(f.file, 'utf8');
   const rename = t.mock.method(fs, 'renameSync');
+  const open = t.mock.method(fs, 'openSync');
   for (let i = 0; i < 5; i++) {
     bus.emit('event', { type: 'session.step.ended', created: Date.now(),
       data: { sessionID: 'unrelated' } });
     await new Promise(setImmediate);
   }
   assert.equal(rename.mock.callCount(), 0);
+  assert.equal(open.mock.calls.filter(({ arguments: [name, flags] }) =>
+    name === `${f.file}.lock` && (flags & fs.constants.O_EXCL)).length, 0);
   assert.equal(fs.readFileSync(f.file, 'utf8'), before);
   rename.mock.restore();
+  open.mock.restore();
 });
 
 for (const outcome of ['succeeded', 'failed', 'interrupted']) {

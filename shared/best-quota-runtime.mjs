@@ -581,13 +581,18 @@ export async function setupGovernor(ctx, dependencies = {}) {
       }
       // An admission reservation covers one request; when the session's step or
       // execution ends the request is over, so its percent returns to the pool.
-      const reconciled = await updateQuotaState(file, state => {
+      const releasable = lease => (lease.scope === 'admission' && lease.sessionID === event.data.sessionID
+        && Date.parse(lease.at) < event.created) || ended.has(lease.id);
+      const observed = readQuotaState(file);
+      // Lifecycle events are broadcast to every location. If no reservation
+      // matches, there is no mutation to serialize or persist. Recheck under
+      // the lock whenever there is work; never write this unlocked snapshot.
+      const reconciled = (observed.leases ?? []).some(releasable) ? await updateQuotaState(file, state => {
         state.leases = (state.leases ?? []).filter(lease =>
-          !(lease.scope === 'admission' && lease.sessionID === event.data.sessionID
-            && Date.parse(lease.at) < event.created) && !ended.has(lease.id));
+          !releasable(lease));
         return state;
-      });
-      const liveIDs = new Set(reconciled.leases.map(lease => lease.id));
+      }) : observed;
+      const liveIDs = new Set((reconciled.leases ?? []).map(lease => lease.id));
       for (const [key, receipt] of requestReservations) {
         if (key.startsWith(`${event.data.sessionID}:`)
             && !liveIDs.has(receipt.id)) requestReservations.delete(key);

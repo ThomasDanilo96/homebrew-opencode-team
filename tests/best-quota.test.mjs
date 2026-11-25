@@ -319,6 +319,9 @@ test('atomic persistence is private, restart-safe and strips non-quota secrets',
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.equal(fs.statSync(path.dirname(file)).mode & 0o777, 0o700);
   assert.equal(fs.readFileSync(file, 'utf8').includes('secret'), false);
+  fs.chmodSync(file, 0o644);
+  await updateQuotaState(file, state => state);
+  assert.equal(fs.statSync(file).mode & 0o777, 0o600, 'no-op optimization must still repair file permissions');
   const persisted = await readQuotaState(file);
   assert.equal(persisted.snapshots.length, 1);
   assert.equal(persisted.sources['opencode-go'].status, 'ERROR');
@@ -349,9 +352,12 @@ test('concurrent updates do not lose records and failures leave the old state va
   assert.equal(fs.existsSync(`${file}.lock`), true);
 });
 
-test('independent processes serialize updates through the same lock', async (t) => {
+test('independent processes serialize updates and recover the same orphan lock', async (t) => {
   const { file } = fixture(t);
   await updateQuotaState(file, state => state);
+  const dead = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await new Promise((resolve, reject) => { dead.on('error', reject); dead.on('close', resolve); });
+  fs.writeFileSync(`${file}.lock`, JSON.stringify({ pid: dead.pid }), { mode: 0o600 });
   const moduleUrl = new URL('../shared/best-quota.mjs', import.meta.url).href;
   const script = `import {updateQuotaState} from ${JSON.stringify(moduleUrl)};
     for (let i = 0; i < 8; i++) await updateQuotaState(process.argv[1], state => {
@@ -424,6 +430,141 @@ test('a verified dead writer lock is recovered without losing the previous state
   assert.equal(readQuotaState(file).policy.mode, 'active');
   assert.equal(readQuotaState(file).usage.length, 1);
   assert.equal(fs.existsSync(`${file}.lock`), false);
+});
+
+test('recovery never removes a replaced lock or bypasses an existing reaper', async t => {
+  const { file } = fixture(t);
+  await updateQuotaState(file, state => ({ ...state, policy: { mode: 'active' } }));
+  const lock = `${file}.lock`, guard = `${lock}.reap`;
+  const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+  fs.writeFileSync(lock, JSON.stringify({ pid: child.pid }));
+  fs.writeFileSync(guard, '');
+  await assert.rejects(updateQuotaState(file, state => state, { lockTimeoutMs: 20 }), /locked/);
+  assert.equal(fs.existsSync(lock), true);
+  assert.equal(fs.existsSync(guard), true, 'an ambiguous reaper must never be recursively stolen');
+  fs.unlinkSync(guard);
+
+  const kill = process.kill;
+  const probe = t.mock.method(process, 'kill', (pid, signal) => {
+    if (pid === child.pid) {
+      // Replace the candidate after its descriptor was inspected but before
+      // the pathname check. This new lock belongs to a live writer.
+      fs.renameSync(lock, `${lock}.old`);
+      fs.writeFileSync(lock, JSON.stringify({ pid: process.pid }));
+    }
+    return kill.call(process, pid, signal);
+  });
+  await assert.rejects(updateQuotaState(file, state => state, { lockTimeoutMs: 30 }), /locked/);
+  probe.mock.restore();
+  assert.equal(JSON.parse(fs.readFileSync(lock, 'utf8')).pid, process.pid);
+  assert.equal(readQuotaState(file).policy.mode, 'active');
+});
+
+test('permission-denied and malformed lock owners remain locked', async t => {
+  const { file } = fixture(t);
+  await updateQuotaState(file, state => state);
+  const lock = `${file}.lock`;
+  const probe = t.mock.method(process, 'kill', () => {
+    throw Object.assign(new Error('not permitted'), { code: 'EPERM' });
+  });
+  for (const content of ['{broken', '{"pid":-1}', '{"pid":123}']) {
+    fs.writeFileSync(lock, content, { mode: 0o600 });
+    await assert.rejects(updateQuotaState(file, state => state, { lockTimeoutMs: 10 }), /locked/);
+    assert.equal(fs.readFileSync(lock, 'utf8'), content);
+    fs.unlinkSync(lock);
+  }
+  probe.mock.restore();
+});
+
+test('atomic write fsync failure preserves the old state and removes temporary files', async t => {
+  const { file } = fixture(t);
+  await updateQuotaState(file, state => ({ ...state, policy: { mode: 'active' } }));
+  const before = fs.readFileSync(file, 'utf8');
+  const sync = t.mock.method(fs, 'fsyncSync', () => { throw new Error('synthetic-fsync-failure'); });
+  await assert.rejects(updateQuotaState(file, state => {
+    state.usage.push({ at: iso(Date.now()), provider: 'openai', requests: 1 });
+    return state;
+  }), /synthetic-fsync-failure/);
+  sync.mock.restore();
+  assert.equal(fs.readFileSync(file, 'utf8'), before);
+  assert.deepEqual(fs.readdirSync(path.dirname(file)), [path.basename(file)]);
+});
+
+test('lock progress renews only the default wait, with a hard total deadline', async t => {
+  const { file } = fixture(t);
+  const lock = `${file}.lock`;
+  const open = fs.openSync;
+  let clock = 0, attempts = 0, releaseAfter = 3;
+  const clockMock = t.mock.method(performance, 'now', () => clock);
+  const openMock = t.mock.method(fs, 'openSync', (name, flags, ...args) => {
+    if (name === lock && (flags & fs.constants.O_EXCL)) {
+      attempts++;
+      clock += 1000;
+      if (fs.existsSync(lock)) fs.renameSync(lock, `${lock}.generation-${attempts}-${releaseAfter}`);
+      if (attempts <= releaseAfter) fs.writeFileSync(lock, JSON.stringify({ pid: process.pid }));
+    }
+    return open(name, flags, ...args);
+  });
+  await updateQuotaState(file, state => ({ ...state, policy: { mode: 'active' } }), { retryMs: 1 });
+  assert.ok(clock > 2000, 'progress must allow a busy queue to exceed the old deadline');
+  clock = 0; attempts = 0; releaseAfter = 4;
+  await assert.rejects(updateQuotaState(file, state => state, { lockTimeoutMs: 2000, retryMs: 1 }), /locked/);
+  assert.equal(clock, 2000, 'explicit acquisition timeouts are never renewed');
+  clock = 0; attempts = 0; releaseAfter = 100;
+  await assert.rejects(updateQuotaState(file, state => state, { retryMs: 1 }), /locked/);
+  assert.equal(clock, 30000, 'continuous progress must still hit the hard cap');
+  clockMock.mock.restore();
+  openMock.mock.restore();
+  assert.equal(readQuotaState(file).policy.mode, 'active');
+});
+
+test('competing reapers cannot unlink an intervening live writer', async t => {
+  const { file } = fixture(t);
+  await updateQuotaState(file, state => state);
+  const lock = `${file}.lock`;
+  const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+  fs.writeFileSync(lock, JSON.stringify({ pid: child.pid }));
+  const unlink = fs.unlinkSync;
+  let contender, reaped = 0, callbacks = 0;
+  const mock = t.mock.method(fs, 'unlinkSync', name => {
+    if (name === lock && !contender) {
+      assert.ok(fs.existsSync(`${lock}.reap`), 'guard must cover the orphan unlink');
+      contender = updateQuotaState(file, state => { callbacks++; return state; }, { lockTimeoutMs: 40, retryMs: 1 });
+      // Handle rejection immediately, before either caller is awaited.
+      contender.catch(() => {});
+      unlink(name);
+      reaped++;
+      fs.writeFileSync(lock, JSON.stringify({ pid: process.pid }));
+      return;
+    }
+    return unlink(name);
+  });
+  await assert.rejects(updateQuotaState(file, state => { callbacks++; return state; },
+    { lockTimeoutMs: 40, retryMs: 1 }), /locked/);
+  await assert.rejects(contender, /locked/);
+  mock.mock.restore();
+  assert.equal(reaped, 1);
+  assert.equal(callbacks, 0);
+  assert.equal(JSON.parse(fs.readFileSync(lock, 'utf8')).pid, process.pid);
+});
+
+test('a free lock after the acquisition deadline must not run the callback', async t => {
+  const { file } = fixture(t);
+  await updateQuotaState(file, state => state);
+  const lock = `${file}.lock`;
+  for (const [options, expiredAt] of [[{ lockTimeoutMs: 10 }, 11], [{}, 2001], [{}, 30001]]) {
+    fs.writeFileSync(lock, JSON.stringify({ pid: process.pid }));
+    let clock = 0, called = false;
+    const mock = t.mock.method(performance, 'now', () => clock);
+    const pending = updateQuotaState(file, state => { called = true; return state; }, { ...options, retryMs: 1 });
+    clock = expiredAt;
+    fs.unlinkSync(lock);
+    await assert.rejects(pending, /locked/);
+    mock.mock.restore();
+    assert.equal(called, false);
+  }
 });
 
 test('existing non-private state directories are rejected without changing permissions', async (t) => {

@@ -24,10 +24,10 @@ const MAX_BYTES = 16 * 1024 * 1024;
 // outside this list blocks admission instead of silently skipping the guard.
 export const VERIFIED_RUNTIME_VERSIONS = ['2.2.5', '2.2.7', '2.3.2'];
 export const verifiedRuntime = version => typeof version === 'string' && VERIFIED_RUNTIME_VERSIONS.includes(version);
-// A lock holder only lives for the duration of one synchronous state write.
-// Anything older is an orphaned lock from a crashed writer and must not block
-// the state forever (a permanent lock produced six days of dead quota state).
-const STALE_LOCK_MS = 60000;
+// A busy shared state may make progress for longer than one acquisition budget.
+// Progress can renew that budget, but never beyond the total bounded wait.
+const LOCK_STALL_MS = 2000;
+const LOCK_MAX_WAIT_MS = 30000;
 const blankState = () => ({ version: 1, snapshots: [], sources: {}, decisions: [], usage: [] });
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const finite = value => typeof value === 'number' && Number.isFinite(value);
@@ -767,58 +767,107 @@ function cleanState(value, now) {
   return state;
 }
 
-export function readQuotaState(file) {
+function readQuotaDocument(file) {
   const absolute = checkPath(file);
   let descriptor;
   try {
     descriptor = fs.openSync(absolute, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
     const stat = fs.fstatSync(descriptor);
     if (!stat.isFile() || stat.nlink !== 1 || stat.size > MAX_BYTES) throw new Error('unsafe quota state file');
-    return cleanState(JSON.parse(fs.readFileSync(descriptor, 'utf8')), Date.now());
+    const content = fs.readFileSync(descriptor, 'utf8');
+    return { state: cleanState(JSON.parse(content), Date.now()), content, mode: stat.mode };
   } catch (error) {
-    if (error.code === 'ENOENT') return blankState();
+    if (error.code === 'ENOENT') return { state: blankState() };
     throw error;
   } finally { if (descriptor !== undefined) fs.closeSync(descriptor); }
 }
 
-// Remove a lock only when it is a regular, single-linked file that has been
-// untouched for longer than one synchronous write can take. The identity is
-// re-read immediately before unlinking so a lock replaced in between is never
-// stolen from a live writer.
+export function readQuotaState(file) {
+  return readQuotaDocument(file).state;
+}
+
+// Age is not evidence of death: slow or suspended writers still own their lock.
+// Legacy empty locks have no provable owner and must fail closed.
+function orphanedLock(lock) {
+  let fd;
+  try {
+    fd = fs.openSync(lock, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.nlink !== 1 || stat.uid !== process.getuid() || stat.size > 128) return;
+    let pid;
+    try { ({ pid } = JSON.parse(fs.readFileSync(fd, 'utf8'))); }
+    catch { return; }
+    if (!Number.isInteger(pid) || pid <= 0) return;
+    try { process.kill(pid, 0); }
+    catch (error) { if (error.code === 'ESRCH') return stat; }
+  } catch (error) { if (error.code !== 'ENOENT') throw error; }
+  finally { if (fd !== undefined) fs.closeSync(fd); }
+}
+
 function breakStaleLock(lock) {
-  let first;
-  try { first = fs.lstatSync(lock); } catch (error) { if (error.code === 'ENOENT') return true; throw error; }
-  if (!first.isFile() || first.nlink !== 1 || Date.now() - first.mtimeMs <= STALE_LOCK_MS) return false;
-  let second;
-  try { second = fs.lstatSync(lock); } catch (error) { if (error.code === 'ENOENT') return true; throw error; }
-  if (second.ino !== first.ino || second.dev !== first.dev || second.mtimeMs !== first.mtimeMs) return false;
-  try { fs.unlinkSync(lock); } catch (error) { if (error.code !== 'ENOENT') throw error; }
-  return true;
+  // Ordinary contention must not create recovery guards or leave one behind
+  // if a waiting process exits. Repeat all evidence after taking the guard.
+  if (!orphanedLock(lock)) return false;
+  const guard = `${lock}.reap`;
+  checkPath(guard, false, true);
+  let guardFd;
+  try { guardFd = fs.openSync(guard, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600); }
+  catch (error) { if (error.code === 'EEXIST') return false; throw error; }
+  // Serialize reapers, not normal writers. Never reap this guard recursively:
+  // ambiguous ownership must fail closed rather than recreate the unlink race.
+  try {
+    const first = orphanedLock(lock);
+    if (!first) return false;
+    let second;
+    try { second = fs.lstatSync(lock); } catch (error) { if (error.code === 'ENOENT') return true; throw error; }
+    if (second.ino !== first.ino || second.dev !== first.dev || second.mtimeMs !== first.mtimeMs
+        || second.ctimeMs !== first.ctimeMs || second.size !== first.size) return false;
+    try { fs.unlinkSync(lock); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    return true;
+  } finally {
+    fs.closeSync(guardFd);
+    fs.unlinkSync(guard);
+  }
 }
 
 export async function updateQuotaState(file, callback, options = {}) {
   if (typeof callback !== 'function') throw new Error('invalid quota callback');
-  const lockTimeoutMs = number(options.lockTimeoutMs ?? 2000, 'lockTimeoutMs', 0, 30000);
+  const lockTimeoutMs = number(options.lockTimeoutMs ?? LOCK_STALL_MS, 'lockTimeoutMs', 0, LOCK_MAX_WAIT_MS);
   const retryMs = number(options.retryMs ?? 10, 'retryMs', 1, 1000);
   const absolute = checkPath(file, true);
   const lock = `${absolute}.lock`;
   let descriptor;
-  const deadline = performance.now() + lockTimeoutMs;
+  const started = performance.now();
+  const deadline = started + (options.lockTimeoutMs === undefined ? LOCK_MAX_WAIT_MS : lockTimeoutMs);
+  let progressDeadline = started + lockTimeoutMs, previousLock, attempted = false;
   while (descriptor === undefined) {
+    if (attempted && performance.now() >= Math.min(deadline, progressDeadline)) throw new Error('quota state locked');
+    attempted = true;
     checkPath(absolute);
     checkPath(lock, false, true);
     try { descriptor = fs.openSync(lock, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600); }
     catch (error) {
       if (error.code !== 'EEXIST') throw error;
-      // A crashed writer leaves its lock behind. Without recovery every later
-      // write fails closed forever, so stale locks are broken, not waited on.
-      if (!breakStaleLock(lock) && performance.now() >= deadline) throw new Error('quota state locked');
-      await delay(Math.min(retryMs, Math.max(1, deadline - performance.now())));
+      // Renew only on a different lock generation, not on repeated polling of
+      // the same holder. Explicit timeouts still obey the fixed deadline.
+      let stat;
+      try { stat = fs.lstatSync(lock); }
+      catch (statError) { if (statError.code !== 'ENOENT') throw statError; }
+      if (stat && previousLock && (stat.ino !== previousLock.ino || stat.dev !== previousLock.dev
+          || stat.birthtimeMs !== previousLock.birthtimeMs)) {
+        progressDeadline = performance.now() + lockTimeoutMs;
+      }
+      previousLock = stat ?? previousLock;
+      const now = performance.now();
+      if (now >= deadline || now >= progressDeadline) throw new Error('quota state locked');
+      breakStaleLock(lock);
+      await delay(Math.min(retryMs, Math.max(1, Math.min(deadline, progressDeadline) - performance.now())));
     }
   }
   let temporary, temporaryFd;
   try {
-    const before = readQuotaState(absolute);
+    fs.writeFileSync(descriptor, JSON.stringify({ pid: process.pid }));
+    const { state: before, content: previousContent, mode } = readQuotaDocument(absolute);
     const next = callback(before);
     if (next && typeof next.then === 'function') {
       // Consume a rejected Promise without permitting asynchronous state writes.
@@ -828,6 +877,7 @@ export async function updateQuotaState(file, callback, options = {}) {
     const state = cleanState(next, Date.now());
     const content = `${JSON.stringify(state)}\n`;
     if (Buffer.byteLength(content) > MAX_BYTES) throw new Error('quota state too large');
+    if (content === previousContent && (mode & 0o777) === 0o600) return state;
     temporary = `${absolute}.${randomUUID()}.tmp`;
     checkPath(temporary);
     temporaryFd = fs.openSync(temporary, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW, 0o600);
@@ -845,7 +895,14 @@ export async function updateQuotaState(file, callback, options = {}) {
   } finally {
     if (temporaryFd !== undefined) fs.closeSync(temporaryFd);
     if (temporary !== undefined) fs.unlinkSync(temporary);
+    const held = fs.fstatSync(descriptor);
     fs.closeSync(descriptor);
-    fs.unlinkSync(lock);
+    let current;
+    try { current = fs.lstatSync(lock); }
+    catch (error) { if (error.code !== 'ENOENT') throw error; }
+    if (current?.nlink === 1 && current.ino === held.ino && current.dev === held.dev
+        && current.birthtimeMs === held.birthtimeMs) {
+      try { fs.unlinkSync(lock); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
   }
 }

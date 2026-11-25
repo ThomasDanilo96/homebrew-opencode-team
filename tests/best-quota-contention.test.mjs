@@ -36,7 +36,10 @@ function syntheticState() {
     input: 2400 + i, output: 600 + i, cacheRead: 1200, cacheWrite: 100,
     requests: 1, retries: 0, kind: 'coding', outcome: 'passed',
   }));
-  return { version: 1, snapshots, sources: {
+  return { version: 1, policy: { mode: 'active' },
+    leases: [{ id: 'existing-admission', provider: 'openai', scope: 'admission', ownerPid: process.pid,
+      sessionID: 'existing-session', at: iso(now), expiresAt: iso(now + 900000), percent: 0.5 }],
+    snapshots, sources: {
     'opencode-go': { status: 'LIVE', connection, at: iso(now), lastSuccessAt: iso(now) },
   }, decisions, usage };
 }
@@ -51,7 +54,7 @@ async function fixture(t) {
   assert.deepEqual(readQuotaState(file), expected);
   const bytes = fs.statSync(file).size;
   assert.ok(bytes >= 3_600_000 && bytes <= 4_100_000, `fixture bytes: ${bytes}`);
-  return { file, bytes, initialUsage: expected.usage.length };
+  return { file, bytes, initialUsage: expected.usage.length, expectedLeases: expected.leases };
 }
 
 function instrument(file, current) {
@@ -237,7 +240,7 @@ if (process.argv[2] === '--quota-writer') {
   });
 
   test('realistic contention preserves every default-timeout update and atomic JSON reads', { timeout: 30000 }, async t => {
-    const { file, bytes, initialUsage } = await fixture(t);
+    const { file, bytes, initialUsage, expectedLeases } = await fixture(t);
     const observer = child(t, '--quota-reader', file);
     const writers = Array.from({ length: WRITERS }, (_, i) => child(t, '--quota-writer', file, i));
     await Promise.all([observer.ready, ...writers.map(writer => writer.ready)]);
@@ -253,7 +256,8 @@ if (process.argv[2] === '--quota-writer') {
     const errors = records.filter(record => !record.success);
     const mutations = successes.filter(record => !record.noop);
     const noops = successes.filter(record => record.noop);
-    const persisted = readQuotaState(file).usage;
+    const finalState = readQuotaState(file);
+    const persisted = finalState.usage;
     const actualMarkers = persisted.filter(entry => entry.durationMs >= MARKER).map(entry => entry.durationMs);
     const expectedMarkers = mutations.map(record => record.marker);
     t.diagnostic(JSON.stringify({
@@ -277,6 +281,9 @@ if (process.argv[2] === '--quota-writer') {
     // First retain evidence of successful writes even when the timeout regression is RED.
     assert.deepEqual(actualMarkers.sort((a, b) => a - b), expectedMarkers.sort((a, b) => a - b));
     assert.equal(persisted.length, initialUsage + mutations.length);
+    assert.deepEqual(finalState.policy, { mode: 'active' });
+    assert.deepEqual(finalState.leases, expectedLeases);
+    assert.equal(fs.statSync(file).mode & 0o777, 0o600);
     assert.ok(observed.reads > 0, 'reader must sample during writer activity');
     assert.equal(observed.failures, 0, JSON.stringify(observed.errors));
     assert.ok(observed.maxUsage > observed.minUsage, 'reader must observe replaced snapshots');
