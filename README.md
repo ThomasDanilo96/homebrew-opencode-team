@@ -425,9 +425,9 @@ decide which version the operator authorizes.
 Local fixture PASS is not a real Homebrew installation, operational qualification
 or incident closure. Generation/testing does not install, run setup or publish.
 
-1. After approval, commit and push the reviewed source to `prerelease/vVERSION`
-    using the candidate `VERSION`.
-   Run **Homebrew Install** manually on that branch: Phase A installs the exact
+1. After approval, commit and push the reviewed source to canonical `master`
+    using the candidate `VERSION`; no temporary branch or worktree is needed.
+   Run **Homebrew Install** manually on `master`: Phase A installs the exact
    candidate archive into an ephemeral tap. Local tests are not remote CI evidence.
 2. Only after Phase A succeeds, authorize the immutable `vVERSION` tag on the
    **same commit**. The tag workflow validates the published source archive.

@@ -82,7 +82,7 @@ jobs:
 
   prepublication-staging:
     needs: [source-validation, release_state]
-    if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/prerelease/') && needs.release_state.outputs.published == 'false'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && needs.release_state.outputs.published == 'false'
     # This runner is disposable. The staging keg/formula never touches the stable tap.
     runs-on: macos-26
     timeout-minutes: 65
@@ -110,8 +110,7 @@ jobs:
         run: |
           echo 'Phase A / artifact: binding candidate archive and isolated formula to dispatch SHA'
           version="$(tr -d '[:space:]' < VERSION)"
-          candidate_branch="prerelease/v$version"
-          test "$GITHUB_REF_NAME" = "$candidate_branch"
+          test "$GITHUB_REF_NAME" = master
           candidate_sha="$(git rev-parse HEAD)"
           test "$candidate_sha" = "$GITHUB_SHA"
           archive="$RUNNER_TEMP/opencode-team-$version-staging.tar.gz"
@@ -183,13 +182,12 @@ jobs:
           ruby -e 'abort "OpenCode V2 required" unless Gem::Version.new(ARGV[0]).segments.first == 2' "$opencode_version"
           brew install --force-bottle opencode gitleaks
           version="$(tr -d '[:space:]' < VERSION)"
-          candidate_branch="prerelease/v$version"
           tag_commit="$(git rev-parse HEAD)"
           test "$tag_commit" = "$GITHUB_SHA"
-          phase_a_runs="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "Homebrew Install" --branch "$candidate_branch" --limit 100 --json databaseId,headSha,event,conclusion)"
+          phase_a_runs="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "Homebrew Install" --branch master --limit 100 --json databaseId,headSha,event,conclusion)"
           phase_a_run_id="$(printf '%s' "$phase_a_runs" | jq -r --arg sha "$tag_commit" '[.[] | select(.headSha == $sha and .event == "workflow_dispatch" and .conclusion == "success")][0].databaseId // empty')"
           if [ -z "$phase_a_run_id" ]; then
-            printf 'No successful Phase A run found for candidate commit %s on %s\n' "$tag_commit" "$candidate_branch" >&2
+            printf 'No successful Phase A run found for candidate commit %s on master\n' "$tag_commit" >&2
             exit 1
           fi
           phase_a_job="$(gh run view "$phase_a_run_id" --repo "$GITHUB_REPOSITORY" --json jobs --jq '.jobs[] | select(.name == "prepublication-staging") | .conclusion')"
