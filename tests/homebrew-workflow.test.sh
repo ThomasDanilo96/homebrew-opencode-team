@@ -130,6 +130,8 @@ if 'node --test "$package_root/tests/native-profiles.test.mjs"' in official:
     raise SystemExit("Phase B must not call installed native test directly (use guardrail runner)")
 
 clean_install = text.split("  clean-install:\n", 1)[1].split("  publish-stable-release:\n", 1)[0]
+if '"$(brew --prefix node@22)/bin/node" --version' not in clean_install:
+    raise SystemExit("stable toolchain verification must use the formula's declared Node 22")
 if "start-docker-desktop.sh" in clean_install or "brew install --cask docker" in clean_install or "opencode-team setup" in clean_install or "deep-audit-runtime-smoke.sh" in clean_install:
     raise SystemExit("stable Homebrew clean-install must not repeat Docker/profile provisioning")
 if 'gitleaks dir "$package_root"' not in clean_install:
