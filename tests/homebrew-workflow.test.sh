@@ -43,7 +43,7 @@ grep -Fq 'brew install --verbose ThomasDanilo96/opencode-team/opencode-team' "$w
 grep -Fq 'runs-on: macos-26' "$workflow"
 grep -Fq 'shared/profiles.mjs' "$workflow"
 grep -Fq 'prepublication-staging:' "$workflow"
-grep -Fq "if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/prerelease/') && needs.release_state.outputs.published == 'false'" "$workflow"
+grep -Fq "if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && needs.release_state.outputs.published == 'false'" "$workflow"
 grep -Fq 'candidate_sha="$(git rev-parse HEAD)"' "$workflow"
 grep -Fq 'test "$candidate_sha" = "$GITHUB_SHA"' "$workflow"
 grep -Fq 'git archive --format=tar.gz --prefix="opencode-team-$version/" "$candidate_sha"' "$workflow"
@@ -81,9 +81,11 @@ if "python3 -B -m unittest" in source_validation:
     raise SystemExit("source-validation must not call python tests directly (use guardrail runner)")
 
 staging = text.split("  prepublication-staging:\n", 1)[1].split("  official-archive-validation:\n", 1)[0]
-staging_gate = "if: github.event_name == 'workflow_dispatch' && startsWith(github.ref, 'refs/heads/prerelease/') && needs.release_state.outputs.published == 'false'"
+staging_gate = "if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master' && needs.release_state.outputs.published == 'false'"
 if staging_gate not in staging or staging.count("    if:") != 1:
-    raise SystemExit("Phase A must require dispatch of a prerelease branch with no published vVERSION tag")
+    raise SystemExit("Phase A must require master dispatch with no published vVERSION tag")
+if 'test "$GITHUB_REF_NAME" = master' not in staging:
+    raise SystemExit("Phase A must prepare the canonical master branch")
 if "- name: Checkout candidate source\n        uses: actions/checkout@v4\n        with:\n          ref: ${{ github.sha }}" not in staging:
     raise SystemExit("Phase A must check out the selected ref SHA")
 if 'candidate_sha="$(git rev-parse HEAD)"' not in staging or 'test "$candidate_sha" = "$GITHUB_SHA"' not in staging:
@@ -115,6 +117,8 @@ if "start-docker-desktop.sh" in official or "brew install --cask docker" in offi
     raise SystemExit("official archive packaging validation must not provision Docker Desktop")
 if "gh run list" not in official or "prepublication-staging" not in official or 'test "$tag_commit" = "$GITHUB_SHA"' not in official:
     raise SystemExit("Phase B must prove Phase A succeeded for the exact tagged candidate commit")
+if '--branch master --limit 100 --json databaseId,headSha,event,conclusion' not in official:
+    raise SystemExit("Phase B must find exact-commit Phase A evidence on master")
 if 'bash "$package_root/tests/guardrail/runner.sh" smoke' not in official:
     raise SystemExit("Phase B must use the guardrail runner smoke target instead of raw native/setup-smoke")
 if 'bash "$package_root/tests/setup-smoke.sh"' in official:
