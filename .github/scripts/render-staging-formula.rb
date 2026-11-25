@@ -25,7 +25,7 @@ def render_formula(source, class_name, version, url, sha256)
 
   # Stable and staging distributions use the same guarded test surface. Only
   # artifact identity changes; do not rewrite partial multiline install statements.
-  abort("source formula must use guarded smoke tests") unless source.include?('system "bash", libexec/"tests/guardrail/runner.sh", "smoke"')
+  abort("source formula must install guarded smoke tests") unless source.include?('assert_predicate libexec/"tests/guardrail/runner.sh", :executable?')
 
   source
 end

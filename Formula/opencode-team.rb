@@ -42,7 +42,9 @@ class OpencodeTeam < Formula
     assert_predicate libexec/"tests/best-quota-native.test.mjs", :file?
     assert_predicate libexec/"tests/test_isolation.py", :file?
     assert_predicate libexec/"tests/guardrail/runner.sh", :executable?
-    system "bash", libexec/"tests/guardrail/runner.sh", "smoke"
+    # Homebrew already sandboxes this block. Release CI runs the complete
+    # installed guardrail smoke separately: macOS cannot nest Seatbelt profiles.
+    assert_predicate libexec/"tests/guardrail/profile.sb", :file?
     external_path = testpath/"unrelated-working-directory"
     external_path.mkpath
     Dir.chdir(external_path) do

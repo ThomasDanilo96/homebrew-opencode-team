@@ -59,3 +59,9 @@ Stable and staging recipes share the same guarded test surface; the renderer
 changes only artifact identity and preserves the installed runner's `smoke`
 target. Local Ruby DSL tests are **not** a real `brew install`/`brew test`, remote
 CI result, model/auth check or verification of the scheduled 04:15 execution.
+
+`brew test` retains Homebrew's own sandbox for launcher and packaged-asset checks.
+The complete installed guardrail smoke is a separate required command in staging,
+official-archive and stable clean-install jobs: nesting `sandbox-exec` inside
+Homebrew's sandbox fails on macOS. Neither sandbox is disabled, and the installed
+smoke still runs all isolation negative controls before any fixture suites.

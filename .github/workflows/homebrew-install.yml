@@ -309,7 +309,7 @@ jobs:
         timeout-minutes: 10
         run: |
           package_root="$(brew --prefix opencode-team)/libexec"
-          CI=true OPENCODE_TEAM_PACKAGE_ROOT="$package_root" bash "$package_root/tests/setup-smoke.sh"
+          bash "$package_root/tests/guardrail/runner.sh" smoke
           gitleaks dir "$package_root"
 
       - name: Formula test and audit

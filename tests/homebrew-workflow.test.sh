@@ -14,7 +14,7 @@ grep -Fq '  SSH_ASKPASS_REQUIRE: "never"' "$workflow"
 grep -Fq 'git -c credential.interactive=false ls-remote origin' "$workflow"
 grep -Fq 'expected_version="$(tr -d '\''[:space:]'\'' < VERSION)"' "$workflow"
 grep -Fq 'test "$(opencode-team version)" = "OpenCode Team $expected_version"' "$workflow"
-grep -Fq 'OPENCODE_TEAM_PACKAGE_ROOT="$package_root"' "$workflow"
+grep -Fq 'bash "$package_root/tests/guardrail/runner.sh" smoke' "$workflow"
 grep -Fq 'PACKAGING CONFIG SMOKE PASS' "${workflow%/*}/../../tests/setup-smoke.sh"
 if grep -En '0\.1\.17|v0\.1\.17' "$workflow"; then
   echo "workflow contains a stale release version" >&2
@@ -100,7 +100,7 @@ if "start-docker-desktop.sh" in staging or "brew install --cask docker" in stagi
     raise SystemExit("Phase A Homebrew package validation must not provision Docker or run Docker runtime tests")
 if 'tests/native-profiles.test.mjs' not in Path("tests/setup-smoke.sh").read_text():
     raise SystemExit("Phase A must test native profile isolation from the installed candidate package")
-if 'bash "$package_root/tests/guardrail/runner.sh" smoke' not in staging:
+if '          bash "$package_root/tests/guardrail/runner.sh" smoke' not in staging.splitlines():
     raise SystemExit("Phase A must use the guardrail runner smoke target instead of raw setup-smoke.sh")
 if 'bash "$package_root/tests/setup-smoke.sh"' in staging:
     raise SystemExit("Phase A must not call installed setup-smoke.sh directly (use guardrail runner)")
@@ -121,7 +121,7 @@ if "gh run list" not in official or "prepublication-staging" not in official or 
     raise SystemExit("Phase B must prove Phase A succeeded for the exact tagged candidate commit")
 if '--branch master --limit 100 --json databaseId,headSha,event,conclusion' not in official:
     raise SystemExit("Phase B must find exact-commit Phase A evidence on master")
-if 'bash "$package_root/tests/guardrail/runner.sh" smoke' not in official:
+if '          bash "$package_root/tests/guardrail/runner.sh" smoke' not in official.splitlines():
     raise SystemExit("Phase B must use the guardrail runner smoke target instead of raw native/setup-smoke")
 if 'bash "$package_root/tests/setup-smoke.sh"' in official:
     raise SystemExit("Phase B must not call installed setup-smoke.sh directly (use guardrail runner)")
@@ -131,10 +131,12 @@ if 'node --test "$package_root/tests/native-profiles.test.mjs"' in official:
 clean_install = text.split("  clean-install:\n", 1)[1].split("  publish-stable-release:\n", 1)[0]
 if "start-docker-desktop.sh" in clean_install or "brew install --cask docker" in clean_install or "opencode-team setup" in clean_install or "deep-audit-runtime-smoke.sh" in clean_install:
     raise SystemExit("stable Homebrew clean-install must not repeat Docker/profile provisioning")
-if 'tests/setup-smoke.sh' not in clean_install or 'gitleaks dir "$package_root"' not in clean_install:
+if 'gitleaks dir "$package_root"' not in clean_install:
     raise SystemExit("stable Homebrew clean-install must run packaged non-Docker smoke and Gitleaks")
-if 'bash "$package_root/tests/guardrail/runner.sh" smoke' not in clean_install:
+if '          bash "$package_root/tests/guardrail/runner.sh" smoke' not in clean_install.splitlines():
     raise SystemExit("stable clean-install must run guarded installed smoke outside brew test")
+if 'bash "$package_root/tests/setup-smoke.sh"' in clean_install:
+    raise SystemExit("stable clean-install must not bypass the installed guardrail")
 if "inputs.publish_stable_release" not in clean_install:
     raise SystemExit("release publication dispatch must reuse, not repeat, the verified stable clean-install")
 
