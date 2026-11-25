@@ -133,6 +133,8 @@ if "start-docker-desktop.sh" in clean_install or "brew install --cask docker" in
     raise SystemExit("stable Homebrew clean-install must not repeat Docker/profile provisioning")
 if 'tests/setup-smoke.sh' not in clean_install or 'gitleaks dir "$package_root"' not in clean_install:
     raise SystemExit("stable Homebrew clean-install must run packaged non-Docker smoke and Gitleaks")
+if 'bash "$package_root/tests/guardrail/runner.sh" smoke' not in clean_install:
+    raise SystemExit("stable clean-install must run guarded installed smoke outside brew test")
 if "inputs.publish_stable_release" not in clean_install:
     raise SystemExit("release publication dispatch must reuse, not repeat, the verified stable clean-install")
 

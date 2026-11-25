@@ -140,7 +140,9 @@ test('staging candidate installs guarded test surface and runs installed smoke w
   assert.match(rendered, /class OpencodeTeamStaging < Formula/);
   assert.ok(!rendered.includes('system "bash", libexec/"tests/setup-smoke.sh"'),
     'staging test block must not call setup-smoke.sh directly');
-  assert.match(rendered, /guardrail\/runner\.sh.*smoke/);
+  assert.ok(!rendered.includes('system "bash", libexec/"tests/guardrail/runner.sh"'),
+    'brew test already applies a sandbox; guarded smoke must run separately, not nest Seatbelt');
+  assert.ok(rendered.includes('assert_predicate libexec/"tests/guardrail/runner.sh", :executable?'));
   assert.match(rendered, /test_isolation\.py/);
   assert.match(rendered, /\.github/);
   assert.match(rendered, /tests\/guardrail/);
