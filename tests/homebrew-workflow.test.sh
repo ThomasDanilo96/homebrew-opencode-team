@@ -71,6 +71,8 @@ if "brew tap ThomasDanilo96/opencode-team" in prepublication:
     raise SystemExit("prepublication/official archive validation must not tap the stable formula")
 
 source_validation = text.split("  source-validation:\n", 1)[1].split("  release_state:\n", 1)[0]
+if "runs-on: macos-26" not in source_validation:
+    raise SystemExit("source-validation must use the supported macOS runner")
 if "bash tests/guardrail/runner.sh" not in source_validation:
     raise SystemExit("source-validation must use the guardrail runner instead of raw suite calls")
 if "bash tests/homebrew-workflow.test.sh" in source_validation:
