@@ -15,6 +15,7 @@ grep -Fq 'git -c credential.interactive=false ls-remote origin' "$workflow"
 grep -Fq 'expected_version="$(tr -d '\''[:space:]'\'' < VERSION)"' "$workflow"
 grep -Fq 'test "$(opencode-team version)" = "OpenCode Team $expected_version"' "$workflow"
 grep -Fq 'bash "$package_root/tests/guardrail/runner.sh" smoke' "$workflow"
+grep -Fq 'TRUSTED_PATH="/opt/homebrew/opt/node@22/bin:/usr/local/opt/node@22/bin:' tests/guardrail/runner.sh
 grep -Fq 'PACKAGING CONFIG SMOKE PASS' "${workflow%/*}/../../tests/setup-smoke.sh"
 if grep -En '0\.1\.17|v0\.1\.17' "$workflow"; then
   echo "workflow contains a stale release version" >&2
