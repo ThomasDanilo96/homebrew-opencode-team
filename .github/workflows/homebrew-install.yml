@@ -296,7 +296,7 @@ jobs:
           expected_version="$(tr -d '[:space:]' < VERSION)"
           test "$(command -v opencode-team)" = "$(brew --prefix)/bin/opencode-team"
           test "$(opencode-team version)" = "OpenCode Team $expected_version"
-          node --version
+          "$(brew --prefix node@22)/bin/node" --version
           git --version
           jq --version
           uv --version
