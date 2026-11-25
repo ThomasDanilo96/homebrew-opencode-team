@@ -114,6 +114,26 @@ async function fixture(t, mode = 'active', payment = { certified: true }, collec
   return { hooks, tools, commands, file, ctx, auth, cleanup };
 }
 
+test('unrelated lifecycle events do not rewrite quota state', async t => {
+  const bus = new EventEmitter();
+  const f = await fixture(t, 'active', { certified: true }, undefined, {
+    subscribe: async function* ({ signal }) {
+      for await (const [event] of on(bus, 'event', { signal })) yield event;
+    },
+  }, '2.3.2');
+  t.after(f.cleanup);
+  const before = fs.readFileSync(f.file, 'utf8');
+  const rename = t.mock.method(fs, 'renameSync');
+  for (let i = 0; i < 5; i++) {
+    bus.emit('event', { type: 'session.step.ended', created: Date.now(),
+      data: { sessionID: 'unrelated' } });
+    await new Promise(setImmediate);
+  }
+  assert.equal(rename.mock.callCount(), 0);
+  assert.equal(fs.readFileSync(f.file, 'utf8'), before);
+  rename.mock.restore();
+});
+
 for (const outcome of ['succeeded', 'failed', 'interrupted']) {
   test(`2.3.2 background reservation survives tool return and child steps until execution ${outcome}`, async t => {
     const bus = new EventEmitter();

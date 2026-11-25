@@ -391,6 +391,41 @@ test('lock acquisition tolerates a holder unlinking the lock during lstat', asyn
   assert.equal(readQuotaState(file).policy.mode, 'active');
 });
 
+test('old locks with a live or unknown owner time out without changing state', async t => {
+  const { file } = fixture(t);
+  await updateQuotaState(file, state => ({ ...state, policy: { mode: 'active' } }));
+  const before = fs.readFileSync(file, 'utf8');
+  const lock = `${file}.lock`;
+  for (const content of [JSON.stringify({ pid: process.pid }), '']) {
+    fs.writeFileSync(lock, content, { mode: 0o600 });
+    const old = new Date(Date.now() - 120000);
+    fs.utimesSync(lock, old, old);
+    const identity = fs.statSync(lock).ino;
+    const started = performance.now();
+    await assert.rejects(updateQuotaState(file, state => state, { lockTimeoutMs: 30, retryMs: 5 }), /locked/);
+    assert.ok(performance.now() - started < 1000, 'acquisition must remain bounded');
+    assert.equal(fs.statSync(lock).ino, identity);
+    assert.equal(fs.readFileSync(file, 'utf8'), before);
+    fs.unlinkSync(lock);
+  }
+});
+
+test('a verified dead writer lock is recovered without losing the previous state', async t => {
+  const { file } = fixture(t);
+  await updateQuotaState(file, state => ({ ...state, policy: { mode: 'active' } }));
+  const child = spawn(process.execPath, ['-e', ''], { stdio: 'ignore' });
+  await new Promise((resolve, reject) => { child.on('error', reject); child.on('close', resolve); });
+  assert.throws(() => process.kill(child.pid, 0), { code: 'ESRCH' });
+  fs.writeFileSync(`${file}.lock`, JSON.stringify({ pid: child.pid }), { mode: 0o600 });
+  await updateQuotaState(file, state => {
+    state.usage.push({ at: iso(Date.now()), provider: 'openai', requests: 1 });
+    return state;
+  }, { lockTimeoutMs: 50 });
+  assert.equal(readQuotaState(file).policy.mode, 'active');
+  assert.equal(readQuotaState(file).usage.length, 1);
+  assert.equal(fs.existsSync(`${file}.lock`), false);
+});
+
 test('existing non-private state directories are rejected without changing permissions', async (t) => {
   const { dir } = fixture(t);
   const publicDir = path.join(dir, 'public');
