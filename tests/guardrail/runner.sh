@@ -101,10 +101,8 @@ for name, value in zip(("STAGING_ROOT", "OUTSIDE_ROOT", "REAL_HOME", "REAL_TEAM"
 pathlib.Path(destination).write_text(text)
 PY
 
-TRUSTED_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-if [ "${1:-}" = best-native ]; then
-  TRUSTED_PATH="/opt/homebrew/opt/node@22/bin:$TRUSTED_PATH"
-fi
+# Match the formula's declared runtime instead of a stale ambient Node keg.
+TRUSTED_PATH="/opt/homebrew/opt/node@22/bin:/usr/local/opt/node@22/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 
 RC=0
 

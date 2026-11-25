@@ -65,3 +65,5 @@ The complete installed guardrail smoke is a separate required command in staging
 official-archive and stable clean-install jobs: nesting `sandbox-exec` inside
 Homebrew's sandbox fails on macOS. Neither sandbox is disabled, and the installed
 smoke still runs all isolation negative controls before any fixture suites.
+The trusted PATH prefers the formula's declared `node@22`, avoiding unrelated
+preinstalled Node kegs invalidated by Homebrew dependency upgrades.
