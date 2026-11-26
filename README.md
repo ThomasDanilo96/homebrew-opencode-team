@@ -304,8 +304,10 @@ In a BEST or FREE session, open `Ctrl+P` and search **AI Handoff**, or use:
 | Changes since the last successful copy | `/handoff-incrementale` | `/handoff-incrementale-json` |
 
 Use the TUI slash completion; if pasting a slash command, add a trailing space
-before pressing Enter. The latest human message is the observable assignment
-boundary; synthetic notices and compaction do not start a new assignment.
+before pressing Enter. The report distinguishes explicit STOPs, cancellations
+of the previous prompt, continuations, and historical approvals from the
+current request. These categories come from bounded text excerpts, not from
+an inference call. Synthetic notices and compaction do not start an assignment.
 When invoked from a child tab, the report starts at the root
 session and reads related descendants. Incremental export falls back to the
 session if there is no valid checkpoint. It compares evidence fingerprints, so
@@ -317,7 +319,10 @@ does not count.
 
 Markdown and JSON use the same read-only extractor. It distinguishes
 **OBSERVED** evidence, **REPORTED** statements and **UNKNOWN** facts, with native
-references when available. A technical PASS does not certify installation,
+references when available. The operational summary and next step use the most
+recent relevant coordinator result, not the last historical GO. A recorded test
+rerun can supersede a failing outcome for the same test scope, but a technical
+PASS does not certify installation,
 production qualification or recovery; historical GO is not current consent.
 Model totals are recorded assistant steps and tokens, not a provider request or
 quota ledger. The report flags history/output limits (240 root messages, 120

@@ -11,7 +11,7 @@ const shell = (command, exit, output = '') => ({
 });
 const sha = '0123456789abcdef0123456789abcdef01234567';
 
-function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confirmed = true } = {}) {
+function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confirmed = true, operational = false } = {}) {
   const children = [
     { id: 'done', agent: 'reviewer', title: 'Review error handling', outcome: 'succeeded' },
     { id: 'busy', agent: 'general', title: 'Check packaging', outcome: 'succeeded' },
@@ -21,6 +21,16 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
   const copies = [], toasts = [], calls = [];
   const updates = { active: true, exit: null, failCopy, treeStatus: 'modified' };
   const record = (id, created, message) => ({ id, time: { created, completed: created }, ...message });
+  const current = record('current', 10, { type: 'user', text: 'Correggi la verifica locale.\npassword: hidden-multiline' });
+  const old = record('old', 1, { type: 'user', text: 'Incarico precedente da inventariare.' });
+  const users = operational ? [
+    record('resume-user', 15, { type: 'user', text: 'Riprendi la verifica locale.' }),
+    record('go', 14, { type: 'user', text: 'AUTORIZZO UNA FINESTRA PRODUTTIVA UNA TANTUM.' }),
+    record('stop', 13, { type: 'user', text: 'STOP AI NUOVI TENTATIVI PRODUTTIVI.' }),
+    record('cancel', 12, { type: 'user', text: 'Ho sbagliato a inviare il prompt, annulla quello che hai fatto.' }),
+    record('wrong', 11, { type: 'user', text: 'Costruisci un plugin non pertinente.' }),
+    current, old,
+  ] : [current, old];
   const ctx = {
     ui: { router: { current: () => ({ type: 'session', sessionID: fromChild ? 'done' : 'root' }) },
       toast: { show: (toast) => toasts.push(toast) } },
@@ -32,22 +42,36 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
         list: async (input) => ({ data: input.parentID === 'root' ? children : [], cursor: {} }),
         active: async () => updates.active ? { busy: { type: 'running' } } : {},
       },
-      permission: { list: async () => [{ action: 'shell', resources: ['DO_NOT_COPY'] }] },
+      permission: { list: async () => operational ? [] : [{ action: 'shell', resources: ['DO_NOT_COPY'] }] },
       vcs: { get: async () => ({ data: { branch: { current: 'master' } } }),
         status: async () => ({ data: [{ file: 'README.md', status: updates.treeStatus }] }) },
-      message: { list: async ({ sessionID, type, order }) => {
+      message: { list: async ({ sessionID, type, order, limit }) => {
         calls.push(sessionID);
-        if (type === 'user') return { data: order === 'asc' ?
-          [record('old', 1, { type: 'user', text: 'Incarico precedente da inventariare.' })] :
-          [record('current', 10, { type: 'user', text: 'Correggi la verifica locale.\npassword: hidden-multiline' })] };
+        if (type === 'user') return { data: (order === 'asc' ? [...users].reverse() : users).slice(0, limit) };
         if (sessionID !== 'root') return { data: sessionID === 'new' ? [record('bad', 15, { type: 'idle', outcome: 'failed' })] : [
           record('reply', 16, { type: 'assistant', agent: sessionID === 'done' ? 'reviewer' : 'general',
             model: { providerID: 'openai', id: 'test-model', variant: 'medium' }, tokens: { input: 5, cache: { read: 2 } },
-            content: [text(sessionID === 'done' ? 'Nessun rilievo.' : 'Vecchia risposta.')] }),
+            content: [text(sessionID === 'done' ? operational ? [
+              '**Request changes — two concrete blockers.**',
+              '1. **A pruned candidate image can still trigger the stopped backup.** The check in `src/receipt.py` does not verify image availability.',
+              '2. **The age cap can expire after scheduler withdrawal.** Restore the scheduler if the validation fails before switch.',
+              'Static review only; I did not rerun the tests.',
+            ].join('\n') : 'Nessun rilievo.' : 'Vecchia risposta.')] }),
         ] };
-        return { cursor: {}, data: [record('out', 20, { type: 'assistant', snapshot: { files: ['shared/example.mjs', '.env', 'private.pem'] }, content: [
+        return { cursor: {}, data: [...(operational === 'recovery' ? [
+          record('final', 21, { type: 'assistant', finish: 'stop', content: [
+            text('Nessuna promozione. Il recovery nativo è in corso; il ripristino del gate non è ancora confermato.'),
+          ] }),
+        ] : []), record('out', 20, { type: 'assistant', snapshot: { files: ['shared/example.mjs', '.env', 'private.pem'] }, content: [
           shell('node --test tests/report.test.mjs', 0, 'DO_NOT_COPY\nPASS'),
-          shell('pytest tests/test_report.py', 1),
+          { ...shell('pytest tests/test_report.py', 1), time: { completed: 18 } },
+          ...(operational ? [{ ...shell('pytest tests/test_report.py', 0), time: { completed: 19 } }] : []),
+          ...(operational ? [
+            { ...shell("set -e; python3 -B -m unittest suite.Backup.test_expiry", 1, 'Ran 1 test in 0.013s\n\nFAILED (failures=1)\n'),
+              time: { completed: 18 } },
+            { ...shell("set -e; python3 -B -m unittest suite.Backup.test_expiry", 0, 'Ran 1 test in 0.011s\n\nOK\n'),
+              time: { completed: 19 } },
+          ] : []),
           shell('npm test && deploy', 0),
           shell('pytest --version', 0),
           shell('bash tests/guardrail/runner.sh packaging', 0),
@@ -62,6 +86,7 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
           text('Bloccato: token: short-value'),
           text('Errore: DB_PASSWORD=shorter-value'),
           text('Aperto: chiave `sk-proj-abcdef1234567890`'),
+          ...(operational ? [text('**Il progetto non è completato.** I servizi rispondono sul predecessore.\n**Autorizzi una nuova finestra produttiva?**')] : []),
           { ...shell('bun test tests/later.test.mjs', updates.exit), id: 'later',
             state: { status: updates.exit === null ? 'running' : 'completed',
               input: { command: 'bun test tests/later.test.mjs' }, metadata: { exit: updates.exit } } },
@@ -71,8 +96,7 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
         ] }),
         record('resume', 17, { type: 'synthetic', text: 'NOT A USER MANDATE' }),
         record('compact', 13, { type: 'compaction', status: 'completed', summary: 'DO_NOT_COPY' }),
-        record('current', 10, { type: 'user', text: 'Correggi la verifica locale.\npassword: hidden-multiline' }),
-        record('old', 1, { type: 'user', text: 'Incarico precedente da inventariare.' })] };
+        ...users] };
       } },
     },
   };
@@ -98,6 +122,36 @@ test('copies the parent objective and native file, commit, test and approval evi
     assert.ok(copies[0].includes(value), value);
   assert.equal(toasts.at(-1).variant, 'success');
   assert.doesNotMatch(copies[0], /Incarico precedente|NOT A USER MANDATE/);
+});
+
+test('keeps both review blockers, canceled mandates and the operational gate distinct', async () => {
+  const { commands, copies } = fixture({ operational: true });
+  await commands['handoff-sessione'].run();
+  await commands['handoff-sessione-json'].run();
+  await commands['handoff-json'].run();
+  const full = JSON.parse(copies[1]), latest = JSON.parse(copies[2]);
+  for (const blocker of ['A pruned candidate image', 'The age cap can expire']) {
+    assert.ok(copies[0].includes(blocker), blocker);
+    assert.ok(full.subagents.find(({ session }) => session === 'done').evidence.some(({ data }) => data.text?.includes(blocker)));
+  }
+  assert.equal(full.mandates.find(({ ref }) => ref.message === 'wrong').disposition, 'annullato');
+  assert.equal(latest.currentMandate.ref.message, 'current');
+  assert.equal(latest.mandates.some(({ ref }) => ref.message === 'wrong'), false);
+  assert.ok(full.operational.some(({ data }) => data.text?.includes('non è completato')));
+  assert.ok(full.residualGates.some(({ data }) => data.text?.includes('Autorizzi una nuova finestra')));
+  assert.ok(full.evidence.some(({ data }) => data.command === 'pytest tests/test_report.py' && data.laterPass));
+  assert.ok(full.evidence.some(({ data }) => data.command === 'python -m unittest' && data.testsRun === 1 && data.laterPass));
+  assert.doesNotMatch(copies[0], /permessi in attesa.*count: 0/);
+});
+
+test('the latest recovery report supersedes an older request for GO without implying a new action', async () => {
+  const { commands, copies } = fixture({ operational: 'recovery' });
+  await commands['handoff-json'].run();
+  const report = JSON.parse(copies[0]);
+  assert.equal(report.nextStep.kind, 'attività documentata in corso');
+  assert.equal(report.nextStep.ref.message, 'final');
+  assert.ok(report.residualGates.some(({ kind, ref }) => kind === 'aperto' && ref.message === 'final'));
+  assert.equal(report.residualGates.some(({ kind }) => kind === 'GO mancante'), false);
 });
 
 test('from a child reads its parent and real children, with running overriding stale success', async () => {
