@@ -16,6 +16,7 @@ const UNKNOWN = 'non disponibile o non dimostrabile';
 const technicalCall = /\b(?:[a-z_][a-z0-9_]{0,23}\.)*[a-z][a-z0-9]{0,23}(?:_[a-z][a-z0-9]{0,23}){1,8}\(\)/g;
 const credentialComponent = /(?:^|[._-])(?:auth|password|passwd|token|secret|api[_-]?key|credential[s]?|cookie|sessionid)(?=$|[._-])/i;
 const recoveryCompleted = /\brecovery (?:nativo )?(?:(?:è stato|è) )?(?:completat[oa]|conclus[oa]|completed)\b/i;
+const bundleRevision = /\b(?:bundle|export)(?: (?:complet[oa]|effettiv[oa]|del controller|verificat[oa]|revision[ei])){0,3}\s*:?\s*`?([0-9a-f]{7,12})`?\b/i;
 const labels = [
   ['risultato', /^(?:risultato|result|outcome|esito)$/i],
   ['completato', /^(?:completat[oi]|completed|modifiche principali)$/i],
@@ -57,7 +58,8 @@ function scrubInline(value) {
     return !sensitive.test(code) && !credentialComponent.test(code) && (
       (safePath(code) && /[/.]/.test(code)) ||
       (!opaque.test(code) && (testCommand.test(code) || gitCheck.test(code) || gitHead.test(code))) ||
-      (/^[0-9a-f]{7,12}$/.test(code) && /\b(?:commit|git|branch|master|HEAD)\b/i.test(value)) ||
+      (/^[0-9a-f]{7,12}$/.test(code) && (/\b(?:commit|git|branch|master|HEAD)\b/i.test(value) ||
+        bundleRevision.exec(line)?.[1] === code)) ||
       /^(?:complete|prepare[d]?|finalize[d]?|promoted|idle|running|blocked|succeeded|failed|rolled_back|rollback|preflight|switch|git archive|fleet status)$/i.test(code) ||
       (/^[1-5]\d{2}$/.test(code) && /\bHTTP\s*$/.test(line.slice(0, offset))) ||
       (/^(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|HTTP \d{3})$/.test(code) && !opaque.test(code)) ||
@@ -202,12 +204,20 @@ function shellEvidence(command, exit, running, failed, output) {
     /^=+ \d{1,6} skipped in \d+(?:\.\d+)?s =+$/m.test(sample) || Number(suite?.[1]) === skipped);
   const result = running ? 'in esecuzione' : failed || suite?.[2] === 'FAILED' || (Number.isInteger(exit) && exit !== 0) ?
     'FAIL' : exit === 0 ? (allSkipped ? 'SKIP' : 'PASS') : 'UNKNOWN';
+  const missingModule = /^ModuleNotFoundError: No module named '([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+)'/m.exec(sample)?.[1];
+  const diagnostic = result === 'FAIL' ? (safePath(missingModule) && !credentialComponent.test(missingModule) ?
+    `ModuleNotFoundError: ${missingModule}` :
+    /\b(?:Permission denied \(publickey\)|No such file or directory|Connection refused|Connection timed out|command not found|ModuleNotFoundError|FileNotFoundError|AssertionError|CalledProcessError)(?=\W|$)/m
+      .exec(sample)?.[0]) : undefined;
+  const commandFamily = result === 'FAIL' ? /^(python3?|ssh|scp|rsync|git|bash|docker|tar|node|pytest)(?=\s|$)/.exec(command)?.[1] : undefined;
   return {
     kind: test || suite ? 'test tecnico' : sha256 ? 'digest verificato' : 'shell',
     data: { command: suite ? 'python -m unittest' : hideArgs ? `${command.split(' ', 1)[0]} (argomenti omessi)` :
       test || head || gitCheck.test(command) ? command : commit ? 'git commit' :
         plumbing && revision ? 'git commit-tree / update-ref' : cherry ? 'git cherry-pick' : null,
     result, exit: Number.isInteger(exit) ? exit : null, ...(hideArgs ? { scopeRedacted: true } : {}),
+    ...(diagnostic ? { diagnostic } : {}),
+    ...(commandFamily ? { commandFamily } : {}),
     ...(suite ? { testsRun: Number(suite[1]), cases: cases.filter((name) => name.length <= 240 &&
       !sensitive.test(name) && !credentialComponent.test(name) && name.split('.').every((part) =>
         !opaque.test(part) || /^test(?:_[a-z][a-z0-9]{0,23}){2,16}$/.test(part))),
@@ -255,7 +265,9 @@ function collect(family, active, floor, fallbackGoal) {
         return text && ['pending', 'in_progress', 'completed', 'cancelled'].includes(item.status) ?
           [{ text, status: item.status }] : [];
       });
-      add('TODO nativi', { items, total: todo.state.metadata.todos.length }, todoMessage, '', todo.id,
+      const counts = Object.fromEntries(['pending', 'in_progress', 'completed', 'cancelled'].map((status) =>
+        [status, todo.state.metadata.todos.filter((item) => item.status === status).length]));
+      add('TODO nativi', { items, total: todo.state.metadata.todos.length, counts }, todoMessage, '', todo.id,
         'OBSERVED', todo.time?.completed ?? todoMessage.time?.created);
     }
     const conclusion = [...entries].find((m) => m.type === 'assistant' && m.time?.completed && !m.error && assistantText(m).trim());
@@ -330,6 +342,11 @@ function collect(family, active, floor, fallbackGoal) {
         for (const [index, line] of proseLines(prose).slice(0, 80).entries()) {
           const normalized = line.replace(/^(?:[-*]|\d+[.)])\s+/, '').replaceAll('**', '');
           if (/^\s*\|/.test(line)) continue;
+          if (terminal && !child && bundleRevision.test(normalized)) {
+            const statement = narrative(normalized, 410);
+            const revision = statement && bundleRevision.exec(statement)?.[1];
+            if (revision) add('revisione bundle dichiarata', { revision }, m, index, undefined, 'REPORTED');
+          }
           if (terminal && /^(?:Request changes|Changes requested|Richieste modifiche)\b/i.test(normalized)) {
             reviewBlockers = /\b(?:blockers?|blocchi)\b/i.test(normalized);
             mention('verdetto review', normalized, index, 340);
@@ -441,6 +458,7 @@ async function readFamily(client, sessionID, signal) {
       permission.list(request, options),
     ]);
     if (history.status === 'fulfilled') row.messages = history.value.data;
+    row.partialHistory = history.status !== 'fulfilled' || history.value.partial;
     if (history.status === 'rejected' || history.value.partial) omissions.add('cronologia nativa non interamente disponibile');
     if (permissions.status === 'fulfilled') row.permissions = permissions.value.length;
     else omissions.add('permessi nativi non interamente disponibili');
@@ -657,20 +675,30 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
   const ranked = [...facts].sort(([, a], [, b]) => (b.at ?? Infinity) - (a.at ?? Infinity));
   const all = ranked.map(([, fact]) => fact);
   const fingerprints = Object.assign(Object.create(null), previous?.fingerprints);
-  const changed = ranked.map(([key, fact]) => [digest(key), digest(fact), fact])
-    .filter(([key, hash]) => scope !== 'incremental' || fingerprints[key] !== hash);
+  const todoFacts = ranked.filter(([, row]) => row.kind === 'TODO nativi');
+  const changed = ranked.map(([key, fact]) => fact.kind === 'TODO nativi' ?
+    [digest(`todo-state:${fact.ref.session}`), digest(fact.data), fact, digest(key)] : [digest(key), digest(fact), fact])
+    .filter(([key, hash, row, legacy]) => scope !== 'incremental' || (fingerprints[key] !== hash &&
+      !(legacy && !fingerprints[key] && (fingerprints[legacy] === digest(row) ||
+        (previous.through != null && row.at <= previous.through)))));
   const visible = changed.filter(([key, , fact]) => fact.kind !== 'step' &&
     (fact.kind !== 'permessi in attesa' || fact.data.count > 0 || (scope === 'incremental' && fingerprints[key])) &&
     (fact.kind !== 'shell' || fact.data.command || fact.data.result !== 'PASS' ||
       (scope === 'incremental' && fingerprints[key])));
   const isMandate = (row) => row.disposition !== undefined;
+  const childResults = new Map();
+  for (const row of all) {
+    if (row.ref.session !== session && ['risultato', 'completato', 'verdetto review'].includes(row.kind) &&
+        !childResults.has(row.ref.session)) childResults.set(row.ref.session, row);
+  }
   const priority = (row) => fromFinal(row) || row === timeline.current || ({
     'requisito corrente': true, 'stato coordinatore': true, 'working tree attuale': true, 'TODO nativi': true,
     'lavoro in background': true, 'esito shell in background': true,
   })[row.kind] ? 0 : !row.data.supersededBy && (row.at >= effectiveStart || row.ref.session !== session) &&
-    ['bloccato', 'verdetto review'].includes(row.kind) ? 0.25 : row.at >= effectiveStart && row.ref.session === session &&
+    ['bloccato', 'verdetto review'].includes(row.kind) ? 0.25 :
+    childResults.get(row.ref.session) === row ? 0.4 : row.at >= effectiveStart && row.ref.session === session &&
     (/^file /.test(row.kind) || row.kind === 'test tecnico' || row.data.revision) ? 0.5 :
-    row.data.revision || row.data.appliedCommit || recoveryCompleted.test(row.data.text ?? '') ||
+    row.data.revision || row.data.appliedCommit || row.data.diagnostic || recoveryCompleted.test(row.data.text ?? '') ||
     row.kind === 'compaction' && row.data.state === 'failed' ||
     row.disposition === 'annullato' || ({
     'test tecnico': true, 'digest verificato': true, 'revisione dichiarata': true, decisione: true,
@@ -683,7 +711,8 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
     const field = /^file /.test(row.kind) ? [row.data.path, row.data.change] :
       row.kind === 'test tecnico' && !row.data.scopeRedacted ?
         [row.data.command, row.data.testScopeKey, row.data.result, row.data.skipped, row.data.laterPass] :
-      row.kind === 'shell' && !row.data.revision && !row.data.appliedCommit ? [row.data.command, row.data.result, row.data.exit] :
+      row.kind === 'shell' && !row.data.revision && !row.data.appliedCommit ?
+        [row.data.command, row.data.result, row.data.exit, row.data.diagnostic, row.data.commandFamily, row.data.state] :
       row.kind === 'evento sintetico' ? ['synthetic'] : null;
     if (!field) return true;
     const key = JSON.stringify([row.ref.session, row.kind, ...field]);
@@ -709,6 +738,10 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
       ...changed.filter(([, , fact]) => fact.kind === 'step')] : [...baseline, ...changed])) {
     delete fingerprints[key];
     fingerprints[key] = hash;
+  }
+  for (const [, row] of todoFacts) {
+    const key = digest(`todo-state:${row.ref.session}`);
+    if (!changed.some(([changedKey]) => changedKey === key)) fingerprints[key] = digest(row.data);
   }
   const id = digest([session, scope, previous?.id ?? null, changed.map(([key, hash]) => [key, hash])]);
   const revisions = history ? [...history.values()].sort((a, b) => (b.at ?? 0) - (a.at ?? 0)) : all;
@@ -759,6 +792,19 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
   }
   const declaration = revisions.find((row) => row.ref.session === session && row.kind === 'revisione dichiarata' &&
     /\b[0-9a-f]{7,12}\b/i.test(row.data.text));
+  const declaredBundle = revisions.find((row) => row.ref.session === session && row.kind === 'revisione bundle dichiarata');
+  const revisionReport = (row, revision) => row ? { revision, ref: row.ref, at: row.at, confidence: 'REPORTED' } : null;
+  const lastDeclaredCommit = revisionReport(declaration, declaration && /\b[0-9a-f]{7,12}\b/i.exec(declaration.data.text)[0]);
+  const lastDeclaredBundle = revisionReport(declaredBundle, declaredBundle?.data.revision);
+  const rootTodo = todoFacts.find(([, row]) => row.ref.session === session)?.[1];
+  const todoItem = !next && rootTodo?.at >= (goal?.time.created ?? 0) ?
+    rootTodo.data.items.find((item) => item.status === 'in_progress') ??
+    rootTodo.data.items.find((item) => item.status === 'pending') : null;
+  const summarizeCoverage = (items) => {
+    const times = items.flatMap(({ messages }) => messages.map((m) => m.time?.created).filter((at) => at >= floor));
+    return { sessions: items.length, messages: times.length, partialSessions: items.filter((item) => item.partialHistory).length,
+      from: times.length ? Math.min(...times) : null, to: times.length ? Math.max(...times) : null };
+  };
   execution.completionWithoutLocalEvidence = executionRows.filter((row) => (row.kind === 'completato' ||
     row.kind === 'subagente' && row.data.state === 'concluso') && !all.some((other) =>
     other.ref.session === row.ref.session && (/^file /.test(other.kind) || other.kind === 'test tecnico' ||
@@ -773,8 +819,11 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
       firstRecordedHead: heads.at(-1)?.data.revision ?? null,
       lastRecordedHead: heads[0]?.data.revision ?? null,
       lastRecordedCommit: lastCommit?.data.revision ?? null,
-      lastDeclaredCommit: declaration ? { revision: /\b[0-9a-f]{7,12}\b/i.exec(declaration.data.text)[0],
-        ref: declaration.ref, confidence: 'REPORTED' } : null,
+      currentHead: { confidence: 'UNKNOWN', reason: 'L’API VCS non espone lo SHA del HEAD corrente.' },
+      lastDeclaredCommit,
+      lastDeclaredBundle,
+      lastDeclaredRevision: (lastDeclaredBundle?.at ?? -1) >= (lastDeclaredCommit?.at ?? -1) && lastDeclaredBundle ?
+        { ...lastDeclaredBundle, kind: 'bundle' } : lastDeclaredCommit ? { ...lastDeclaredCommit, kind: 'commit' } : null,
     },
     evidence,
     currentMandate: timeline.current ?? null,
@@ -785,11 +834,15 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
     mandates: evidence.filter(isMandate).sort((a, b) => a.at - b.at),
     operational,
     operationalInherited: inherited || scope === 'incremental' && Boolean(parentFinal) && !evidence.some(fromFinal),
-    todos: all.filter((row) => row.kind === 'TODO nativi'),
+    todos: (scope === 'incremental' ? evidence : all).filter((row) => row.kind === 'TODO nativi'),
+    todoContext: todoFacts.map(([, row]) => ({ ref: row.ref, at: row.at, total: row.data.total, counts: row.data.counts })),
+    nextTodo: todoItem ? { ...todoItem, ref: rootTodo.ref, confidence: 'OBSERVED', authorization: 'UNKNOWN' } : null,
     subagents,
     pendingPermissions: selected.reduce((sum, item) => sum + (item.permissions ?? 0), 0),
     pendingPermissionsUnknown: selected.filter(({ permissions }) => permissions === undefined).length,
     execution,
+    coverage: { root: summarizeCoverage([parent]), children: summarizeCoverage(selected.slice(1)),
+      hierarchyPartial: omissions.has('gerarchia figli non interamente disponibile') || omissions.has('limite di 24 sessioni figlie') },
     ...(sessionExecution ? { sessionExecution } : {}),
     residualGates: gates,
     nextStep: next ?? { confidence: 'UNKNOWN', data: { text: UNKNOWN } },
@@ -808,6 +861,9 @@ export function renderMarkdown(report) {
   const formatData = (data) => Object.entries(data).filter(([, value]) => value !== null)
     .map(([name, value]) => `${name}: ${typeof value === 'object' ? JSON.stringify(value) : value}`).join(' · ');
   const date = (at) => at ? new Date(at).toISOString() : '';
+  const coverageLine = ({ sessions, messages, partialSessions, from, to }) =>
+    `${messages} messaggi da ${sessions} sessioni; ${partialSessions} con lettura parziale` +
+      (from ? `; da ${date(from)} a ${date(to)}` : '');
   const refText = (ref, owner = report.context.session) =>
     [ref.session !== owner || !(ref.message || ref.job) ? ref.session : null, ref.message, ref.call, ref.job].filter(Boolean).join('/');
   const formatRow = ({ confidence, kind, data, ref, relatedRefs, disposition, at, change, historical }) =>
@@ -876,6 +932,9 @@ export function renderMarkdown(report) {
         !(next.ref && row.ref.message === next.ref.message && row.data.text === next.data.text)).map(formatRow),
       ...report.todos.map(formatRow),
       ...(report.todos.length ? ['- Lo stato dei TODO è registrato da OpenCode; non prova che le verifiche siano state eseguite.'] : []),
+      ...(report.scope === 'incremental' ? report.todoContext.filter((row) => !report.todos.some((todo) =>
+        todo.ref.session === row.ref.session)).map(({ ref, at, total, counts }) =>
+        formatRow({ confidence: 'OBSERVED', kind: 'stato TODO (contesto, non delta)', ref, at, data: { total, counts } })) : []),
       '- Lo stato nativo dell’esecuzione non attesta il successo del mandato o dello stato produttivo.',
     ]),
     ...section('Modifiche, revisioni Git e decisioni', changeRows),
@@ -894,8 +953,15 @@ export function renderMarkdown(report) {
         [formatRow({ ...report.latestAuthorization, kind: 'ultima autorizzazione riportata (contesto)' })] : []),
       ...gateRows,
     ]),
-    ...section('Prossimo passo documentato', [formatRow({ kind: 'prossimo passo', ...report.nextStep })]),
+    ...section('Prossimo passo documentato', [
+      formatRow({ kind: 'prossimo passo', ...report.nextStep }),
+      ...(report.nextTodo ? [formatRow({ confidence: report.nextTodo.confidence, kind: 'TODO candidato (non autorizzazione)',
+        ref: report.nextTodo.ref, data: { text: report.nextTodo.text, status: report.nextTodo.status } })] : []),
+    ]),
     '## Execution review', `_Ambito: ${report.execution.scope}. Durata e token degli step registrati; non latenza o quota provider._`,
+    `- Copertura letta — padre: ${coverageLine(report.coverage.root)}.`,
+    `- Copertura letta — figli: ${coverageLine(report.coverage.children)}${report.coverage.hierarchyPartial ? '; gerarchia parziale' : ''}.`,
+    '- Sono conteggi della finestra letta, non totali assoluti; possono calare se una lettura successiva copre meno eventi.',
     `- **OBSERVED** · subagenti: ${formatData(report.execution.subagents)}`,
     `- **OBSERVED** · errori registrati: ${report.execution.recordedErrors}; step con retry: ${report.execution.stepsWithRetry}`,
     ...report.execution.usage.map((row) => `- **OBSERVED** · ${formatData(row)}`),
@@ -903,7 +969,7 @@ export function renderMarkdown(report) {
     ...report.execution.completionWithoutLocalEvidence.map(({ ref, kind }) =>
       formatRow({ confidence: 'UNKNOWN', kind: `evidenze di modifica/test per ${kind}`, ref, data: { text: UNKNOWN } })),
     ...(report.sessionExecution ? [
-      '', '### Cumulativo della sessione (finestra letta)',
+      '', '### Conteggi della sessione (solo finestra letta)',
       `- **OBSERVED** · subagenti: ${formatData(report.sessionExecution.subagents)}`,
       `- **OBSERVED** · errori registrati: ${report.sessionExecution.recordedErrors}; step con retry: ${report.sessionExecution.stepsWithRetry}`,
       ...report.sessionExecution.usage.map((row) => `- **OBSERVED** · ${formatData(row)}`),

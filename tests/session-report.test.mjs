@@ -19,7 +19,8 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
   ];
   let layer;
   const copies = [], toasts = [], calls = [];
-  const updates = { active: true, exit: null, failCopy, treeStatus: 'modified', go: false, background: false };
+  const updates = { active: true, exit: null, failCopy, treeStatus: 'modified', go: false, background: false,
+    repeatTodo: false, partialHistory: false };
   const record = (id, created, message) => ({ id, time: { created, completed: created }, ...message });
   const current = record('current', 10, { type: 'user', text: 'Correggi la verifica locale.\npassword: hidden-multiline' });
   const old = record('old', 1, { type: 'user', text: 'Incarico precedente da inventariare.' });
@@ -49,11 +50,15 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
       ] : [] } },
       vcs: { get: async () => ({ data: { branch: { current: 'master' } } }),
         status: async () => ({ data: [{ file: 'README.md', status: updates.treeStatus }] }) },
-      message: { list: async ({ sessionID, type, order, limit }) => {
+      message: { list: async ({ sessionID, type, order, limit, cursor }) => {
         calls.push(sessionID);
         const input = updates.go ? [record('new-go', 24, { type: 'user',
           text: 'GO. AUTORIZZO una sola finestra per il piano di prova.\nSolo verifica; nessun secondo fermo.' }), ...users] : users;
         if (type === 'user') return { data: (order === 'asc' ? [...input].reverse() : input).slice(0, limit) };
+        if (updates.partialHistory && sessionID === 'done') {
+          if (cursor) throw new Error('Second page unavailable');
+          return { data: [record('idle-only', 16, { type: 'idle', outcome: 'succeeded' })], cursor: { next: 'later-page' } };
+        }
         if (sessionID !== 'root') return { data: sessionID === 'new' ? [record('bad', 15, { type: 'idle', outcome: 'failed' })] : [
           record('reply', 16, { type: 'assistant', agent: sessionID === 'done' ? 'reviewer' : 'general',
             model: { providerID: 'openai', id: 'test-model', variant: 'medium' }, tokens: { input: 5, cache: { read: 2 } },
@@ -64,7 +69,13 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
               'Static review only; I did not rerun the tests.',
             ].join('\n') : 'Nessun rilievo.' : 'Vecchia risposta.')] }),
         ] };
-        return { cursor: {}, data: [...(operational === 'closed' ? [
+        return { cursor: {}, data: [...(updates.repeatTodo ? [
+          record('todo-repeat', 23, { type: 'assistant', finish: 'tool-calls', content: [
+            { type: 'tool', id: 'todo-repeat-tool', name: 'todowrite', state: { status: 'completed', metadata: {
+              todos: [{ content: 'Verifica bundle', status: 'in_progress' }],
+            } } },
+          ] }),
+        ] : []), ...(operational === 'closed' ? [
           record('closed', 22, { type: 'assistant', finish: 'stop', content: [
             text('Recovery completato. Fleet è in `rolled_back`; il gate dello scheduler è stato ripristinato.'),
             text('Prima di un nuovo tentativo serve verificare `finalize`, `export_controller_dependencies()` e `scripts.shared_jobs`.'),
@@ -105,8 +116,10 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
           ...(operational === 'qualification' ? [
             text('Blocker: None. All requirements implemented and verified.'),
             text('Commit dichiarato: `fedcba9`.'),
+            text('Dal bundle completo `3add6a0` ho verificato il drenaggio.'),
+            shell('python planner.py', 1, "ModuleNotFoundError: No module named 'scripts.shared_jobs'\nDO_NOT_COPY"),
             { type: 'tool', id: 'todos', name: 'todowrite', state: { status: 'completed', metadata: {
-              todos: [{ content: 'Verifica bundle', status: 'completed' }],
+              todos: [{ content: 'Verifica bundle', status: 'in_progress' }],
             } } },
             { type: 'tool', name: 'shell', id: 'detached', state: { status: 'completed',
               input: { command: 'unsupported command' }, metadata: { status: 'running', shellID: 'sh-fixture' } } },
@@ -298,14 +311,44 @@ test('the same pre-export checkpoint yields equivalent command outputs, includin
     assert.match(a.copies[0], /Solo verifica; nessun secondo fermo/);
     assert.ok(!report.evidence.some(({ data, kind }) => kind === 'bloccato' && data.text?.startsWith('None')));
     assert.equal(report.context.lastDeclaredCommit.revision, 'fedcba9');
-    assert.equal(report.todos[0].data.items[0].status, 'completed');
+    assert.equal(report.context.lastDeclaredBundle.revision, '3add6a0');
+    assert.equal(report.context.currentHead.confidence, 'UNKNOWN');
+    assert.equal(report.nextTodo.status, 'in_progress');
+    assert.ok(report.coverage.root.messages > 0);
     if (md === 'handoff-incrementale') {
       assert.equal(report.execution.subagents.observed, 0);
       assert.equal(report.sessionExecution.subagents.observed, 3);
+      assert.equal(report.todos.length, 0);
+      assert.equal(report.todoContext[0].counts.in_progress, 1);
       assert.ok(report.evidence.some(e => e.ref.job === 'job-fixture' && e.data.state === 'cancelled'));
       assert.ok(report.evidence.some(e => e.ref.call === 'detached' && e.data.confirmedBy?.message === 'shell-done' && e.data.exit === 0));
     } else {
+      assert.ok(report.evidence.some(e => e.data.diagnostic?.includes('scripts.shared_jobs')));
       assert.ok(report.evidence.some(e => e.kind === 'compaction' && e.data.state === 'failed'));
     }
   }
+});
+
+test('an identical TODO write at a newer native reference is context, not a delta', async () => {
+  const { commands, copies, updates } = fixture({ operational: 'qualification' });
+  await commands['handoff-sessione-json'].run();
+  updates.repeatTodo = true;
+  await commands['handoff-incrementale-json'].run();
+  const delta = JSON.parse(copies[1]);
+  assert.equal(delta.todos.length, 0);
+  assert.equal(delta.todoContext[0].ref.message, 'todo-repeat');
+  assert.ok(!delta.evidence.some(e => e.kind === 'TODO nativi'));
+});
+
+test('a shorter native history explains a lower session count without presenting it as an absolute total', async () => {
+  const { commands, copies, updates } = fixture();
+  await commands['handoff-sessione-json'].run();
+  const before = JSON.parse(copies[0]);
+  updates.partialHistory = true;
+  await commands['handoff-incrementale-json'].run();
+  const after = JSON.parse(copies[1]);
+  assert.equal(after.coverage.children.partialSessions, 1);
+  assert.ok(after.sessionExecution.usage.reduce((total, row) => total + row.steps, 0) <
+    before.execution.usage.reduce((total, row) => total + row.steps, 0));
+  assert.match(renderMarkdown(after), /non totali assoluti/);
 });
