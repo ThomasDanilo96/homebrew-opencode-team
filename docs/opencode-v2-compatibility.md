@@ -59,6 +59,51 @@ key. Go's Console “Use balance” can spend extra credits after the allowance;
 owner must disable it there if desired. Local model/policy configuration cannot
 enforce server-side billing settings or future FREE pricing/privacy.
 
+## Session Guard — not enabled on 2.3.2
+
+OpenCode 2.3.2 can stop **server admission**, but its public TUI plugin API
+cannot stop the whole **composer submission** before side effects:
+
+- The server [`session.hook("prompt")`][prompt-hook] runs before attachment
+  resolution, durable inbox admission and agent execution. A thrown error
+  prevents admission in 2.3.2, but is an HTTP 500, not a typed rejection or a
+  confirmation request. `context`/model hooks and execution events are later
+  than admission and cannot provide this protection.
+- The [native composer][composer] commits any staged revert **before** it
+  sends the prompt to that hook. It can also submit pending editor context as
+  a separate synthetic message first. Restoring the draft on rejection does
+  not undo either operation. The normal error handler restores the draft
+  only while the original composer is mounted and still empty.
+- The [public TUI API][tui-api] exposes native dialogs, but does not expose
+  a cancellable composer-submission callback with the exact draft, attachments
+  and target session. Overriding a key binding is not a submission gate: the
+  composer also calls `submit()` directly, including from its input submit
+  handler. A dialog via plugin RPC could acknowledge a suspended server
+  request, but cannot place the guard before the composer's revert commit.
+
+**Native check:** two disposable BEST/FREE test roots used the installed
+2.3.2 binary, separate state, and a loopback counting provider with external
+network denied. In each root two ordinary prompts reached that provider
+(positive control). A throw-only test plugin refused a marked prompt sent via
+the native API: HTTP 500, no new inbox item, no history change, no additional
+provider call. After staging a revert at the second ordinary user message,
+sending the marked prompt from the native TUI also produced no inbox item or
+provider call. The TUI showed a send error and restored the draft, **but
+consumed the revert and removed the existing message**. No real session was
+used for this test.
+
+This violates the no-history-change requirement even with a perfect
+classifier. Do not ship the throw-only probe, partially intercept Enter, or
+install a warning-only plugin labelled as a guard. Revisit when OpenCode
+exposes a cancellable pre-submit decision before revert/editor-context
+operations, retaining the exact draft on cancellation and allowing a
+one-time confirmation for that submission and session. Session Guard is
+independent of AI Handoff and is not a release gate for it.
+
+[prompt-hook]: https://github.com/anomalyco/opencode/blob/v2.3.2/packages/core/src/session/prompt.ts#L34-L54
+[composer]: https://github.com/anomalyco/opencode/blob/v2.3.2/packages/tui/src/component/prompt/index.tsx#L1334-L1379
+[tui-api]: https://github.com/anomalyco/opencode/blob/v2.3.2/packages/plugin/src/tui/context.ts
+
 ## Official V2 sources
 
 - [Migration](https://opencode.ai/v2/docs/migrate-v1), [configuration](https://opencode.ai/v2/docs/config), [CLI](https://opencode.ai/v2/docs/cli)
