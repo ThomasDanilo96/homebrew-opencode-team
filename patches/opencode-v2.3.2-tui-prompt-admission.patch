@@ -1,0 +1,160 @@
+diff --git a/packages/plugin/src/tui/context.ts b/packages/plugin/src/tui/context.ts
+--- a/packages/plugin/src/tui/context.ts
++++ b/packages/plugin/src/tui/context.ts
+@@ -488,5 +488,17 @@
+ }
+
++export type PromptSubmit = Readonly<{
++  sessionID: string
++  text: string
++  delivery: "steer" | "queue"
++  revertMessageID?: string
++}>
++export type PromptSubmitHook = (draft: PromptSubmit) => boolean | Promise<boolean>
++
+ export interface UI {
++  readonly prompt: {
++    /** Decide before submitting a text draft to an existing session. False leaves the composer untouched. */
++    beforeSubmit(hook: PromptSubmitHook): () => void
++  }
+   readonly dialog: Dialog
+   readonly toast: Toast
+diff --git a/packages/tui/src/component/prompt/index.tsx b/packages/tui/src/component/prompt/index.tsx
+--- a/packages/tui/src/component/prompt/index.tsx
++++ b/packages/tui/src/component/prompt/index.tsx
+@@ -12,4 +12,5 @@
+ import { createEffect, createMemo, onMount, createSignal, onCleanup, on, Show, Switch, Match, For } from "solid-js"
+ import path from "path"
++import { isDeepEqual } from "remeda"
+ import { useLocal } from "../../context/local"
+ import { useTheme, useThemes } from "../../context/theme"
+@@ -59,4 +60,5 @@
+ import { abbreviateHome } from "../../runtime"
+ import { Slot } from "../../plugin/render"
++import { usePromptSubmitHooks } from "../../plugin/context"
+ import type { SessionInbox } from "@opencode/schema/session-inbox"
+ import {
+@@ -201,4 +203,5 @@
+   const route = useRoute()
+   const promptRef = usePromptRef()
++  const promptSubmitHooks = usePromptSubmitHooks()
+   const sessionTabs = useSessionTabs()
+   const data = useData()
+@@ -1175,11 +1178,40 @@
+     }
+
+-    // Snapshot the composer and clear it synchronously, before the first await.
+-    // Everything below reads the snapshot: text typed while a request is in
+-    // flight lands in the already-empty composer and survives, and prompt
+-    // history records exactly what was submitted instead of the live store
+-    // (which may have absorbed mid-flight typing). Failure paths restore the
+-    // snapshot unless the user has started typing something new.
+     const currentMode = store.mode
++    const targetSessionID = props.sessionID
++    if (trimmed && targetSessionID && currentMode === "normal" && !isCommand && promptSubmitHooks?.size) {
++      // Keep the original composer intact until this exact draft has been accepted.
++      const draft = structuredClone(unwrap(store.prompt))
++      const originalInput = input
++      const hooks = [...promptSubmitHooks]
++      const revertMessageID = data.session.get(targetSessionID)?.revert?.messageID
++      const pendingEditorKey = editorSelectionKey(pendingEditorSelection)
++      const submission = Object.freeze({ sessionID: targetSessionID, text: inputText, delivery, revertMessageID })
++      const unchanged = () =>
++        !disposed &&
++        !disabled() &&
++        !originalInput.isDestroyed &&
++        input === originalInput &&
++        props.sessionID === targetSessionID &&
++        route.data.type === "session" &&
++        route.data.sessionID === targetSessionID &&
++        store.mode === currentMode &&
++        input.plainText === draft.text &&
++        isDeepEqual(unwrap(store.prompt), draft) &&
++        data.session.get(targetSessionID)?.revert?.messageID === revertMessageID &&
++        editorSelectionKey(editor.labelState() === "pending" ? editorContext() : undefined) === pendingEditorKey &&
++        promptSubmitHooks.size === hooks.length &&
++        hooks.every((hook) => promptSubmitHooks.has(hook))
++      try {
++        for (const hook of hooks) {
++          if (await hook(submission) !== true || !unchanged()) return false
++        }
++      } catch {
++        toast.show({ title: "Prompt not sent", message: "A pre-submit check failed. The draft was kept.", variant: "error" })
++        return false
++      }
++    }
++    // After acceptance, snapshot and clear synchronously before network work.
++    // New typing survives in the now-empty composer while the request is in flight.
+     const entry = { ...store.prompt, mode: currentMode }
+     if (trimmed) {
+diff --git a/packages/tui/src/plugin/api.tsx b/packages/tui/src/plugin/api.tsx
+--- a/packages/tui/src/plugin/api.tsx
++++ b/packages/tui/src/plugin/api.tsx
+@@ -19,4 +19,5 @@
+   DialogSelectOptions,
+   Page,
++  PromptSubmitHook,
+   SlotClaim,
+   SlotMap,
+@@ -108,4 +109,5 @@
+   options: Readonly<Record<string, any>> | undefined
+   owned: Dispose[]
++  promptSubmitHooks?: Set<PromptSubmitHook>
+   registry: Registry
+ }): Context {
+@@ -221,4 +223,15 @@
+     },
+     ui: {
++      prompt: {
++        beforeSubmit(hook) {
++          const callback: PromptSubmitHook = (draft) => hook(draft)
++          input.promptSubmitHooks?.add(callback)
++          const dispose = () => {
++            input.promptSubmitHooks?.delete(callback)
++          }
++          input.owned.push(async () => dispose())
++          return dispose
++        },
++      },
+       dialog: dialogApi,
+       toast: toastApi,
+diff --git a/packages/tui/src/plugin/context.tsx b/packages/tui/src/plugin/context.tsx
+--- a/packages/tui/src/plugin/context.tsx
++++ b/packages/tui/src/plugin/context.tsx
+@@ -17,5 +17,5 @@
+ import { stat } from "fs/promises"
+ import { fileURLToPath } from "url"
+-import type { Page } from "@opencode/plugin/tui/context"
++import type { Page, PromptSubmitHook } from "@opencode/plugin/tui/context"
+ import { Host } from "@opencode/plugin/host"
+ import { resolveSlots, type Claim } from "./structure"
+@@ -84,8 +84,9 @@
+ type Trace = <T>(stage: string, tags: LogTags, task: () => Promise<T>) => Promise<T>
+
+-const PluginContext = createContext<Value>()
++const PluginContext = createContext<Value & { promptSubmitHooks: ReadonlySet<PromptSubmitHook> }>()
+
+ export function PluginProvider(props: ParentProps<{ packages: PackageSource; directories: string[] }>) {
+   const host = usePluginHost()
++  const promptSubmitHooks = new Set<PromptSubmitHook>()
+   const log = useLog({ component: "plugin" })
+   const config = useConfig()
+@@ -162,4 +163,5 @@
+       options: item.options,
+       owned,
++      promptSubmitHooks,
+       registry: {
+         has: (kind, name) => Boolean(store.registrations[id]?.[kind][name]),
+@@ -597,4 +599,5 @@
+     <PluginContext.Provider
+       value={{
++        promptSubmitHooks,
+         ready: () => store.ready,
+         list: () => store.states,
+@@ -756,2 +759,6 @@
+   return value
+ }
++
++export function usePromptSubmitHooks() {
++  return useContext(PluginContext)?.promptSubmitHooks
++}

@@ -61,6 +61,9 @@ enforce server-side billing settings or future FREE pricing/privacy.
 
 ## Session Guard — not enabled on 2.3.2
 
+See the [separate patched prototype](session-guard-prototype.md). This section
+describes the unmodified OpenCode binary, where Session Guard is still off.
+
 OpenCode 2.3.2 can stop **server admission**, but its public TUI plugin API
 cannot stop the whole **composer submission** before side effects:
 
@@ -97,8 +100,8 @@ classifier. Do not ship the throw-only probe, partially intercept Enter, or
 install a warning-only plugin labelled as a guard. Revisit when OpenCode
 exposes a cancellable pre-submit decision before revert/editor-context
 operations, retaining the exact draft on cancellation and allowing a
-one-time confirmation for that submission and session. Session Guard is
-independent of AI Handoff and is not a release gate for it.
+one-time confirmation for that submission and session. The separate prototype
+adds that decision point without changing AI Handoff.
 
 [prompt-hook]: https://github.com/anomalyco/opencode/blob/v2.3.2/packages/core/src/session/prompt.ts#L34-L54
 [composer]: https://github.com/anomalyco/opencode/blob/v2.3.2/packages/tui/src/component/prompt/index.tsx#L1334-L1379
