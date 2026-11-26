@@ -20,7 +20,7 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
   let layer;
   const copies = [], toasts = [], calls = [];
   const updates = { active: true, exit: null, failCopy, treeStatus: 'modified', go: false, background: false,
-    repeatTodo: false, partialHistory: false };
+    repeatTodo: false, partialHistory: false, conclusion: null };
   const record = (id, created, message) => ({ id, time: { created, completed: created }, ...message });
   const current = record('current', 10, { type: 'user', text: 'Correggi la verifica locale.\npassword: hidden-multiline' });
   const old = record('old', 1, { type: 'user', text: 'Incarico precedente da inventariare.' });
@@ -54,6 +54,22 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
         calls.push(sessionID);
         const input = updates.go ? [record('new-go', 24, { type: 'user',
           text: 'GO. AUTORIZZO una sola finestra per il piano di prova.\nSolo verifica; nessun secondo fermo.' }), ...users] : users;
+        if (updates.conclusion && sessionID === 'root') {
+          const approved = record('approval', 25, { type: 'user', text: 'Approvo il piano precedente.' });
+          const prompts = [approved, current];
+          if (type === 'user') return { data: (order === 'asc' ? [...prompts].reverse() : prompts).slice(0, limit) };
+          return { data: [
+            record('follow-up-idle', 27, { type: 'idle', outcome: 'succeeded' }),
+            record('follow-up', 26, { type: 'assistant', agent: 'build', finish: 'stop', content: [text('Verifica successiva: nessuna modifica.')] }),
+            approved,
+            record('final-idle', 22, { type: 'idle', outcome: 'succeeded' }),
+            record('book', 21, { type: 'assistant', agent: 'build', finish: 'stop',
+              content: [text(updates.conclusion), { type: 'reasoning', text: 'PRIVATE_REASONING' }] }),
+            record('draft', 20, { type: 'assistant', agent: 'build', finish: 'tool-calls',
+              content: [text('INTERMEDIATE_DRAFT')] }),
+            current,
+          ] };
+        }
         if (type === 'user') return { data: (order === 'asc' ? [...input].reverse() : input).slice(0, limit) };
         if (updates.partialHistory && sessionID === 'done') {
           if (cursor) throw new Error('Second page unavailable');
@@ -351,4 +367,31 @@ test('a shorter native history explains a lower session count without presenting
   assert.ok(after.sessionExecution.usage.reduce((total, row) => total + row.steps, 0) <
     before.execution.usage.reduce((total, row) => total + row.steps, 0));
   assert.match(renderMarkdown(after), /non totali assoluti/);
+});
+
+test('the concluded coordinator result survives approval, preserving Markdown, redacting secrets and not repeating in the delta', async () => {
+  const md = fixture(), json = fixture();
+  const body = '# Piano di recovery\n\n| Volume | Liberi |\n|---|---|\n| SSD | 422 GiB |\n\n' +
+    '## Procedura\n\n1. Verifica `/srv/backup/giaffatto`.\n2. Calcola `300 / 7`.\n\n```sh\n' +
+    'rsync -a /srv/backup/ /Volumes/offsite/\nPrivateKey = WGPRIVATEKEY_DO_NOT_COPY\n' +
+    'curl -H "Authorization: Bearer SHORT_BEARER_DO_NOT_COPY" https://example.invalid/\n' +
+    '```\n\n```json\n{"password":"JSON_SECRET_DO_NOT_COPY","retain":39}\n```\n' +
+    '\n<shell command="INTERNAL_COMMAND_DO_NOT_COPY">RAW_OUTPUT_DO_NOT_COPY</shell>\n';
+  md.updates.conclusion = json.updates.conclusion = body;
+  await md.commands.handoff.run();
+  await json.commands['handoff-json'].run();
+  const report = JSON.parse(json.copies[0]);
+  assert.equal(md.copies[0], renderMarkdown(report));
+  assert.equal(report.conclusions[0].ref.message, 'book');
+  assert.equal(report.conclusions[0].confidence, 'REPORTED');
+  for (const preserved of ['| SSD | 422 GiB |', '1. Verifica `/srv/backup/giaffatto`.', '2. Calcola `300 / 7`.',
+    '```sh\nrsync -a /srv/backup/ /Volumes/offsite/', '"retain":39']) assert.ok(report.conclusions[0].data.markdown.includes(preserved));
+  assert.doesNotMatch(md.copies[0], /PRIVATE_REASONING|INTERMEDIATE_DRAFT|DO_NOT_COPY/);
+  await json.commands['handoff-incrementale-json'].run();
+  assert.deepEqual(JSON.parse(json.copies[1]).conclusions, []);
+  json.updates.conclusion += '\n## Appendice\n' + 'dato tecnico\n'.repeat(10000);
+  await json.commands['handoff-incrementale-json'].run();
+  const longer = JSON.parse(json.copies[2]);
+  assert.ok(longer.conclusions[0].data.omittedCharacters > 0);
+  assert.match(renderMarkdown(longer), /caratteri finali non esportati/);
 });

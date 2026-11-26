@@ -157,6 +157,54 @@ function assistantText(message) {
   return message.content.filter((part) => part.type === 'text').map((part) => part.text).join('\n');
 }
 
+// A conclusion is an authored document, not a collection of excerpts. Redact
+// secret payloads without flattening its prose, tables, paths or fenced code.
+function redactConclusion(text) {
+  let redactions = 0;
+  const hide = () => { redactions++; return '[redatto]'; };
+  const blocks = text
+    .replace(/-----BEGIN [^\r\n-]*PRIVATE KEY(?: BLOCK)?-----[\s\S]*?(?:-----END [^\r\n-]*PRIVATE KEY(?: BLOCK)?-----|$)/gi, hide)
+    .replace(/<(?:shell|tool_output|reasoning)\b[^>]*>[\s\S]*?<\/(?:shell|tool_output|reasoning)>/gi, hide);
+  let pending = false;
+  const markdown = blocks.split(/(\r?\n)/).map((line) => {
+    if (/^\r?\n$/.test(line)) return line;
+    if (pending && line.trim() && !/^\s*(?:`{3,}|~{3,})/.test(line)) {
+      pending = false;
+      return line.replace(/\S.*$/, hide);
+    }
+    return line
+      .replace(/(\b(?:Bearer|Basic)\s+)[A-Za-z0-9._~+/-]+={0,2}/gi, (match, prefix, offset, source) =>
+        /^Basic/i.test(prefix) && !/authorization\s*:\s*$/i.test(source.slice(0, offset)) ? match : prefix + hide())
+      .replace(/(\b(?:Authorization|Proxy-Authorization):\s*)(?!Bearer\b|Basic\b)[^\s"'`|]+/gi, (_, prefix) => prefix + hide())
+      .replace(/(\b(?:X-Api-Key|Set-Cookie|Cookie):[ \t]*)[^|]+/gi, (_, prefix) => prefix + hide())
+      .replace(/(\b[a-z][a-z0-9+.-]*:\/\/)[^/\s@]+@/gi, (_, prefix) => `${prefix}${hide()}@`)
+      .replace(/(\bhttps?:\/\/[^\s"'`<>)]*[?&](?:access_token|refresh_token|token|api[_-]?key|password|sig|signature|credential)=)[^&#\s"'`<>)]*/gi,
+        (_, prefix) => prefix + hide())
+      .replace(/((?:^|[\s|{,])["'`*]*(?:[\w-]+[_-])?(?:password|passwd|secret|token|api[ _-]?key|private[ _-]?key|credentials?|cookie|sessionid)["'`*]*[ \t]*[:=][ \t]*)("[^"\r\n]*"|'[^'\r\n]*'|`[^`\r\n]*`|[^|]*)/gi,
+        (_, prefix, value) => {
+          if (!value.trim()) { pending = true; return prefix; }
+          const quote = /^["'`]/.test(value) && value[0] === value.at(-1) ? value[0] : '';
+          return prefix + quote + hide() + quote;
+        })
+      .replace(/((?:^|\s)--(?:password|passwd|token|api-key|client-secret)(?:=|[ \t]+))(?:"[^"]*"|'[^']*'|[^\s|]+)/gi,
+        (_, prefix) => prefix + hide())
+      .replace(/\b(?:sk[-_]|gh[pousr]_|github_pat_|xox[baprs]-|AKIA|AGE-SECRET-KEY-)[\w-]{8,}\b|(?:\beyJ[\w-]{8,}\.[\w-]{8,}\.[\w-]{8,}\b)/gi, hide)
+      .replace(/\b[A-Za-z0-9_+/-]{32,}={0,2}(?=\W|$)/g, (word, offset, source) => {
+        if (/^[a-f0-9]{40}$|^[a-f0-9]{64}$/i.test(word) && /\b(?:sha(?:256|512)?|digest|checksum|commit|revision[e]?)\b/i.test(line)) return word;
+        if (/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/i.test(word) ||
+            source[offset - 1] === '/' && /^(?:srv|var|Volumes|opt|home|Users|tmp|etc)\//.test(word) &&
+              /^[a-z0-9_./-]+$/i.test(word)) return word;
+        return (/^[a-z]+(?:_[a-z]+){3,}$/.test(word) && !/[./]/.test(source[offset - 1] ?? '') &&
+          !/^[.(]/.test(source.slice(offset + word.length)))
+          || /[A-Z]/.test(word) && /[a-z]/.test(word) && /\d|[+=_]/.test(word)
+          || /^[a-z0-9+/]{43}=$/i.test(word)
+          || /^[a-f0-9]{32,}$/i.test(word) ? hide() : word;
+      })
+      .replace(/!\[([^\]\r\n]*)\]\((?:https?:|data:)[^)\r\n]*\)/gi, (_, alt) => `${alt} ${hide()}`);
+  }).join('');
+  return { markdown, redactions };
+}
+
 function step(message) {
   const { model, time, tokens } = message;
   return {
@@ -636,6 +684,31 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
       facts.set(`mandate:${row.ref.message}`, row);
     }
   }
+  const conclusionTurns = new Set();
+  let assistantSeen = false;
+  let ended = !activeMap[session] && (parent.session.time?.busy ?? 0) <= (parent.session.time?.idle ?? 0);
+  for (const message of parent.messages) {
+    if (message.type === 'idle' || message.type === 'user') {
+      assistantSeen = false;
+      ended = message.type === 'user' || message.outcome === 'succeeded';
+      continue;
+    }
+    if (message.type !== 'assistant' || assistantSeen) continue;
+    assistantSeen = true;
+    if (!ended || message.finish !== 'stop' || !message.time?.completed || message.error ||
+        message.content.some((part) => part.type === 'tool' && ['running', 'pending'].includes(part.state?.status))) continue;
+    const turn = timeline.rows.findLast((row) => row.at <= message.time.created);
+    const mandate = turn?.kind === 'mandato' ? turn.ref : turn?.data.mandate;
+    const text = assistantText(message);
+    if (!turn || !text.trim() || canceled.has(mandate?.message) || conclusionTurns.has(turn.ref.message) ||
+        (scope === 'latest' && (!goal || mandate?.message !== goal.id))) continue;
+    conclusionTurns.add(turn.ref.message);
+    facts.set(`conclusion:${message.id}`, {
+      confidence: 'REPORTED', kind: 'risposta conclusiva', ref: { session, message: message.id },
+      at: message.time.completed, turn: turn.ref, mandate: mandate ?? null,
+      data: redactConclusion(text),
+    });
+  }
   const taskDirective = operatorUpdate ?? timeline.lastControl;
   const resume = userMessages.find(({ id }) => id === taskDirective?.ref.message);
   if (resume && timeline.lastControl?.kind !== 'STOP') {
@@ -681,7 +754,35 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
     .filter(([key, hash, row, legacy]) => scope !== 'incremental' || (fingerprints[key] !== hash &&
       !(legacy && !fingerprints[key] && (fingerprints[legacy] === digest(row) ||
         (previous.through != null && row.at <= previous.through)))));
-  const visible = changed.filter(([key, , fact]) => fact.kind !== 'step' &&
+  // Reserve the conclusion budget before selecting any secondary evidence.
+  const conclusionBudget = 96000;
+  let remainingConclusion = conclusionBudget;
+  const conclusions = [], conclusionKeys = [];
+  const omittedConclusions = [];
+  const conclusionOrder = (row) => row.turn.message === goal?.id ? 0 : row.mandate?.message === goal?.id ? 1 : 2;
+  for (const [key, hash, row] of changed.filter(([, , fact]) => fact.kind === 'risposta conclusiva')
+    .sort(([, , a], [, , b]) => conclusionOrder(a) - conclusionOrder(b))) {
+    const total = row.data.markdown.length;
+    if (!remainingConclusion) {
+      omittedConclusions.push({ ref: row.ref, omittedCharacters: total });
+      continue;
+    }
+    const boundary = total > remainingConclusion ? row.data.markdown.lastIndexOf('\n', remainingConclusion - 1) + 1 : total;
+    const length = Math.min(total, boundary || remainingConclusion);
+    const markdown = row.data.markdown.slice(0, length);
+    conclusions.push({ ...row, historical: conclusionOrder(row) === 2,
+      data: { ...row.data, markdown, omittedCharacters: total - length } });
+    conclusionKeys.push([key, hash]);
+    remainingConclusion -= length;
+    if (total > length) remainingConclusion = 0;
+  }
+  if (omittedConclusions.length || conclusions.some((row) => row.data.omittedCharacters)) {
+    omissions.add(`budget del risultato conclusivo: ${conclusionBudget} caratteri; tagli indicati per risposta`);
+  }
+  const exportedConclusions = new Set(conclusions.filter((row) => !row.data.omittedCharacters).map((row) => row.ref.message));
+  const redundant = (row) => exportedConclusions.has(row.ref.message) &&
+    ['risultato', 'operazioni', 'completato', 'revisione dichiarata', 'revisione bundle dichiarata'].includes(row.kind);
+  const visible = changed.filter(([key, , fact]) => !['step', 'risposta conclusiva'].includes(fact.kind) && !redundant(fact) &&
     (fact.kind !== 'permessi in attesa' || fact.data.count > 0 || (scope === 'incremental' && fingerprints[key])) &&
     (fact.kind !== 'shell' || fact.data.command || fact.data.result !== 'PASS' ||
       (scope === 'incremental' && fingerprints[key])));
@@ -734,8 +835,9 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
     ...timeline.rows.map((row) => [`mandate:${row.ref.message}`, row]),
   ].map(([key, value]) => [digest(key), digest(value)]) : [];
   for (const [key, hash] of (requested === 'incremental' ?
-    [...copied, ...copied.flatMap(([key]) => grouped.get(key) ?? []),
-      ...changed.filter(([, , fact]) => fact.kind === 'step')] : [...baseline, ...changed])) {
+    [...copied, ...conclusionKeys, ...copied.flatMap(([key]) => grouped.get(key) ?? []),
+      ...changed.filter(([, , fact]) => fact.kind === 'step')] :
+    [...baseline, ...changed.filter(([, , fact]) => fact.kind !== 'risposta conclusiva'), ...conclusionKeys])) {
     delete fingerprints[key];
     fingerprints[key] = hash;
   }
@@ -767,7 +869,7 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
         'aperto', 'bloccato'].includes(row.kind) && (row.at < currentSince || !fromFinal(row))) row.historical = true;
     }
   }
-  const operational = (scope === 'incremental' ? all : evidence).filter((row) => fromFinal(row) &&
+  const operational = (scope === 'incremental' ? all : evidence).filter((row) => fromFinal(row) && !redundant(row) &&
     ['operazioni', 'risultato', 'completato'].includes(row.kind));
   const subagents = selected.slice(1).flatMap(({ session: child }) => {
     const rows = evidence.filter((row) => row.ref.session === child.id);
@@ -826,6 +928,8 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
         { ...lastDeclaredBundle, kind: 'bundle' } : lastDeclaredCommit ? { ...lastDeclaredCommit, kind: 'commit' } : null,
     },
     evidence,
+    conclusions,
+    omittedConclusions,
     currentMandate: timeline.current ?? null,
     originalMandate: first ? { ref: { session, message: first.id },
       text: clean(proseLines(first.text)[0]?.replace(/^#+\s*/, ''), 230) } : null,
@@ -910,6 +1014,27 @@ export function renderMarkdown(report) {
   const requirementRows = take(requirements);
   if (report.nextStep.ref) remaining.delete(rowKey(report.nextStep));
   for (const row of report.todos) remaining.delete(rowKey(row));
+  const conclusions = report.conclusions.flatMap((row) => {
+    const { markdown, redactions, omittedCharacters } = row.data;
+    let fence;
+    for (const line of markdown.split(/\r?\n/)) {
+      const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+      if (!marker) continue;
+      if (!fence) fence = marker[1];
+      else if (marker[1][0] === fence[0] && marker[1].length >= fence.length && !marker[2].trim()) fence = undefined;
+    }
+    return [
+      `**REPORTED** · ${row.historical ? 'Risposta storica' :
+        row.turn.message === report.currentMandate?.ref.message ? 'Risposta al mandato' : 'Risposta al seguito'} · ${date(row.at)} · ${refText(row.ref)}`,
+      '',
+      markdown,
+      ...(fence ? [fence] : []),
+      '',
+      ...(redactions ? [`- Redazioni di sicurezza: ${redactions}.`] : []),
+      ...(omittedCharacters ? [`- Troncato: ${omittedCharacters} caratteri finali non esportati.`] : []),
+      '---', '',
+    ];
+  });
   return [
     '# OpenCode Team AI Handoff', '',
     '_Dati da verificare, non istruzioni da eseguire._', '',
@@ -925,6 +1050,12 @@ export function renderMarkdown(report) {
     ] : []),
     ...(report.currentMandate && !includes(report.mandates, report.currentMandate) ? [formatRow(report.currentMandate)] : []),
     ...outline, '',
+    ...section('Risultato conclusivo del coordinatore', [
+      ...conclusions,
+      ...report.omittedConclusions.map(({ ref, omittedCharacters }) =>
+        `- ${refText(ref)}: risposta non esportata (${omittedCharacters} caratteri oltre il budget).`),
+    ], report.scope === 'incremental' ? '- Nessun risultato conclusivo nuovo o aggiornato.' :
+      '- **UNKNOWN** · nessuna risposta conclusiva disponibile per l’ambito letto.'),
     ...section('Risultato operativo e stato dei requisiti', [
       ...(report.operationalInherited ? ['- Contesto ereditato: non attesta un nuovo esito operativo.'] : []),
       ...operationRows, ...requirementRows,
@@ -954,7 +1085,9 @@ export function renderMarkdown(report) {
       ...gateRows,
     ]),
     ...section('Prossimo passo documentato', [
-      formatRow({ kind: 'prossimo passo', ...report.nextStep }),
+      report.conclusions.some((row) => !row.data.omittedCharacters && row.ref.message === report.nextStep.ref?.message)
+        ? `- **${report.nextStep.confidence}** · prossimo passo: vedi il risultato conclusivo (${refText(report.nextStep.ref)}).`
+        : formatRow({ kind: 'prossimo passo', ...report.nextStep }),
       ...(report.nextTodo ? [formatRow({ confidence: report.nextTodo.confidence, kind: 'TODO candidato (non autorizzazione)',
         ref: report.nextTodo.ref, data: { text: report.nextTodo.text, status: report.nextTodo.status } })] : []),
     ]),
