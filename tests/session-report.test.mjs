@@ -24,11 +24,11 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
   const current = record('current', 10, { type: 'user', text: 'Correggi la verifica locale.\npassword: hidden-multiline' });
   const old = record('old', 1, { type: 'user', text: 'Incarico precedente da inventariare.' });
   const users = operational ? [
-    record('resume-user', 15, { type: 'user', text: 'Riprendi la verifica locale.' }),
+    record('resume-user', 15, { type: 'user', text: 'Riprendi la verifica locale.\n1. Verifica il bundle effettivo.' }),
     record('go', 14, { type: 'user', text: 'AUTORIZZO UNA FINESTRA PRODUTTIVA UNA TANTUM.' }),
     record('stop', 13, { type: 'user', text: 'STOP AI NUOVI TENTATIVI PRODUTTIVI.' }),
     record('cancel', 12, { type: 'user', text: 'Ho sbagliato a inviare il prompt, annulla quello che hai fatto.' }),
-    record('wrong', 11, { type: 'user', text: 'Costruisci un plugin non pertinente.' }),
+    record('wrong', 11, { type: 'user', text: 'Costruisci un plugin non pertinente.\n## Criteri di accettazione\n- Criterio annullato.' }),
     current, old,
   ] : [current, old];
   const ctx = {
@@ -58,7 +58,13 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
               'Static review only; I did not rerun the tests.',
             ].join('\n') : 'Nessun rilievo.' : 'Vecchia risposta.')] }),
         ] };
-        return { cursor: {}, data: [...(operational === 'recovery' ? [
+        return { cursor: {}, data: [...(operational === 'closed' ? [
+          record('closed', 22, { type: 'assistant', finish: 'stop', content: [
+            text('Recovery completato. Fleet è in `rolled_back`; il gate dello scheduler è stato ripristinato.'),
+            text('Prima di un nuovo tentativo serve verificare `finalize`, `export_controller_dependencies()` e `scripts.shared_jobs`.'),
+            text('Valore ambiguo: `random_opaque_value_with_no_technical_context`.'),
+          ] }),
+        ] : []), ...(['recovery', 'closed'].includes(operational) ? [
           record('final', 21, { type: 'assistant', finish: 'stop', content: [
             text('Nessuna promozione. Il recovery nativo è in corso; il ripristino del gate non è ancora confermato.'),
           ] }),
@@ -71,6 +77,10 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
               time: { completed: 18 } },
             { ...shell("set -e; python3 -B -m unittest suite.Backup.test_expiry", 0, 'Ran 1 test in 0.011s\n\nOK\n'),
               time: { completed: 19 } },
+            { ...shell('npm test', 1), time: { completed: 18 } },
+            { ...shell('npm test', 0), time: { completed: 19 } },
+            { ...shell('python -m unittest suite.Backup.test_other_scope', 1, 'Ran 1 test in 0.01s\n\nFAILED (failures=1)\n'),
+              time: { completed: 17 } },
           ] : []),
           shell('npm test && deploy', 0),
           shell('pytest --version', 0),
@@ -121,7 +131,8 @@ test('copies the parent objective and native file, commit, test and approval evi
     'manca accesso allo staging.', 'approvazione deploy.', 'chiedere approvazione al responsabile.'])
     assert.ok(copies[0].includes(value), value);
   assert.equal(toasts.at(-1).variant, 'success');
-  assert.doesNotMatch(copies[0], /Incarico precedente|NOT A USER MANDATE/);
+  assert.match(copies[0], /mandato originale della sessione \(contesto\).*Incarico precedente/);
+  assert.doesNotMatch(copies[0], /NOT A USER MANDATE/);
 });
 
 test('keeps both review blockers, canceled mandates and the operational gate distinct', async () => {
@@ -136,12 +147,28 @@ test('keeps both review blockers, canceled mandates and the operational gate dis
   }
   assert.equal(full.mandates.find(({ ref }) => ref.message === 'wrong').disposition, 'annullato');
   assert.equal(latest.currentMandate.ref.message, 'current');
+  assert.equal(latest.lastControl.data.mandate.message, 'current');
+  assert.doesNotMatch(copies[0] + copies[1], /Criterio annullato/);
   assert.equal(latest.mandates.some(({ ref }) => ref.message === 'wrong'), false);
   assert.ok(full.operational.some(({ data }) => data.text?.includes('non è completato')));
   assert.ok(full.residualGates.some(({ data }) => data.text?.includes('Autorizzi una nuova finestra')));
   assert.ok(full.evidence.some(({ data }) => data.command === 'pytest tests/test_report.py' && data.laterPass));
   assert.ok(full.evidence.some(({ data }) => data.command === 'python -m unittest' && data.testsRun === 1 && data.laterPass));
+  assert.ok(full.evidence.some(({ data }) => data.command === 'npm test' && data.result === 'FAIL' && !data.laterPass));
+  assert.ok(full.evidence.some(({ data }) => data.cases?.includes('suite.Backup.test_other_scope') && !data.laterPass));
   assert.doesNotMatch(copies[0], /permessi in attesa.*count: 0/);
+});
+
+test('retains technical identifiers and moves resolved recovery to history with its native reference', async () => {
+  const { commands, copies } = fixture({ operational: 'closed' });
+  await commands.handoff.run();
+  await commands['handoff-json'].run();
+  const report = JSON.parse(copies[1]);
+  for (const symbol of ['rolled_back', 'finalize', 'export_controller_dependencies()', 'scripts.shared_jobs']) assert.ok(copies[0].includes(symbol), symbol);
+  assert.doesNotMatch(copies.join('\n'), /random_opaque_value_with_no_technical_context/);
+  assert.equal(report.residualGates.some(({ ref }) => ref.message === 'final'), false);
+  assert.equal(report.evidence.find(({ kind, ref }) => kind === 'aperto' && ref.message === 'final').data.supersededBy.message, 'closed');
+  assert.equal(copies[0].match(/Prima di un nuovo tentativo serve verificare/g)?.length, 1);
 });
 
 test('the latest recovery report supersedes an older request for GO without implying a new action', async () => {

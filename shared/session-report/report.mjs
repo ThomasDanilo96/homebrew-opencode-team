@@ -1,7 +1,8 @@
 import { createHash } from 'node:crypto';
 
 const redacted = '[omesso]';
-const sensitive = /(?:\b(?:authorization|bearer|password|passwd|creden[tz]ial\w*|api[ _-]?key|token|secret\w*|segret\w*|private[ _-]?key|chiave privata|cookie|sessionid)\b|(?:sk[-_]|gh[pousr]_|github_pat_|xox[baprs]-|AKIA)[\w-]{8,}|\b[\w-]{32,}\b|\b(?=[\w-]{18,}\b)(?=[\w-]*\d)[\w-]+\b|https?:\/\/|\S+@\S+|(?:^|[\s/])(?:~\/|\/|\.env\b)|\.(?:pem|key|p12)\b|[\p{C}])/iu;
+const sensitive = /(?:\b(?:authorization|bearer|password|passwd|creden[tz]ial\w*|api[ _-]?key|token|secret\w*|segret\w*|private[ _-]?key|chiave privata|cookie|sessionid)\b|(?:sk[-_]|gh[pousr]_|github_pat_|xox[baprs]-|AKIA)[\w-]{8,}|https?:\/\/|\S+@\S+|(?:^|[\s/])(?:~\/|\/|\.env\b)|\.(?:pem|key|p12)\b|[\p{C}])/iu;
+const opaque = /\b[\w-]{32,}\b|\b(?=[\w-]{18,}\b)(?=[\w-]*\d)[\w-]+\b/u;
 const credentialAssignment = /\b[\w.-]*(?:password|passwd|token|secret|api[_-]?key|credential|private[_-]?key|cookie)[\w.-]*\s*[:=]/i;
 const pathPattern = '[\\w.-]+(?:/[\\w.-]+)*';
 const relativePath = new RegExp(`^${pathPattern}$`);
@@ -12,6 +13,9 @@ const testCommand = new RegExp(
 const gitHead = /^git (?:rev-parse (?:--verify )?HEAD|show -s --format=%H HEAD)$/;
 const gitCheck = /^git (?:status(?: --short(?: --branch)?| -sb| --porcelain)?|diff --check|log -[1-9][0-9]? --oneline)$/;
 const UNKNOWN = 'non disponibile o non dimostrabile';
+const technicalCall = /\b(?:[a-z_][a-z0-9_]{0,23}\.)*[a-z][a-z0-9]{0,23}(?:_[a-z][a-z0-9]{0,23}){1,8}\(\)/g;
+const credentialComponent = /(?:^|[._-])(?:auth|password|passwd|token|secret|api[_-]?key|credential[s]?|cookie|sessionid)(?=$|[._-])/i;
+const recoveryCompleted = /\brecovery (?:nativo )?(?:(?:è stato|è) )?(?:completat[oa]|conclus[oa]|completed)\b/i;
 const labels = [
   ['risultato', /^(?:risultato|result|outcome|esito)$/i],
   ['completato', /^(?:completat[oi]|completed|modifiche principali)$/i],
@@ -41,22 +45,27 @@ function proseLines(value) {
     }
     if (fence || /^(?: {4}|\t|>)/.test(line)) return [];
     if (hideNext && line.trim()) { hideNext = false; return []; }
-    if ((sensitive.test(line) || credentialAssignment.test(line)) && /[:=]\s*$/.test(line)) { hideNext = true; return []; }
+    if ((sensitive.test(line) || opaque.test(line) || credentialAssignment.test(line)) && /[:=]\s*$/.test(line)) { hideNext = true; return []; }
     return [line.trim()];
   }).filter(Boolean);
 }
 
 function scrubInline(value) {
-  return value.trim().replace(/`([^`]+)`/g, (_, code) =>
-    (safePath(code) && /[/.]/.test(code)) || testCommand.test(code) ||
-    (/^[0-9a-f]{7,12}$/.test(code) && /\b(?:commit|git|branch|master|HEAD)\b/i.test(value)) ||
-    /^(?:complete|prepared|finalized|promoted|idle|running|blocked|succeeded|failed)$/i.test(code) ||
-    (/^(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|HTTP \d{3})$/.test(code) && !sensitive.test(code)) ? code : '…');
+  return value.trim().replace(/`([^`]+)`/g, (_, code, offset, line) =>
+    !sensitive.test(code) && !credentialComponent.test(code) && (
+      (safePath(code) && /[/.]/.test(code)) ||
+      (!opaque.test(code) && (testCommand.test(code) || gitCheck.test(code) || gitHead.test(code))) ||
+      (/^[0-9a-f]{7,12}$/.test(code) && /\b(?:commit|git|branch|master|HEAD)\b/i.test(value)) ||
+      /^(?:complete|prepare[d]?|finalize[d]?|promoted|idle|running|blocked|succeeded|failed|rolled_back|rollback|preflight|switch|git archive|fleet status)$/i.test(code) ||
+      (/^[1-5]\d{2}$/.test(code) && /\bHTTP\s*$/.test(line.slice(0, offset))) ||
+      (/^(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|HTTP \d{3})$/.test(code) && !opaque.test(code)) ||
+      (code.length <= 100 && code.replace(technicalCall, '') === '')) ? code : '…');
 }
 
 function excerpt(value, limit = 180) {
   const line = scrubInline(value);
-  if (!line || sensitive.test(line) || credentialAssignment.test(line) || /[`<>[\]{}\\|]/.test(line)) return redacted;
+  if (!line || sensitive.test(line) || credentialAssignment.test(line) || /[`<>[\]{}\\|]/.test(line) ||
+      opaque.test(line.replace(technicalCall, (call) => credentialComponent.test(call.slice(0, -2)) ? call : ''))) return redacted;
   return line.length > limit ? `${line.slice(0, limit - 1)}…` : line;
 }
 
@@ -68,7 +77,7 @@ function shortText(value) {
 }
 
 function safePath(file) {
-  return typeof file === 'string' && file.length <= 120 && relativePath.test(file) && !sensitive.test(file) &&
+  return typeof file === 'string' && file.length <= 120 && relativePath.test(file) && !sensitive.test(file) && !opaque.test(file) &&
     !/(?:^|\/)(?:\.git|auth\.json|credentials?|secrets?|\.\.)(?:\/|$)/i.test(file) &&
     !/\.(?:db|sqlite3?|log|jks|pfx|crt)$/i.test(file);
 }
@@ -111,7 +120,7 @@ function mandateTimeline(session, userMessages) {
     const summary = clean(title ?? lines[0], 230);
     const row = { kind, confidence: 'REPORTED', ref: { session, message: m.id }, at: m.time.created,
       data: { text: summary }, disposition: kind === 'mandato' ? 'storico' : 'contestuale' };
-    if (kind === 'mandato' || (kind === 'continuazione' && lines.some((line) => /^\d+[.)]\s/.test(line)))) current = row;
+    if (kind === 'mandato') current = row;
     if (kind === 'annullamento' && rows.at(-1)?.kind === 'mandato' &&
         /prompt|precedente|previous|last|quello che hai fatto/i.test(lines[0] ?? '')) {
       const canceled = rows.at(-1);
@@ -157,15 +166,15 @@ function shellEvidence(command, exit, running, failed, output) {
   if (typeof command !== 'string') return null;
   command = command.replace(/^\/opt\/homebrew\/opt\/node@22\/bin\/node (?=--test(?: |$))/, 'node ');
   const test = command.length <= 1024 && testCommand.test(command);
-  const hideArgs = test && (command.length > 180 || sensitive.test(command));
+  const hideArgs = test && (command.length > 180 || sensitive.test(command) || opaque.test(command));
   const head = gitHead.test(command);
   const commit = /^(?:git add [\w .\/-]+ && (?:git diff --cached --check && )?)?git commit(?: [^\n;&|<>`$]*)?$/.test(command);
   const cherry = /^git cherry-pick ([0-9a-f]{7,64})$/.exec(command);
   const checksumPath = /^(?:shasum -a 256|sha256sum) (\S+)$/.exec(command)?.[1];
   // Inspect a bounded sample for strict scalar values. Never export stdout or stderr.
   const sample = typeof output === 'string' ? output.slice(0, 12000) : '';
-  const unittest = /\bpython(?:3)?(?: -B)? -m unittest[ \t]+(?:-[qv][ \t]+)?([^'"\r\n;&|)]{1,2048})(?=['"\r\n;&|)]|$)/.exec(command);
-  const targets = unittest?.[1].trim().split(/[ \t]+/) ?? [];
+  const unittest = [...command.matchAll(/\bpython(?:3)?(?: -B)? -m unittest[ \t]+(?:-[qv][ \t]+)?([^'"\r\n;&|)]{1,2048})(?=['"\r\n;&|)]|$)/g)];
+  const targets = unittest.length === 1 ? unittest[0][1].trim().split(/[ \t]+/) : [];
   const cases = targets.length <= 20 && targets.every((value) => /^[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+$/.test(value)) ? targets : [];
   const unittestResults = [...sample.matchAll(/^Ran (\d{1,6}) tests? in [\d.]+s\s*\r?\n\s*(OK|FAILED)(?: \(([^\r\n]{1,100})\))?\r?$/gm)];
   const suite = cases.length && unittestResults.length === 1 ? unittestResults[0] : null;
@@ -192,7 +201,11 @@ function shellEvidence(command, exit, running, failed, output) {
       test || head || gitCheck.test(command) ? command : commit ? 'git commit' :
         plumbing && revision ? 'git commit-tree / update-ref' : cherry ? 'git cherry-pick' : null,
     result, exit: Number.isInteger(exit) ? exit : null, ...(hideArgs ? { scopeRedacted: true } : {}),
-    ...(suite ? { testsRun: Number(suite[1]), cases: cases.filter(safePath), testScopeKey: digest(cases) } : {}),
+    ...(suite ? { testsRun: Number(suite[1]), cases: cases.filter((name) => name.length <= 240 &&
+      !sensitive.test(name) && !credentialComponent.test(name) && name.split('.').every((part) =>
+        !opaque.test(part) || /^test(?:_[a-z][a-z0-9]{0,23}){2,16}$/.test(part))),
+    testScopeKey: digest([command, cases]) } : test && !hideArgs &&
+      /(?:\.test\.[\w]+|(?:^|\s)(?:tests?\/|\S+\.py(?:\s|$)))/.test(command) ? { testScopeKey: digest(command) } : {}),
     ...(skipped ? { skipped } : {}), ...(revision ? { revision, source: head ? 'HEAD' : 'commit' } : {}),
     ...(cherry && result === 'PASS' ? { appliedCommit: cherry[1] } : {}),
     ...(sha256 ? { path: checksumPath, sha256 } : {}) },
@@ -200,7 +213,7 @@ function shellEvidence(command, exit, running, failed, output) {
 }
 
 function collect(family, active, floor, fallbackGoal) {
-  const facts = new Map(), seenText = new Set();
+  const facts = new Map(), seenText = new Map();
   for (const { session, messages, permissions } of family) {
     const entries = messages.filter((message) => (message.time?.created ?? 0) >= floor);
     if (fallbackGoal && session === family[0].session && !entries.some(({ id }) => id === fallbackGoal.id)) entries.push(fallbackGoal);
@@ -208,7 +221,9 @@ function collect(family, active, floor, fallbackGoal) {
     const add = (kind, data, message, index = '', call, confidence = 'OBSERVED', at = message?.time?.created ?? null) => {
       const ref = { session: session.id, ...(message?.id ? { message: message.id } : {}), ...(call ? { call } : {}) };
       const key = JSON.stringify([session.id, message?.id ?? '', call ?? '', kind, index]);
-      facts.set(key, { confidence, kind, ref, at, data });
+      const row = { confidence, kind, ref, at, data };
+      facts.set(key, row);
+      return row;
     };
     const child = Boolean(session.parentID) || session !== family[0].session;
     const recordedStep = entries.find((m) => m.type === 'assistant' && m.model);
@@ -225,9 +240,14 @@ function collect(family, active, floor, fallbackGoal) {
         const value = limit && typeof text === 'string' ? narrative(text, limit) : clean(text, limit);
         if (!value || value === redacted) return;
         const id = JSON.stringify([session.id, kind, value]);
-        if (kind !== 'mandato' && seenText.has(id)) return;
-        seenText.add(id);
-        add(kind, { text: value }, m, index, undefined, 'REPORTED');
+        const prior = seenText.get(id);
+        if (prior && kind !== 'criterio di accettazione') {
+          if (m.id !== prior.ref.message && !prior.relatedRefs?.some((ref) => ref.message === m.id)) {
+            (prior.relatedRefs ??= []).push({ session: session.id, message: m.id });
+          }
+          return;
+        }
+        seenText.set(id, add(kind, { text: value }, m, index, undefined, 'REPORTED'));
       };
       if (m.type === 'user') {
         if (child) mention('incarico figlio', shortText(m.text), '');
@@ -289,7 +309,7 @@ function collect(family, active, floor, fallbackGoal) {
           if (line.startsWith('#')) heading = labels.find(([, regex]) => regex.test(normalized.replace(/^#+\s*/, '')))?.[0];
           const kind = field && labels.find(([, regex]) => regex.test(field[1]))?.[0];
           const bullet = /^(?:[-*]|\d+[.)])\s/.test(line);
-          if (terminal && /^(?:Autorizzi\b|Serve (?:un |il )?(?:nuovo )?GO\b|Manca (?:solo )?(?:il |un )?GO\b)/i.test(normalized)) {
+          if (terminal && /(?:^Autorizzi\b|\b(?<!non )(?:serve|manca) (?:solo )?(?:un |il )?(?:nuovo )?GO\b)/i.test(normalized)) {
             mention('GO mancante', normalized, index, 400);
             mention('prossimo passo', normalized, index, 400);
             continue;
@@ -467,10 +487,19 @@ function scopeFacts(family, active, floor, goal) {
   const facts = collect(family, active, floor, goal);
   const rows = [...facts.values()];
   const laterPasses = new Map();
+  const completedRecovery = new Map();
   for (const row of [...rows].sort((a, b) => (b.at ?? 0) - (a.at ?? 0))) {
-    if (row.kind !== 'test tecnico' || !row.data.command || row.data.scopeRedacted) continue;
-    const key = JSON.stringify([row.ref.session, row.data.command, row.data.testScopeKey ?? null, row.data.workdirKey ?? null]);
-    delete row.data.workdirKey;
+    const text = row.data.text ?? '';
+    const closure = completedRecovery.get(row.ref.session);
+    if (row.confidence === 'REPORTED' && recoveryCompleted.test(text)) {
+      completedRecovery.set(row.ref.session, row);
+    } else if (closure?.at > row.at && /\brecovery\b[^.!?]{0,55}\bin corso\b/i.test(text) &&
+      (!/\b(?:gate|scheduler)\b/i.test(text) ||
+        /\b(?:gate(?: dello scheduler)?|scheduler) (?:(?:è stato|è) )?ripristinat[oa]\b/i.test(closure.data.text))) {
+      row.data.supersededBy = closure.ref;
+    }
+    if (row.kind !== 'test tecnico' || !row.data.testScopeKey) continue;
+    const key = JSON.stringify([row.ref.session, row.data.testScopeKey, row.data.workdirKey ?? null]);
     const pass = laterPasses.get(key);
     if (row.data.result === 'PASS') laterPasses.set(key, row);
     if (row.data.result === 'FAIL' && pass?.at > row.at) row.data.laterPass = pass.ref;
@@ -522,7 +551,23 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
   }
   const selected = family.filter((item) => scoped.has(item.session.id));
   const activeMap = active ?? {};
+  const history = scope === 'latest' ? scopeFacts(family, activeMap, 0, first) : null;
   const facts = scopeFacts(selected, activeMap, floor, scope === 'latest' ? goal : first);
+  const operationalKinds = ['operazioni', 'risultato', 'completato', 'revisione dichiarata', 'prossimo passo',
+    'attività documentata in corso', 'GO mancante'];
+  const parentFinal = [...(history ?? facts).values()].filter((row) => row.ref.session === session &&
+    operationalKinds.includes(row.kind) && parent.messages.some((m) => m.id === row.ref.message && !m.error &&
+      m.type === 'assistant' && m.time?.completed && (!m.finish || m.finish === 'stop')))
+    .sort((a, b) => b.at - a.at)[0];
+  const fromFinal = (row) => parentFinal && row.ref.session === session && row.ref.message === parentFinal.ref.message;
+  const inherited = Boolean(parentFinal && parentFinal.at < effectiveStart);
+  if (history && inherited) {
+    for (const [key, row] of history) if (fromFinal(row) && operationalKinds.includes(row.kind)) facts.set(key, row);
+  }
+  const canceled = new Set(timeline.rows.filter((row) => row.disposition === 'annullato').map(({ ref }) => ref.message));
+  for (const [key, row] of facts) {
+    if (row.kind === 'criterio di accettazione' && row.ref.session === session && canceled.has(row.ref.message)) facts.delete(key);
+  }
   for (const row of timeline.rows) {
     if (scope !== 'latest' || row === timeline.current || row.at >= floor) {
       facts.set(`mandate:${row.ref.message}`, row);
@@ -553,30 +598,28 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
   const fingerprints = Object.assign(Object.create(null), previous?.fingerprints);
   const changed = ranked.map(([key, fact]) => [digest(key), digest(fact), fact])
     .filter(([key, hash]) => scope !== 'incremental' || fingerprints[key] !== hash);
-  const parentFinal = all.find((row) => row.ref.session === session && row.at >= effectiveStart &&
-    ['operazioni', 'risultato', 'completato', 'revisione dichiarata', 'prossimo passo', 'attività documentata in corso', 'GO mancante'].includes(row.kind));
-  const fromFinal = (row) => parentFinal && row.ref.session === session && row.ref.message === parentFinal.ref.message;
   const visible = changed.filter(([key, , fact]) => fact.kind !== 'step' &&
     (fact.kind !== 'permessi in attesa' || fact.data.count > 0 || (scope === 'incremental' && fingerprints[key])) &&
     (fact.kind !== 'shell' || fact.data.command || fact.data.result !== 'PASS' ||
       (scope === 'incremental' && fingerprints[key])));
   const isMandate = (row) => row.disposition !== undefined;
   const priority = (row) => fromFinal(row) || row === timeline.current || ({
-    'requisito corrente': true, 'verdetto review': true, 'stato coordinatore': true, subagente: true,
-    'working tree attuale': true, bloccato: true, 'GO mancante': true, 'prossimo passo': true,
-  })[row.kind] ? 0 : row.at >= effectiveStart && row.ref.session === session &&
+    'requisito corrente': true, 'stato coordinatore': true, 'working tree attuale': true,
+  })[row.kind] ? 0 : !row.data.supersededBy && (row.at >= effectiveStart || row.ref.session !== session) &&
+    ['bloccato', 'verdetto review'].includes(row.kind) ? 0.25 : row.at >= effectiveStart && row.ref.session === session &&
     (/^file /.test(row.kind) || row.kind === 'test tecnico' || row.data.revision) ? 0.5 :
-    row.data.revision || row.data.appliedCommit || row.disposition === 'annullato' || ({
+    row.data.revision || row.data.appliedCommit || recoveryCompleted.test(row.data.text ?? '') ||
+    row.disposition === 'annullato' || ({
     'test tecnico': true, 'digest verificato': true, 'revisione dichiarata': true, decisione: true,
     'criterio di accettazione': true, 'esecuzione non riuscita': true, 'errore o retry step': true,
-    risultato: true, aperto: true, 'notifica figlio al coordinatore': true,
+    risultato: true, aperto: true, subagente: true, 'notifica figlio al coordinatore': true,
   })[row.kind] || isMandate(row) ? 1 : 2;
   const seenEvidence = new Map(), grouped = new Map();
   const concise = visible.filter(([fingerprint, hash, row]) => {
     if (scope === 'incremental') return true;
     const field = /^file /.test(row.kind) ? [row.data.path, row.data.change] :
       row.kind === 'test tecnico' && !row.data.scopeRedacted ?
-        [row.data.command, row.data.testScopeKey, row.data.result, row.data.skipped] :
+        [row.data.command, row.data.testScopeKey, row.data.result, row.data.skipped, row.data.laterPass] :
       row.kind === 'shell' && !row.data.revision && !row.data.appliedCommit ? [row.data.command, row.data.result, row.data.exit] :
       row.kind === 'evento sintetico' ? ['synthetic'] : null;
     if (!field) return true;
@@ -584,7 +627,7 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
     if (seenEvidence.has(key)) {
       const canonical = seenEvidence.get(key);
       const entries = grouped.get(canonical) ?? [];
-      entries.push([fingerprint, hash]);
+      entries.push([fingerprint, hash, row]);
       grouped.set(canonical, entries);
       return false;
     }
@@ -594,8 +637,8 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
   if (visible.length !== concise.length) omissions.add(`${visible.length - concise.length} attestazioni ripetute raggruppate`);
   if (concise.length > capacity) omissions.add(`${concise.length - capacity} evidenze oltre il limite di copia`);
   const copied = concise.sort(([, , a], [, , b]) => priority(a) - priority(b)).slice(0, capacity);
-  const baseline = scope === 'latest' ? [
-    ...scopeFacts(family, activeMap, 0, first),
+  const baseline = history ? [
+    ...history,
     ...timeline.rows.map((row) => [`mandate:${row.ref.message}`, row]),
   ].map(([key, value]) => [digest(key), digest(value)]) : [];
   for (const [key, hash] of (requested === 'incremental' ?
@@ -610,8 +653,15 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
   const next = timeline.lastControl?.kind === 'STOP' ? undefined :
     all.find((row) => row.kind === 'prossimo passo' && fromFinal(row)) ??
     all.find((row) => row.kind === 'attività documentata in corso' && fromFinal(row));
-  const gates = all.filter((row) => ['GO mancante', 'bloccato', 'aperto'].includes(row.kind) && fromFinal(row)).slice(0, 5);
+  const gates = all.filter((row) => ['GO mancante', 'bloccato', 'aperto'].includes(row.kind) && fromFinal(row) &&
+    !inherited && !row.data.supersededBy).slice(0, 5);
   const evidence = copied.map(([, , fact]) => fact);
+  for (const [key, , row] of copied) {
+    const refs = [...new Map([...(row.relatedRefs ?? []),
+      ...(grouped.get(key) ?? []).map(([, , item]) => item.ref)]
+      .map((ref) => [JSON.stringify(ref), ref]).filter(([ref]) => ref !== JSON.stringify(row.ref))).values()];
+    if (refs.length) row.relatedRefs = refs;
+  }
   for (const row of evidence) {
     if (row.at && !isMandate(row) && row.ref.session === session) {
       const boundary = timeline.rows.findLast(({ at }) => at <= row.at);
@@ -645,9 +695,12 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
     },
     evidence,
     currentMandate: timeline.current ?? null,
+    originalMandate: first ? { ref: { session, message: first.id },
+      text: clean(proseLines(first.text)[0]?.replace(/^#+\s*/, ''), 230) } : null,
     lastControl: timeline.lastControl ?? null,
     mandates: evidence.filter(isMandate).sort((a, b) => a.at - b.at),
     operational,
+    operationalInherited: inherited,
     subagents,
     pendingPermissions: selected.reduce((sum, item) => sum + (item.permissions ?? 0), 0),
     pendingPermissionsUnknown: selected.filter(({ permissions }) => permissions === undefined).length,
@@ -668,8 +721,11 @@ export function renderMarkdown(report) {
   const formatData = (data) => Object.entries(data).filter(([, value]) => value !== null)
     .map(([name, value]) => `${name}: ${typeof value === 'object' ? JSON.stringify(value) : value}`).join(' · ');
   const date = (at) => at ? new Date(at).toISOString() : '';
-  const formatRow = ({ confidence, kind, data, ref, disposition, at }) =>
-    `- **${confidence}** · ${kind}${disposition ? ` (${disposition})` : ''} · ${at ? `${date(at)} · ` : ''}${formatData(data)}${ref ? ` (${[ref.session, ref.message, ref.call].filter(Boolean).join('/')})` : ''}`;
+  const refText = (ref, owner = report.context.session) =>
+    [ref.session !== owner || !ref.message ? ref.session : null, ref.message, ref.call].filter(Boolean).join('/');
+  const formatRow = ({ confidence, kind, data, ref, relatedRefs, disposition, at }) =>
+    `- **${confidence}** · ${kind}${disposition ? ` (${disposition})` : ''}${data.supersededBy ? ' (storico, superato)' : ''} · ` +
+    `${at ? `${date(at)} · ` : ''}${formatData(data)}${ref ? ` (${[ref, ...(relatedRefs ?? [])].map((item) => refText(item, ref.session)).join('; ')})` : ''}`;
   const remaining = new Set(report.evidence.filter((row) => row.ref.session === report.context.session));
   const take = (rows, transform = formatRow) => rows.map((row) => {
     remaining.delete(row);
@@ -678,12 +734,18 @@ export function renderMarkdown(report) {
   const section = (name, rows, empty = '- **UNKNOWN** · nessuna evidenza nella finestra letta.') =>
     [`## ${name}`, ...(rows.length ? rows : [empty]), ''];
   const root = (match) => [...remaining].filter(match).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+  const next = report.nextStep;
+  for (const row of remaining) {
+    if (next.ref && row.ref.message === next.ref.message && row.data.text === next.data.text &&
+      !report.residualGates.includes(row)) remaining.delete(row);
+  }
   const operations = root((row) => row.kind === 'stato coordinatore' || report.operational.includes(row));
   const changes = root((row) => /^file |revisione|decisione|working tree|integra/.test(row.kind) ||
     row.data.revision || row.data.appliedCommit);
   const gates = root((row) => /GO |permessi/.test(row.kind) || report.residualGates.includes(row));
   const errors = root((row) => /bloccato|aperto|errore|non riuscita/.test(row.kind) || row.data.result === 'FAIL');
-  const requirements = root((row) => /^(?:requisito corrente|criterio di accettazione)$/.test(row.kind));
+  const requirements = root((row) => row.kind === 'requisito corrente' ||
+    row.kind === 'criterio di accettazione' && row.ref.message === report.currentMandate?.ref.message);
   const outline = take(report.mandates);
   const errorRows = take(errors.filter((row) => !gates.includes(row)), (row) => {
     const qualifier = row.data.laterPass ? 'storico — stessa verifica poi PASS' :
@@ -692,8 +754,12 @@ export function renderMarkdown(report) {
   });
   const operationRows = take(operations);
   const changeRows = take(changes);
-  const gateRows = take(gates, (row) => formatRow(row.kind === 'GO mancante' && !report.residualGates.includes(row) ?
-    { ...row, kind: 'GO mancante (storico, non gate corrente)' } : row));
+  const gateRows = take(gates, (row) => formatRow({
+    ...row,
+    kind: row.kind === 'GO mancante' && !report.residualGates.includes(row) ? 'GO mancante (storico, non gate corrente)' : row.kind,
+    data: next.ref && row.ref.message === next.ref.message && row.data.text === next.data.text ?
+      { text: 'Dettaglio nel prossimo passo documentato.' } : row.data,
+  }));
   const requirementRows = take(requirements);
   if (report.nextStep.ref) remaining.delete(report.nextStep);
   return [
@@ -705,9 +771,14 @@ export function renderMarkdown(report) {
       interval: Object.fromEntries(Object.entries(report.context.interval).map(([key, ms]) =>
         [key, ms === null ? null : new Date(ms).toISOString()])),
     } }),
+    ...(report.originalMandate && report.originalMandate.ref.message !== report.currentMandate?.ref.message ? [
+      formatRow({ confidence: 'REPORTED', kind: 'mandato originale della sessione (contesto)',
+        ref: report.originalMandate.ref, data: { text: report.originalMandate.text } }),
+    ] : []),
     ...(report.currentMandate && !report.mandates.includes(report.currentMandate) ? [formatRow(report.currentMandate)] : []),
     ...outline, '',
     ...section('Risultato operativo e stato dei requisiti', [
+      ...(report.operationalInherited ? ['- Ultimo stato documentato, precedente al mandato corrente.'] : []),
       ...operationRows, ...requirementRows,
       '- Lo stato nativo dell’esecuzione non attesta il successo del mandato o dello stato produttivo.',
     ]),
