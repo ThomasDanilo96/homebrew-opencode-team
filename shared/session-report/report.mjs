@@ -51,19 +51,22 @@ function proseLines(value) {
 }
 
 function scrubInline(value) {
-  return value.trim().replace(/`([^`]+)`/g, (_, code, offset, line) =>
-    !sensitive.test(code) && !credentialComponent.test(code) && (
+  return value.trim().replace(/`([^`]+)`/g, (_, code, offset, line) => {
+    if (/\b(?:piano|plan)\s*$/i.test(line.slice(0, offset)) &&
+      /^[a-f0-9]{8}-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}$/i.test(code)) return `${code.slice(0, 8)}…`;
+    return !sensitive.test(code) && !credentialComponent.test(code) && (
       (safePath(code) && /[/.]/.test(code)) ||
       (!opaque.test(code) && (testCommand.test(code) || gitCheck.test(code) || gitHead.test(code))) ||
       (/^[0-9a-f]{7,12}$/.test(code) && /\b(?:commit|git|branch|master|HEAD)\b/i.test(value)) ||
       /^(?:complete|prepare[d]?|finalize[d]?|promoted|idle|running|blocked|succeeded|failed|rolled_back|rollback|preflight|switch|git archive|fleet status)$/i.test(code) ||
       (/^[1-5]\d{2}$/.test(code) && /\bHTTP\s*$/.test(line.slice(0, offset))) ||
       (/^(?:[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+|HTTP \d{3})$/.test(code) && !opaque.test(code)) ||
-      (code.length <= 100 && code.replace(technicalCall, '') === '')) ? code : '…');
+      (code.length <= 100 && code.replace(technicalCall, '') === '')) ? code : '…';
+  });
 }
 
 function excerpt(value, limit = 180) {
-  const line = scrubInline(value);
+  const line = scrubInline(value).replace(/\b(piano|plan)\s+([a-f0-9]{8})-(?:[a-f0-9]{4}-){3}[a-f0-9]{12}\b/gi, '$1 $2…');
   if (!line || sensitive.test(line) || credentialAssignment.test(line) || /[`<>[\]{}\\|]/.test(line) ||
       opaque.test(line.replace(technicalCall, (call) => credentialComponent.test(call.slice(0, -2)) ? call : ''))) return redacted;
   return line.length > limit ? `${line.slice(0, limit - 1)}…` : line;
@@ -104,8 +107,8 @@ function directive(text) {
   const line = proseLines(text)[0]?.replace(/^[#*\s]+/, '') ?? '';
   if (/^(?:ho sbagliato.*(?:prompt|invi|annull)|annulla\b|cancel (?:the )?(?:previous|last))/i.test(line)) return 'annullamento';
   if (/^(?:STOP\b|FERMATI\b|INTERROMPI\b|la devo fermare\b)/i.test(line)) return 'STOP';
-  if (/^(?:AUTORIZZO\b|GO\s*[:—-]|approvo\b)/i.test(line)) return 'autorizzazione storica';
-  if (/^(?:puoi procedere[.!]?$|prosegui\b|continua\b|riprendi\b|dobbiamo concludere questo lavoro\b|bene.*incarico.*originari)/i.test(line)) return 'continuazione';
+  if (/^(?:AUTORIZZO\b|GO[.!]\s*AUTORIZZO\b|GO\s*[:—-]|approvo\b)/i.test(line)) return 'autorizzazione storica';
+  if (/^(?:puoi procedere[.!]?$|procedi[.!]?$|prosegui\b|continua\b|riprendi\b|dobbiamo concludere questo lavoro\b|bene.*incarico.*originari)/i.test(line)) return 'continuazione';
   if (/^(?:\?|(?:ma\s+)?(?:cos['’]è|come mai|è normale|quant['’]è|dove|per?c?h[éeè]|quanto)\b)/i.test(line) || /\?$/.test(line)) return 'chiarimento';
   return 'mandato';
 }
@@ -120,6 +123,10 @@ function mandateTimeline(session, userMessages) {
     const summary = clean(title ?? lines[0], 230);
     const row = { kind, confidence: 'REPORTED', ref: { session, message: m.id }, at: m.time.created,
       data: { text: summary }, disposition: kind === 'mandato' ? 'storico' : 'contestuale' };
+    if (kind === 'autorizzazione storica') {
+      const scope = lines.slice(1, 7).map((line) => clean(line, 240)).filter(Boolean);
+      if (scope.length) row.data.scope = scope;
+    }
     if (kind === 'mandato') current = row;
     if (kind === 'annullamento' && rows.at(-1)?.kind === 'mandato' &&
         /prompt|precedente|previous|last|quello che hai fatto/i.test(lines[0] ?? '')) {
@@ -216,6 +223,9 @@ function collect(family, active, floor, fallbackGoal) {
   const facts = new Map(), seenText = new Map();
   for (const { session, messages, permissions } of family) {
     const entries = messages.filter((message) => (message.time?.created ?? 0) >= floor);
+    const shellNotices = new Map(messages.filter((m) => m.type === 'synthetic' && m.metadata?.source === 'shell' &&
+      m.metadata.shellID && ['completed', 'cancelled', 'error'].includes(m.metadata.state)).reverse()
+      .map((m) => [m.metadata.shellID, m]));
     if (fallbackGoal && session === family[0].session && !entries.some(({ id }) => id === fallbackGoal.id)) entries.push(fallbackGoal);
     const state = status(session, active, messages);
     const add = (kind, data, message, index = '', call, confidence = 'OBSERVED', at = message?.time?.created ?? null) => {
@@ -234,11 +244,28 @@ function collect(family, active, floor, fallbackGoal) {
         model: recordedStep ? step(recordedStep).model : null, effort: recordedStep ? step(recordedStep).effort : null } : {}),
     });
     if (permissions !== undefined) add('permessi in attesa', { count: permissions });
+    const todoMessage = messages.find((m) => m.type === 'assistant' && m.content.some((part) =>
+      part.type === 'tool' && part.name === 'todowrite' && part.state.status === 'completed' &&
+      Array.isArray(part.state.metadata?.todos)));
+    const todo = todoMessage?.content.findLast((part) => part.type === 'tool' && part.name === 'todowrite' &&
+      part.state.status === 'completed' && Array.isArray(part.state.metadata?.todos));
+    if (todo) {
+      const items = todo.state.metadata.todos.slice(0, 40).flatMap((item) => {
+        const text = clean(item.content, 200);
+        return text && ['pending', 'in_progress', 'completed', 'cancelled'].includes(item.status) ?
+          [{ text, status: item.status }] : [];
+      });
+      add('TODO nativi', { items, total: todo.state.metadata.todos.length }, todoMessage, '', todo.id,
+        'OBSERVED', todo.time?.completed ?? todoMessage.time?.created);
+    }
     const conclusion = [...entries].find((m) => m.type === 'assistant' && m.time?.completed && !m.error && assistantText(m).trim());
     for (const m of entries) {
       const mention = (kind, text, index, limit) => {
         const value = limit && typeof text === 'string' ? narrative(text, limit) : clean(text, limit);
         if (!value || value === redacted) return;
+        if (['bloccato', 'aperto'].includes(kind) && /^(?:none|no blockers?|nessuno|nessun blocc[oa])[.!]?(\s|$)/i.test(value)) {
+          kind = 'risultato';
+        }
         const id = JSON.stringify([session.id, kind, value]);
         const prior = seenText.get(id);
         if (prior && kind !== 'criterio di accettazione') {
@@ -262,7 +289,10 @@ function collect(family, active, floor, fallbackGoal) {
         continue;
       }
       if (m.type === 'synthetic') {
-        if (m.metadata?.source === 'subagent' && family.some((item) => item.session.id === m.metadata.childID)) {
+        if (m.metadata?.source === 'shell' && shellNotices.get(m.metadata.shellID) === m) {
+          add('esito shell in background', { state: m.metadata.state, shellID: m.metadata.shellID,
+            exit: Number.isInteger(m.metadata.exit) ? m.metadata.exit : null }, m);
+        } else if (m.metadata?.source === 'subagent' && family.some((item) => item.session.id === m.metadata.childID)) {
           add('notifica figlio al coordinatore', { child: m.metadata.childID, integration: 'UNKNOWN' }, m);
         } else if (!child && m.metadata?.source !== 'subagent') {
           add('evento sintetico', { note: 'non apre un mandato' }, m);
@@ -270,7 +300,7 @@ function collect(family, active, floor, fallbackGoal) {
         continue;
       }
       if (m.type === 'compaction') {
-        add('compaction', { state: clean(m.status), reason: clean(m.reason), ...step(m) }, m);
+        add('compaction', { state: clean(m.status), reason: clean(m.reason), errorType: clean(m.error?.type), ...step(m) }, m);
         continue;
       }
       if (m.type === 'idle' && m.outcome !== 'succeeded') {
@@ -279,7 +309,7 @@ function collect(family, active, floor, fallbackGoal) {
       }
       if (m.type === 'shell') {
         const row = shellEvidence(m.command, m.exit, m.status === 'running', m.status !== 'exited', m.output?.output);
-        if (row) add(row.kind, row.data, m, '', undefined, 'OBSERVED', m.time?.completed ?? m.time?.created);
+        if (row) add(row.kind, { ...row.data, state: clean(m.status) }, m, '', undefined, 'OBSERVED', m.time?.completed ?? m.time?.created);
         continue;
       }
       if (m.type !== 'assistant') continue;
@@ -342,11 +372,18 @@ function collect(family, active, floor, fallbackGoal) {
         if (part.type !== 'tool' || part.executed === true) continue;
         const { status, input, metadata, content, error } = part.state;
         if (part.name === 'shell') {
-          const row = shellEvidence(input?.command, metadata?.exit, status === 'running' || metadata?.status === 'running',
-            status === 'error' || metadata?.interrupted || metadata?.timeout || metadata?.killed,
+          const notice = shellNotices.get(metadata?.shellID);
+          const shellState = notice?.metadata.state ?? metadata?.status;
+          const row = shellEvidence(input?.command, notice?.metadata.exit ?? metadata?.exit,
+            !notice && (status === 'running' || shellState === 'running'),
+            status === 'error' || metadata?.interrupted || ['timeout', 'killed', 'cancelled', 'error'].includes(shellState) ||
+              metadata?.timeout || metadata?.killed,
             content?.find((item) => item.type === 'text')?.text);
           if (row) {
-            add(row.kind, row.data, m, index, part.id, 'OBSERVED', part.time?.completed ?? m.time?.created);
+            if (['running', 'exited', 'timeout', 'killed', 'completed', 'cancelled', 'error'].includes(shellState)) row.data.state = shellState;
+            if (metadata?.interrupted === true) row.data.state = 'interrupted';
+            if (notice) row.data.confirmedBy = { session: session.id, message: notice.id };
+            add(row.kind, row.data, m, index, part.id, 'OBSERVED', notice?.time.created ?? part.time?.completed ?? m.time?.created);
             if (row.kind === 'test tecnico') row.data.workdirKey = digest(input?.workdir ?? null);
           }
         } else if (part.name === 'patch' && status === 'completed' && Array.isArray(metadata?.files)) {
@@ -477,7 +514,8 @@ function review(rows, family, active) {
       running: childStates.filter((s) => s === 'in esecuzione').length,
       interrupted: childStates.filter((s) => s === 'interrotto').length },
     recordedErrors: rows.filter(({ confidence, kind, data }) => confidence === 'OBSERVED' &&
-      (['errore o retry step', 'errore tool', 'esecuzione non riuscita'].includes(kind) || data.result === 'FAIL')).length,
+      (['errore o retry step', 'errore tool', 'esecuzione non riuscita'].includes(kind) || data.result === 'FAIL' ||
+        kind === 'compaction' && data.state === 'failed')).length,
     stepsWithRetry: rows.filter(({ kind, data }) => kind === 'errore o retry step' && data.retry).length,
     repeatedCommands: [...repetitions.values()].filter(({ count }) => count > 1).slice(0, 8),
   };
@@ -529,6 +567,9 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
   const previous = saved?.version === 1 && /^[0-9a-f]{64}$/.test(saved.id) && saved.fingerprints ? saved : null;
   const scope = requested === 'incremental' && !previous ? 'session' : requested;
   if (scope !== requested) omissions.add('checkpoint precedente assente o non valido: export sessione');
+  if (scope === 'incremental' && typeof previous.through !== 'number') {
+    omissions.add('checkpoint precedente senza limite temporale: le differenze non attestano quando è avvenuto un evento');
+  }
   const userMessages = users ?? parent.messages.filter(({ type }) => type === 'user');
   const timeline = mandateTimeline(session, userMessages);
   const goal = userMessages.find(({ id }) => id === timeline.current?.ref.message) ?? userMessages[0];
@@ -536,6 +577,10 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
     throw new Error('Latest assignment boundary unavailable');
   }
   const effectiveStart = Math.max(goal?.time?.created ?? 0, timeline.lastControl?.at ?? 0);
+  const operatorUpdate = timeline.rows.findLast((row) => row.kind === 'autorizzazione storica' &&
+    row.at >= (timeline.current?.at ?? effectiveStart));
+  // Later instructions make earlier requests historical; a GO does not prove any gate was met.
+  const currentSince = Math.max(effectiveStart, operatorUpdate?.at ?? 0);
   const floor = scope === 'latest' ? effectiveStart : 0;
   const scoped = new Set([session]);
   for (const item of family.slice(1)) {
@@ -560,7 +605,7 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
       m.type === 'assistant' && m.time?.completed && (!m.finish || m.finish === 'stop')))
     .sort((a, b) => b.at - a.at)[0];
   const fromFinal = (row) => parentFinal && row.ref.session === session && row.ref.message === parentFinal.ref.message;
-  const inherited = Boolean(parentFinal && parentFinal.at < effectiveStart);
+  const inherited = Boolean(parentFinal && parentFinal.at < currentSince);
   if (history && inherited) {
     for (const [key, row] of history) if (fromFinal(row) && operationalKinds.includes(row.kind)) facts.set(key, row);
   }
@@ -573,7 +618,6 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
       facts.set(`mandate:${row.ref.message}`, row);
     }
   }
-  const operatorUpdate = timeline.rows.findLast((row) => row.kind === 'autorizzazione storica' && row.at >= effectiveStart);
   const taskDirective = operatorUpdate ?? timeline.lastControl;
   const resume = userMessages.find(({ id }) => id === taskDirective?.ref.message);
   if (resume && timeline.lastControl?.kind !== 'STOP') {
@@ -593,6 +637,23 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
     confidence: workingTree || currentBranch ? 'OBSERVED' : 'UNKNOWN',
     kind: 'working tree attuale', ref: { session }, at: null, data: { branch: currentBranch, ...workingTree },
   });
+  if (client.experimental?.job) {
+    try {
+      const jobs = await client.experimental.job.list({ sessionID: session, kind: 'shell', descendants: true },
+        { signal: AbortSignal.timeout(3000) });
+      const shellJobs = jobs.filter((job) => job.kind === 'shell' && scoped.has(job.sessionID) &&
+        (job.status === 'running' || (job.time?.completed ?? job.time?.started ?? 0) >= floor))
+        .sort((a, b) => (b.time?.completed ?? b.time?.started ?? 0) - (a.time?.completed ?? a.time?.started ?? 0));
+      if (shellJobs.length > 40) omissions.add('lista dei lavori in background limitata');
+      for (const job of shellJobs.slice(0, 40)) facts.set(`job:${job.id}`, {
+        confidence: 'OBSERVED', kind: 'lavoro in background', ref: { session: job.sessionID, job: job.id },
+        at: job.time?.completed ?? job.time?.started ?? null,
+        data: { state: job.status, started: job.time?.started ?? null, completed: job.time?.completed ?? null },
+      });
+    } catch {
+      omissions.add('stato nativo dei lavori in background non disponibile');
+    }
+  }
   const ranked = [...facts].sort(([, a], [, b]) => (b.at ?? Infinity) - (a.at ?? Infinity));
   const all = ranked.map(([, fact]) => fact);
   const fingerprints = Object.assign(Object.create(null), previous?.fingerprints);
@@ -604,11 +665,13 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
       (scope === 'incremental' && fingerprints[key])));
   const isMandate = (row) => row.disposition !== undefined;
   const priority = (row) => fromFinal(row) || row === timeline.current || ({
-    'requisito corrente': true, 'stato coordinatore': true, 'working tree attuale': true,
+    'requisito corrente': true, 'stato coordinatore': true, 'working tree attuale': true, 'TODO nativi': true,
+    'lavoro in background': true, 'esito shell in background': true,
   })[row.kind] ? 0 : !row.data.supersededBy && (row.at >= effectiveStart || row.ref.session !== session) &&
     ['bloccato', 'verdetto review'].includes(row.kind) ? 0.25 : row.at >= effectiveStart && row.ref.session === session &&
     (/^file /.test(row.kind) || row.kind === 'test tecnico' || row.data.revision) ? 0.5 :
     row.data.revision || row.data.appliedCommit || recoveryCompleted.test(row.data.text ?? '') ||
+    row.kind === 'compaction' && row.data.state === 'failed' ||
     row.disposition === 'annullato' || ({
     'test tecnico': true, 'digest verificato': true, 'revisione dichiarata': true, decisione: true,
     'criterio di accettazione': true, 'esecuzione non riuscita': true, 'errore o retry step': true,
@@ -648,9 +711,10 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
     fingerprints[key] = hash;
   }
   const id = digest([session, scope, previous?.id ?? null, changed.map(([key, hash]) => [key, hash])]);
-  const heads = all.filter((row) => row.ref.session === session && row.data.source === 'HEAD');
-  const lastCommit = all.find((row) => row.ref.session === session && row.data.source === 'commit');
-  const next = timeline.lastControl?.kind === 'STOP' ? undefined :
+  const revisions = history ? [...history.values()].sort((a, b) => (b.at ?? 0) - (a.at ?? 0)) : all;
+  const heads = revisions.filter((row) => row.ref.session === session && row.data.source === 'HEAD');
+  const lastCommit = revisions.find((row) => row.ref.session === session && row.data.source === 'commit');
+  const next = inherited || timeline.lastControl?.kind === 'STOP' ? undefined :
     all.find((row) => row.kind === 'prossimo passo' && fromFinal(row)) ??
     all.find((row) => row.kind === 'attività documentata in corso' && fromFinal(row));
   const gates = all.filter((row) => ['GO mancante', 'bloccato', 'aperto'].includes(row.kind) && fromFinal(row) &&
@@ -666,10 +730,12 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
     if (row.at && !isMandate(row) && row.ref.session === session) {
       const boundary = timeline.rows.findLast(({ at }) => at <= row.at);
       if (boundary) row.turn = boundary.ref;
+      if (['GO mancante', 'prossimo passo', 'attività documentata in corso', 'operazioni', 'risultato',
+        'aperto', 'bloccato'].includes(row.kind) && (row.at < currentSince || !fromFinal(row))) row.historical = true;
     }
-    delete row.data.testScopeKey;
   }
-  const operational = evidence.filter((row) => fromFinal(row) && ['operazioni', 'risultato', 'completato', 'revisione dichiarata'].includes(row.kind));
+  const operational = (scope === 'incremental' ? all : evidence).filter((row) => fromFinal(row) &&
+    ['operazioni', 'risultato', 'completato'].includes(row.kind));
   const subagents = selected.slice(1).flatMap(({ session: child }) => {
     const rows = evidence.filter((row) => row.ref.session === child.id);
     if (!rows.length) return [];
@@ -677,7 +743,22 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
     return [{ session: child.id, ...native?.data, evidence: rows.filter((row) => row !== native) }];
   });
   const executionRows = scope === 'incremental' ? changed.map(([, , fact]) => fact) : all;
-  const execution = review(executionRows, selected, activeMap);
+  const changedSessions = new Set(changed.filter(([key, , row]) =>
+    row.kind === 'subagente' && previous?.fingerprints[key] ||
+    typeof previous?.through === 'number' && row.at > previous.through).map(([, , row]) => row.ref.session));
+  const execution = review(executionRows, scope === 'incremental' ?
+    [parent, ...selected.slice(1).filter(({ session }) => changedSessions.has(session.id))] : selected, activeMap);
+  const sessionExecution = scope === 'incremental' ? review(all, selected, activeMap) : null;
+  for (const row of evidence) delete row.data.testScopeKey;
+  execution.scope = scope === 'incremental' ? 'eventi nuovi o aggiornati' : scope;
+  if (scope === 'incremental') {
+    for (const [key, , row] of copied) {
+      row.change = previous.fingerprints[key] ? 'aggiornato' :
+        previous.through == null || row.at == null || row.at <= previous.through ? 'non presente nel checkpoint' : 'nuovo';
+    }
+  }
+  const declaration = revisions.find((row) => row.ref.session === session && row.kind === 'revisione dichiarata' &&
+    /\b[0-9a-f]{7,12}\b/i.test(row.data.text));
   execution.completionWithoutLocalEvidence = executionRows.filter((row) => (row.kind === 'completato' ||
     row.kind === 'subagente' && row.data.state === 'concluso') && !all.some((other) =>
     other.ref.session === row.ref.session && (/^file /.test(other.kind) || other.kind === 'test tecnico' ||
@@ -692,19 +773,24 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
       firstRecordedHead: heads.at(-1)?.data.revision ?? null,
       lastRecordedHead: heads[0]?.data.revision ?? null,
       lastRecordedCommit: lastCommit?.data.revision ?? null,
+      lastDeclaredCommit: declaration ? { revision: /\b[0-9a-f]{7,12}\b/i.exec(declaration.data.text)[0],
+        ref: declaration.ref, confidence: 'REPORTED' } : null,
     },
     evidence,
     currentMandate: timeline.current ?? null,
     originalMandate: first ? { ref: { session, message: first.id },
       text: clean(proseLines(first.text)[0]?.replace(/^#+\s*/, ''), 230) } : null,
     lastControl: timeline.lastControl ?? null,
+    latestAuthorization: operatorUpdate ?? null,
     mandates: evidence.filter(isMandate).sort((a, b) => a.at - b.at),
     operational,
-    operationalInherited: inherited,
+    operationalInherited: inherited || scope === 'incremental' && Boolean(parentFinal) && !evidence.some(fromFinal),
+    todos: all.filter((row) => row.kind === 'TODO nativi'),
     subagents,
     pendingPermissions: selected.reduce((sum, item) => sum + (item.permissions ?? 0), 0),
     pendingPermissionsUnknown: selected.filter(({ permissions }) => permissions === undefined).length,
     execution,
+    ...(sessionExecution ? { sessionExecution } : {}),
     residualGates: gates,
     nextStep: next ?? { confidence: 'UNKNOWN', data: { text: UNKNOWN } },
     unknown: [
@@ -714,7 +800,8 @@ export async function buildHandoff(client, sessionID, requested, { profile, chec
       'Installazione, recovery e GO correnti non si deducono da PASS tecnici o autorizzazioni storiche.',
     ].map((text) => ({ confidence: 'UNKNOWN', text })),
     omissions: [...omissions, 'Estratti filtrati e limitati; esclusi ragionamenti, allegati e output grezzi.'],
-  }, checkpoint: { version: 1, id, fingerprints: Object.fromEntries(Object.entries(fingerprints).slice(-16000)) } };
+  }, checkpoint: { version: 1, id, through: Math.max(previous?.through ?? 0, ...all.map((fact) => fact.at ?? 0)),
+    fingerprints: Object.fromEntries(Object.entries(fingerprints).slice(-16000)) } };
 }
 
 export function renderMarkdown(report) {
@@ -722,27 +809,31 @@ export function renderMarkdown(report) {
     .map(([name, value]) => `${name}: ${typeof value === 'object' ? JSON.stringify(value) : value}`).join(' · ');
   const date = (at) => at ? new Date(at).toISOString() : '';
   const refText = (ref, owner = report.context.session) =>
-    [ref.session !== owner || !ref.message ? ref.session : null, ref.message, ref.call].filter(Boolean).join('/');
-  const formatRow = ({ confidence, kind, data, ref, relatedRefs, disposition, at }) =>
-    `- **${confidence}** · ${kind}${disposition ? ` (${disposition})` : ''}${data.supersededBy ? ' (storico, superato)' : ''} · ` +
+    [ref.session !== owner || !(ref.message || ref.job) ? ref.session : null, ref.message, ref.call, ref.job].filter(Boolean).join('/');
+  const formatRow = ({ confidence, kind, data, ref, relatedRefs, disposition, at, change, historical }) =>
+    `- **${confidence}** · ${kind}${disposition ? ` (${disposition})` : ''}${data.supersededBy ? ' (storico, superato)' :
+      historical ? ' (storico)' : ''}${change ? ` · ${change}` : ''} · ` +
     `${at ? `${date(at)} · ` : ''}${formatData(data)}${ref ? ` (${[ref, ...(relatedRefs ?? [])].map((item) => refText(item, ref.session)).join('; ')})` : ''}`;
-  const remaining = new Set(report.evidence.filter((row) => row.ref.session === report.context.session));
+  const rowKey = (row) => JSON.stringify([row.kind, row.ref, row.at, row.data]);
+  const includes = (rows, row) => rows.some((r) => rowKey(r) === rowKey(row));
+  const remaining = new Map(report.evidence.filter((row) => row.ref.session === report.context.session)
+    .map((row) => [rowKey(row), row]));
   const take = (rows, transform = formatRow) => rows.map((row) => {
-    remaining.delete(row);
+    remaining.delete(rowKey(row));
     return transform(row);
   });
   const section = (name, rows, empty = '- **UNKNOWN** · nessuna evidenza nella finestra letta.') =>
     [`## ${name}`, ...(rows.length ? rows : [empty]), ''];
-  const root = (match) => [...remaining].filter(match).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
+  const root = (match) => [...remaining.values()].filter(match).sort((a, b) => (a.at ?? 0) - (b.at ?? 0));
   const next = report.nextStep;
-  for (const row of remaining) {
+  for (const row of remaining.values()) {
     if (next.ref && row.ref.message === next.ref.message && row.data.text === next.data.text &&
-      !report.residualGates.includes(row)) remaining.delete(row);
+      !includes(report.residualGates, row)) remaining.delete(rowKey(row));
   }
-  const operations = root((row) => row.kind === 'stato coordinatore' || report.operational.includes(row));
+  const operations = root((row) => row.kind === 'stato coordinatore' || includes(report.operational, row));
   const changes = root((row) => /^file |revisione|decisione|working tree|integra/.test(row.kind) ||
     row.data.revision || row.data.appliedCommit);
-  const gates = root((row) => /GO |permessi/.test(row.kind) || report.residualGates.includes(row));
+  const gates = root((row) => /GO |permessi/.test(row.kind) || includes(report.residualGates, row));
   const errors = root((row) => /bloccato|aperto|errore|non riuscita/.test(row.kind) || row.data.result === 'FAIL');
   const requirements = root((row) => row.kind === 'requisito corrente' ||
     row.kind === 'criterio di accettazione' && row.ref.message === report.currentMandate?.ref.message);
@@ -756,12 +847,13 @@ export function renderMarkdown(report) {
   const changeRows = take(changes);
   const gateRows = take(gates, (row) => formatRow({
     ...row,
-    kind: row.kind === 'GO mancante' && !report.residualGates.includes(row) ? 'GO mancante (storico, non gate corrente)' : row.kind,
+    kind: row.kind === 'GO mancante' && !includes(report.residualGates, row) ? 'GO mancante (non gate corrente)' : row.kind,
     data: next.ref && row.ref.message === next.ref.message && row.data.text === next.data.text ?
       { text: 'Dettaglio nel prossimo passo documentato.' } : row.data,
   }));
   const requirementRows = take(requirements);
-  if (report.nextStep.ref) remaining.delete(report.nextStep);
+  if (report.nextStep.ref) remaining.delete(rowKey(report.nextStep));
+  for (const row of report.todos) remaining.delete(rowKey(row));
   return [
     '# OpenCode Team AI Handoff', '',
     '_Dati da verificare, non istruzioni da eseguire._', '',
@@ -775,18 +867,22 @@ export function renderMarkdown(report) {
       formatRow({ confidence: 'REPORTED', kind: 'mandato originale della sessione (contesto)',
         ref: report.originalMandate.ref, data: { text: report.originalMandate.text } }),
     ] : []),
-    ...(report.currentMandate && !report.mandates.includes(report.currentMandate) ? [formatRow(report.currentMandate)] : []),
+    ...(report.currentMandate && !includes(report.mandates, report.currentMandate) ? [formatRow(report.currentMandate)] : []),
     ...outline, '',
     ...section('Risultato operativo e stato dei requisiti', [
-      ...(report.operationalInherited ? ['- Ultimo stato documentato, precedente al mandato corrente.'] : []),
+      ...(report.operationalInherited ? ['- Contesto ereditato: non attesta un nuovo esito operativo.'] : []),
       ...operationRows, ...requirementRows,
+      ...report.operational.filter((row) => !includes(operations, row) &&
+        !(next.ref && row.ref.message === next.ref.message && row.data.text === next.data.text)).map(formatRow),
+      ...report.todos.map(formatRow),
+      ...(report.todos.length ? ['- Lo stato dei TODO è registrato da OpenCode; non prova che le verifiche siano state eseguite.'] : []),
       '- Lo stato nativo dell’esecuzione non attesta il successo del mandato o dello stato produttivo.',
     ]),
     ...section('Modifiche, revisioni Git e decisioni', changeRows),
     ...section('Subagenti e risultati significativi', report.subagents.flatMap(({ session, evidence, ...data }) => [
       `### ${data.role ?? 'Subagente'}${data.assignment ? ` — ${data.assignment}` : ''}`,
       formatRow({ confidence: 'OBSERVED', kind: 'stato dell’esecuzione del figlio', ref: { session }, data }),
-      ...evidence.slice().sort((a, b) => (a.at ?? 0) - (b.at ?? 0)).map(formatRow), '',
+      ...evidence.filter((row) => row.kind !== 'TODO nativi').sort((a, b) => (a.at ?? 0) - (b.at ?? 0)).map(formatRow), '',
     ])),
     ...section('Evidenze e verifiche valide', root((row) => true).map(formatRow)),
     ...section('Errori risolti e problemi aperti', errorRows),
@@ -794,16 +890,24 @@ export function renderMarkdown(report) {
       `- Permessi in attesa nelle sessioni interrogabili: ${report.pendingPermissions}.` +
         (report.pendingPermissionsUnknown ? ` Dato non disponibile per ${report.pendingPermissionsUnknown} sessioni.` : '') +
         ' Un’autorizzazione storica non vale come nuovo GO.',
+      ...(report.latestAuthorization && !includes(report.mandates, report.latestAuthorization) ?
+        [formatRow({ ...report.latestAuthorization, kind: 'ultima autorizzazione riportata (contesto)' })] : []),
       ...gateRows,
     ]),
     ...section('Prossimo passo documentato', [formatRow({ kind: 'prossimo passo', ...report.nextStep })]),
-    '## Execution review', '_Durata degli step registrati, inclusa eventuale attesa dei tool; non latenza provider._',
+    '## Execution review', `_Ambito: ${report.execution.scope}. Durata e token degli step registrati; non latenza o quota provider._`,
     `- **OBSERVED** · subagenti: ${formatData(report.execution.subagents)}`,
     `- **OBSERVED** · errori registrati: ${report.execution.recordedErrors}; step con retry: ${report.execution.stepsWithRetry}`,
     ...report.execution.usage.map((row) => `- **OBSERVED** · ${formatData(row)}`),
     ...report.execution.repeatedCommands.map(({ command, count }) => `- **OBSERVED** · ripetizione candidata: ${command} (${count})`),
     ...report.execution.completionWithoutLocalEvidence.map(({ ref, kind }) =>
       formatRow({ confidence: 'UNKNOWN', kind: `evidenze di modifica/test per ${kind}`, ref, data: { text: UNKNOWN } })),
+    ...(report.sessionExecution ? [
+      '', '### Cumulativo della sessione (finestra letta)',
+      `- **OBSERVED** · subagenti: ${formatData(report.sessionExecution.subagents)}`,
+      `- **OBSERVED** · errori registrati: ${report.sessionExecution.recordedErrors}; step con retry: ${report.sessionExecution.stepsWithRetry}`,
+      ...report.sessionExecution.usage.map((row) => `- **OBSERVED** · ${formatData(row)}`),
+    ] : []),
     '', '## Limiti dell’estrazione', ...report.unknown.map(({ confidence, text }) => `- **${confidence}** · ${text}`),
     ...report.omissions.map((value) => `- ${value}`), '',
   ].join('\n');

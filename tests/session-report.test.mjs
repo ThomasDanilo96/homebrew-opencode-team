@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { registerReport } from '../shared/session-report/report.mjs';
+import { registerReport, renderMarkdown } from '../shared/session-report/report.mjs';
 
 const text = (value) => ({ type: 'text', text: value });
 const shell = (command, exit, output = '') => ({
@@ -19,7 +19,7 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
   ];
   let layer;
   const copies = [], toasts = [], calls = [];
-  const updates = { active: true, exit: null, failCopy, treeStatus: 'modified' };
+  const updates = { active: true, exit: null, failCopy, treeStatus: 'modified', go: false, background: false };
   const record = (id, created, message) => ({ id, time: { created, completed: created }, ...message });
   const current = record('current', 10, { type: 'user', text: 'Correggi la verifica locale.\npassword: hidden-multiline' });
   const old = record('old', 1, { type: 'user', text: 'Incarico precedente da inventariare.' });
@@ -43,11 +43,17 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
         active: async () => updates.active ? { busy: { type: 'running' } } : {},
       },
       permission: { list: async () => operational ? [] : [{ action: 'shell', resources: ['DO_NOT_COPY'] }] },
+      experimental: { job: { list: async () => updates.background ? [
+        { kind: 'shell', id: 'job-fixture', sessionID: 'root', status: updates.exit === null ? 'running' : 'cancelled',
+          time: { started: 19, ...(updates.exit !== null ? { completed: 25 } : {}) }, command: 'DO_NOT_COPY' },
+      ] : [] } },
       vcs: { get: async () => ({ data: { branch: { current: 'master' } } }),
         status: async () => ({ data: [{ file: 'README.md', status: updates.treeStatus }] }) },
       message: { list: async ({ sessionID, type, order, limit }) => {
         calls.push(sessionID);
-        if (type === 'user') return { data: (order === 'asc' ? [...users].reverse() : users).slice(0, limit) };
+        const input = updates.go ? [record('new-go', 24, { type: 'user',
+          text: 'GO. AUTORIZZO una sola finestra per il piano di prova.\nSolo verifica; nessun secondo fermo.' }), ...users] : users;
+        if (type === 'user') return { data: (order === 'asc' ? [...input].reverse() : input).slice(0, limit) };
         if (sessionID !== 'root') return { data: sessionID === 'new' ? [record('bad', 15, { type: 'idle', outcome: 'failed' })] : [
           record('reply', 16, { type: 'assistant', agent: sessionID === 'done' ? 'reviewer' : 'general',
             model: { providerID: 'openai', id: 'test-model', variant: 'medium' }, tokens: { input: 5, cache: { read: 2 } },
@@ -96,6 +102,15 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
           text('Bloccato: token: short-value'),
           text('Errore: DB_PASSWORD=shorter-value'),
           text('Aperto: chiave `sk-proj-abcdef1234567890`'),
+          ...(operational === 'qualification' ? [
+            text('Blocker: None. All requirements implemented and verified.'),
+            text('Commit dichiarato: `fedcba9`.'),
+            { type: 'tool', id: 'todos', name: 'todowrite', state: { status: 'completed', metadata: {
+              todos: [{ content: 'Verifica bundle', status: 'completed' }],
+            } } },
+            { type: 'tool', name: 'shell', id: 'detached', state: { status: 'completed',
+              input: { command: 'unsupported command' }, metadata: { status: 'running', shellID: 'sh-fixture' } } },
+          ] : []),
           ...(operational ? [text('**Il progetto non è completato.** I servizi rispondono sul predecessore.\n**Autorizzi una nuova finestra produttiva?**')] : []),
           { ...shell('bun test tests/later.test.mjs', updates.exit), id: 'later',
             state: { status: updates.exit === null ? 'running' : 'completed',
@@ -105,8 +120,11 @@ function fixture({ fromChild = false, failCopy = false, checkpoints = {}, confir
               input: { command: 'unsupported command' }, metadata: { exit: updates.exit } } },
         ] }),
         record('resume', 17, { type: 'synthetic', text: 'NOT A USER MANDATE' }),
-        record('compact', 13, { type: 'compaction', status: 'completed', summary: 'DO_NOT_COPY' }),
-        ...users] };
+        record('compact', operational === 'qualification' ? 16 : 13,
+          { type: 'compaction', status: operational === 'qualification' ? 'failed' : 'completed', summary: 'DO_NOT_COPY' }),
+        ...(operational === 'qualification' && updates.go ? [record('shell-done', 25, { type: 'synthetic',
+          metadata: { source: 'shell', state: 'completed', exit: 0, shellID: 'sh-fixture' } })] : []),
+        ...input].sort((a, b) => b.time.created - a.time.created) };
       } },
     },
   };
@@ -259,4 +277,35 @@ test('OSC clipboard without confirmation leaves the checkpoint untouched', async
   assert.equal(copies.length, 1);
   assert.deepEqual(checkpoints, {});
   assert.equal(toasts[0].variant, 'warning');
+});
+
+test('the same pre-export checkpoint yields equivalent command outputs, including a GO and a background transition', async () => {
+  const start = fixture({ operational: 'qualification' });
+  start.updates.background = true;
+  await start.commands['handoff-sessione-json'].run();
+  const checkpoint = structuredClone(start.checkpoints);
+  for (const [md, json] of [['handoff', 'handoff-json'], ['handoff-sessione', 'handoff-sessione-json'],
+    ['handoff-incrementale', 'handoff-incrementale-json']]) {
+    const a = fixture({ operational: 'qualification', checkpoints: structuredClone(checkpoint) });
+    const b = fixture({ operational: 'qualification', checkpoints: structuredClone(checkpoint) });
+    for (const item of [a, b]) Object.assign(item.updates, { go: true, background: true, exit: 0 });
+    await a.commands[md].run();
+    await b.commands[json].run();
+    const report = JSON.parse(b.copies[0]);
+    assert.equal(a.copies[0], renderMarkdown(report));
+    assert.equal(report.nextStep.confidence, 'UNKNOWN');
+    assert.ok(!report.residualGates.some(({ kind }) => kind === 'GO mancante'));
+    assert.match(a.copies[0], /Solo verifica; nessun secondo fermo/);
+    assert.ok(!report.evidence.some(({ data, kind }) => kind === 'bloccato' && data.text?.startsWith('None')));
+    assert.equal(report.context.lastDeclaredCommit.revision, 'fedcba9');
+    assert.equal(report.todos[0].data.items[0].status, 'completed');
+    if (md === 'handoff-incrementale') {
+      assert.equal(report.execution.subagents.observed, 0);
+      assert.equal(report.sessionExecution.subagents.observed, 3);
+      assert.ok(report.evidence.some(e => e.ref.job === 'job-fixture' && e.data.state === 'cancelled'));
+      assert.ok(report.evidence.some(e => e.ref.call === 'detached' && e.data.confirmedBy?.message === 'shell-done' && e.data.exit === 0));
+    } else {
+      assert.ok(report.evidence.some(e => e.kind === 'compaction' && e.data.state === 'failed'));
+    }
+  }
 });
