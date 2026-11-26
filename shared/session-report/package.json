@@ -1,0 +1,7 @@
+{
+  "name": "opencode-team.session-report",
+  "type": "module",
+  "exports": {
+    "./tui": "./tui.js"
+  }
+}

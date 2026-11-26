@@ -258,7 +258,7 @@ fi
 run_suite /usr/bin/python3 -B tests/test_benchmark_maintenance.py -v 2>&1 || :
 
 echo "## Node suites"
-for suite in native-profiles disk-cleanup hybrid-evidence packaging best-routing; do
+for suite in native-profiles session-report disk-cleanup hybrid-evidence packaging best-routing; do
   echo "--- $suite ---"
   run_suite node --test "tests/${suite}.test.mjs" 2>&1 || :
 done

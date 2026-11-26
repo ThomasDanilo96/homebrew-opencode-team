@@ -293,7 +293,22 @@ Inherited `OPENCODE_*`, XDG and credential-like environment overrides are stripp
 from native launches, including shell-tool tokens and SSH auth sockets. Use
 explicit profile-local connections, not ambient credentials.
 
-Explicit setup options:
+### Copy a session report
+
+In a BEST or FREE session, press `Ctrl+P` → **Copia resoconto** or run
+`/copia-resoconto`. The TUI copies a short Markdown report without sending a
+prompt or running commands. From a subagent tab it reports the parent and its
+direct children. It uses native status, recent snapshots and recognizable
+shell/Git evidence; a technical PASS never certifies deployment or recovery.
+Unknown outcomes and missing approvals are identified instead of assumed.
+Only short, filtered prose is copied; review the result before sharing it.
+
+For standard OpenCode V2, try the same package with
+`OPENCODE_CLI_CONFIG_CONTENT='{"plugins":["/absolute/path/to/brew-opencode-team/shared/session-report"]}' opencode`.
+No settings file is edited; an inline `plugins` array replaces the configured
+CLI plugin array for that invocation.
+
+### Setup options
 
 - `OPENCODE_TEAM_OPENCODE_BIN=/absolute/path/to/opencode`: trusted V2 executable.
 - `OPENCODE_TEAM_DEPENDENCY_ROOT=/absolute/path`: dependency content only.
@@ -308,7 +323,8 @@ Explicit setup options:
 
 ## Migration and rollback
 
-Setup transactionally manages only two configs and two profile instruction files.
+Setup transactionally manages the two server configs, profile instruction files
+and the report plugin files in each profile's private CLI discovery directory.
 Changed files are backed up at `CONFIG_ROOT/backups/BACKUP_ID` (directories 0700,
 files 0600). Unchanged setup does not rewrite them or create another backup.
 Both profiles are preflighted before replacement; writes use atomic rename.

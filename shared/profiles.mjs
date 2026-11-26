@@ -43,7 +43,11 @@ const freeAuxModel = 'team-free/mimo-v2.6-flash-free';
 const configFile = (profile) => path.join(roots.config, profile, 'opencode.jsonc');
 const instructionFile = (profile) => path.join(roots.config, profile, 'v2/AGENTS.md');
 const sharedRulesFile = path.resolve(process.env.OPENCODE_TEAM_RULES_FILE || path.join(home, '.config/opencode/AGENTS.md'));
-const managed = profiles.flatMap((p) => [configFile(p), instructionFile(p)]);
+const reportFiles = ['package.json', 'tui.js', 'report.mjs'];
+const reportFile = (profile, file) => path.join(roots.config, profile,
+  'v2/plugins/opencode-team.session-report', file);
+const managed = profiles.flatMap((p) => [configFile(p), instructionFile(p),
+  ...reportFiles.map((file) => reportFile(p, file))]);
 const json = (value) => `${JSON.stringify(value, null, 2)}\n`;
 const fail = (message) => { throw new Error(message); };
 // Only exact dispatcher-backed legacy labels are eligible, never retired by setup.
@@ -638,7 +642,8 @@ function setup() {
       ...(p === 'best'
         ? [Buffer.from('\n'), fs.readFileSync(path.join(packageRoot, 'shared/best-hybrid.md'))]
         : [Buffer.from('\n'), fs.readFileSync(path.join(packageRoot, 'shared/free-hybrid.md'))]),
-    ]) }]);
+    ]) }, ...reportFiles.map((file) => ({ file: reportFile(p, file),
+      bytes: fs.readFileSync(path.join(packageRoot, 'shared/session-report', file)) }))]);
   locked(() => {
     provision();
     for (const p of profiles) for (const directory of [path.join(roots.config, p, 'v2/xdg-config/opencode'),

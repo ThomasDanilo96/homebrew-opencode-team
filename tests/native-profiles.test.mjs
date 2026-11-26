@@ -590,6 +590,10 @@ test('BEST keeps an OpenAI coordinator and Go workers; FREE assigns verified fre
     assert.deepEqual(c.skills, [path.join(f.ecc, 'skills'), ...(profile === 'best' ? [path.join(root, 'shared/skills')] : [])]);
     assert.deepEqual(Object.keys(c.mcp.servers), profile === 'best' ? ['serena', 'playwright'] : ['serena']);
     assert.ok(c.mcp.servers.serena.command.includes('--project-from-cwd'));
+    const report = path.join(f.team, 'config', profile, 'v2/plugins/opencode-team.session-report');
+    for (const file of ['package.json', 'tui.js', 'report.mjs']) {
+      assert.deepEqual(fs.readFileSync(path.join(report, file)), fs.readFileSync(path.join(root, 'shared/session-report', file)));
+    }
     if (profile === 'best') {
       assert.deepEqual(c.plugins, [{ package: path.join(root, 'shared/best-quota-plugin'),
         options: { stateFile: path.join(f.team, 'state/best/quota/state.json') } }],

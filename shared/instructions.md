@@ -1,9 +1,21 @@
 # OpenCode Team profile guidance
 
 Apply the shared user AGENTS.md when configured; this file supplements it with
-profile-specific model assignments, not a second copy of the user's rules.
+profile-specific model assignments and project workflow, not a second copy of the user's rules.
 The configured models below specialize BEST; common AGENTS role/model labels
 describe the global setup and must not override BEST's configured child models.
+
+## GIAFFATTO (both profiles)
+
+`giaffatto-core/master` is the sole canonical source of code. Reconcile
+development and fixes in that repository, including urgent hotfixes after the
+immediate intervention. Build and deploy from identifiable Git revisions; staging,
+exports and temporary directories are not alternative sources.
+
+At task close, remove only confirmed disposable artifacts created for that task,
+within the authorized scope. Preserve unrelated WIP, backups, persistent data,
+journals, receipts and rollback material. Keep secrets outside the repository and
+never include them in cleanup or commits.
 
 ## BEST: autonomous completion of authorized mandates
 
