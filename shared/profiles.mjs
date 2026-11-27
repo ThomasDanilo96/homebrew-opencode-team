@@ -11,6 +11,26 @@ const packaged = fs.existsSync(packageMarker);
 const cellarRack = path.dirname(path.dirname(packageRoot));
 const quotaAsset = 'shared/best-quota-plugin';
 const skillsAsset = 'shared/skills';
+// Native CLI defaults, not an overlay: values saved by the TUI take precedence.
+const bestCliDefaults = {
+  theme: { name: 'github' },
+  session: { verbosity: 'high' },
+  prompt: { image_preview: true, paste: 'compact' },
+  scroll: { acceleration: true, speed: 3 },
+  tabs: { scope: 'cwd', mode: 'on', indicators: 'status', layout: 'horizontal' },
+  diffs: { wrap: 'word', source: 'working', tree: true, view: 'split', single: false },
+  attention: { notifications: true, sound: false },
+  animations: true,
+  cursor: { style: 'block', blinking: true },
+  mouse: true,
+  leader: { timeout: 2000 },
+  keybinds: {
+    'diff.open': '<leader>d',
+    'session.tab.next_unread': '<leader>j',
+    'session.toggle.exploration_grouping': '<leader>z',
+    'session.toggle.thinking': '<leader>shift+t',
+  },
+};
 const profiles = ['best', 'free'];
 const home = process.env.HOME;
 if (!home) throw new Error('HOME is required');
@@ -267,6 +287,7 @@ function profileEnvironment(profile) {
   if (packaged) {
     // Core adds plugin entries across config documents; keep the profile file and CLI config unchanged.
     env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ plugins: [path.join(packageRoot, 'shared/session-guard')] });
+    if (profile === 'best') env.OPENCODE_CLI_CONFIG_DEFAULTS = JSON.stringify(bestCliDefaults);
   }
   return { ...env, XDG_CONFIG_HOME: path.join(roots.config, profile, 'v2/xdg-config'),
     XDG_DATA_HOME: path.join(roots.data, profile, 'data'), XDG_STATE_HOME: path.join(roots.state, profile),
@@ -342,7 +363,7 @@ function packagedBinary() {
   persistedAssetRoot();
   const version = '2.3.2';
   const upstream = 'c0ad18b402eb2827fc1ee71c171b1177b3fc02d1';
-  const patch = '1415411bd03d7584b0a8240490050c9d61c962c4855382bcc5db6e8427eb49e8';
+  const patch = 'f25df04469b8156bab770a708ffa63e625e52224cd3149d697ddd7456031fdfc';
   const runtime = path.join(packageRoot, 'runtime');
   const manifestFile = path.join(runtime, 'manifest.json');
   const binary = path.join(runtime, 'opencode');

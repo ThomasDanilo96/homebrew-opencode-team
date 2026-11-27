@@ -142,7 +142,7 @@ function packagedFixture(t) {
   // Cover hashing more than one chunk, including a partial final read.
   const bytes = fs.readFileSync(path.join(f.dir, 'opencode'), 'utf8') + `// ${' '.repeat(1024 * 1024)}\n`;
   const manifest = { version: '2.3.2', upstream: 'c0ad18b402eb2827fc1ee71c171b1177b3fc02d1',
-    patch_sha256: '1415411bd03d7584b0a8240490050c9d61c962c4855382bcc5db6e8427eb49e8',
+    patch_sha256: 'f25df04469b8156bab770a708ffa63e625e52224cd3149d697ddd7456031fdfc',
     platform: process.platform, arch: process.arch, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
   fs.mkdirSync(path.dirname(path.dirname(opt)), { recursive: true });
   fs.symlinkSync(path.dirname(packageRoot), path.dirname(opt));
@@ -190,7 +190,7 @@ test('packaged BEST repairs only managed keg references after cleanup, preservin
   files.forEach((file, i) => assert.equal(fs.readFileSync(file, 'utf8'), `unchanged-${i}`));
 });
 
-test('packaged BEST and FREE pin the keg runtime and add only the Guard to the inline config', async (t) => {
+test('packaged BEST and FREE pin the keg runtime, Guard and BEST-only CLI defaults', async (t) => {
   const f = packagedFixture(t);
   f.env.OPENCODE_CONFIG_CONTENT = '{"plugins":["caller"],"permissions":[]}';
   f.env.OPENCODE_CLI_CONFIG_CONTENT = '{"plugins":["caller"]}';
@@ -199,8 +199,9 @@ test('packaged BEST and FREE pin the keg runtime and add only the Guard to the i
   for (const profile of ['best', 'free']) {
     const configPath = f.configPath(profile);
     const original = fs.readFileSync(configPath, 'utf8');
-    const cli = path.join(f.team, 'config', profile, 'v2/xdg-config/opencode/cli.json');
-    fs.writeFileSync(cli, '{"plugins":["./existing-tui"]}\n');
+    const cli = path.join(f.team, 'config', profile, 'v2/cli.json');
+    const preferences = '{ // Keep user settings and comments\n"theme":{"name":"my-theme"},"plugins":["./existing-tui"]}\n';
+    fs.writeFileSync(cli, preferences);
     ok(f.run(profile, '--help'));
     const capture = JSON.parse(fs.readFileSync(f.env.MOCK_CAPTURE));
     assert.equal(capture.binary, f.binary);
@@ -209,21 +210,22 @@ test('packaged BEST and FREE pin the keg runtime and add only the Guard to the i
     assert.equal(capture.env.OPENCODE_CLI_CONFIG_CONTENT, undefined);
     if (profile === 'best') {
       assert.deepEqual(JSON.parse(capture.env.OPENCODE_CLI_CONFIG_DEFAULTS), {
-        theme: { name: 'tokyonight', mode: 'dark' },
-        session: { verbosity: 'high', thinking: 'show', scrollbar: true, submit_scroll: 'bottom', grouping: 'none',
-          sidebar: 'auto', tps: true, markdown: 'rendered', image_preview: true },
+        theme: { name: 'github' },
+        session: { verbosity: 'high' },
         prompt: { image_preview: true, paste: 'compact' },
-        scroll: { acceleration: true },
+        scroll: { acceleration: true, speed: 3 },
         tabs: { scope: 'cwd', mode: 'on', indicators: 'status', layout: 'horizontal' },
-        diffs: { wrap: 'word', source: 'turn', tree: true, view: 'auto' },
+        diffs: { wrap: 'word', source: 'working', tree: true, view: 'split', single: false },
         attention: { notifications: true, sound: false },
         animations: true, cursor: { style: 'block', blinking: true }, mouse: true,
-        terminal: { title: true, copy: 'select' },
+        leader: { timeout: 2000 },
+        keybinds: { 'diff.open': '<leader>d', 'session.tab.next_unread': '<leader>j',
+          'session.toggle.exploration_grouping': '<leader>z', 'session.toggle.thinking': '<leader>shift+t' },
       });
     } else assert.equal(capture.env.OPENCODE_CLI_CONFIG_DEFAULTS, undefined);
     assert.deepEqual(capture.args, ['--help', '--standalone']);
     assert.equal(fs.readFileSync(configPath, 'utf8'), original);
-    assert.equal(fs.readFileSync(cli, 'utf8'), '{"plugins":["./existing-tui"]}\n');
+    assert.equal(fs.readFileSync(cli, 'utf8'), preferences);
   }
   const { exports } = JSON.parse(fs.readFileSync(path.join(guard, 'package.json')));
   const { default: server } = await import(path.join(guard, exports['.']));

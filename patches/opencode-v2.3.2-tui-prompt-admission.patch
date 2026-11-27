@@ -333,3 +333,80 @@ index 4fd80c187730e4ed1535c0c3082b32cf47a98882..0ed5446f925a1eac3175a0c510a6b020
    readonly "model.request": SessionModelRequest
    readonly "http.request": SessionHttpRequest
    readonly "http.response": SessionHttpResponse
+diff --git a/packages/cli/src/config/config.ts b/packages/cli/src/config/config.ts
+index e8920eb1839b27f5df8110e3f8ff8f8b037f6922..7c1444ab184298390e0559e8228e3fe62d754c0b 100644
+--- a/packages/cli/src/config/config.ts
++++ b/packages/cli/src/config/config.ts
+@@ -29,6 +29,9 @@ export const layer = Layer.effect(
+     const fs = yield* FileSystem.FileSystem
+     const global = yield* Global.Service
+     const file = path.join(global.config, "cli.json")
++    const defaults = process.env.OPENCODE_CLI_CONFIG_DEFAULTS
++      ? Option.getOrUndefined(decode(parseRecord(process.env.OPENCODE_CLI_CONFIG_DEFAULTS)))
++      : undefined
+     const content = process.env.OPENCODE_CLI_CONFIG_CONTENT
+       ? Option.getOrUndefined(decode(parseRecord(process.env.OPENCODE_CLI_CONFIG_CONTENT)))
+       : undefined
+@@ -62,7 +65,7 @@ export const layer = Layer.effect(
+         ),
+       )
+     const load = Effect.fnUntraced(function* (migration?: Info) {
+-      return merge(migration ?? Option.getOrUndefined(decode(yield* readJson())), content)
++      return merge(defaults, migration ?? Option.getOrUndefined(decode(yield* readJson())), content)
+     })
+
+     const get = Effect.fn("cli.config.get")(() =>
+@@ -104,7 +107,7 @@ export const layer = Layer.effect(
+           const config = Option.getOrUndefined(decode(parse(updated, errors, { allowTrailingComma: true })))
+           if (errors.length || config === undefined) return yield* Effect.fail(new Error("Invalid CLI config update"))
+           yield* write(updated.endsWith("\n") ? updated : updated + "\n")
+-          return merge(config, content)
++          return merge(defaults, config, content)
+         }),
+       ).pipe(Effect.mapError((cause) => new Error("Failed to update CLI config", { cause }))),
+     )
+diff --git a/packages/cli/test/config.test.ts b/packages/cli/test/config.test.ts
+index d4629eacaaed5152946b5918c15308e24a211be5..90be083be3a86cc9da107335a3c03eb7a455bbfd 100644
+--- a/packages/cli/test/config.test.ts
++++ b/packages/cli/test/config.test.ts
+@@ -71,6 +71,40 @@ test("preserves the schema in an existing cli.json", async () => {
+   expect(await Bun.file(file).json()).toEqual(config)
+ })
+
++test("CLI defaults fill gaps without masking changes or rewriting the user file", async () => {
++  await using directory = await tmpdir()
++  const file = path.join(directory.path, "cli.json")
++  const previous = process.env.OPENCODE_CLI_CONFIG_DEFAULTS
++  process.env.OPENCODE_CLI_CONFIG_DEFAULTS = JSON.stringify({
++    theme: { name: "tokyonight", mode: "dark" },
++    session: { scrollbar: true, verbosity: "high" },
++  })
++  try {
++    const get = Config.Service.pipe(Effect.flatMap((service) => service.get()))
++    expect(await run(directory.path, get)).toEqual({
++      theme: { name: "tokyonight", mode: "dark" }, session: { scrollbar: true, verbosity: "high" },
++    })
++    expect(await Bun.file(file).exists()).toBe(false)
++    const prior = '{ // keep my settings\n  "theme": {"name":"github"},\n  "session": {"scrollbar":false}\n}\n'
++    await Bun.write(file, prior)
++    expect(await run(directory.path, get)).toEqual({
++      theme: { name: "github", mode: "dark" }, session: { scrollbar: false, verbosity: "high" },
++    })
++    expect(await Bun.file(file).text()).toBe(prior)
++    const changed = await run(directory.path, Config.Service.pipe(Effect.flatMap((service) =>
++      service.update((draft) => { draft.session!.verbosity = "low" }),
++    )))
++    expect(changed.session).toEqual({ scrollbar: false, verbosity: "low" })
++    expect(await run(directory.path, get)).toEqual(changed)
++    expect(parse(await Bun.file(file).text())).toEqual({
++      theme: { name: "github" }, session: { scrollbar: false, verbosity: "low" },
++    })
++  } finally {
++    if (previous === undefined) delete process.env.OPENCODE_CLI_CONFIG_DEFAULTS
++    else process.env.OPENCODE_CLI_CONFIG_DEFAULTS = previous
++  }
++})
++
+ test("merges inline CLI config content over the global config", async () => {
+   await using directory = await tmpdir()
+   const file = path.join(directory.path, "cli.json")
