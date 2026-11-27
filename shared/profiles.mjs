@@ -342,7 +342,7 @@ function packagedBinary() {
   persistedAssetRoot();
   const version = '2.3.2';
   const upstream = 'c0ad18b402eb2827fc1ee71c171b1177b3fc02d1';
-  const patch = '1bcf5fe7140303e430b667c4782e18d836b7f45ad07a56a9e69a5c972fadb213';
+  const patch = '1415411bd03d7584b0a8240490050c9d61c962c4855382bcc5db6e8427eb49e8';
   const runtime = path.join(packageRoot, 'runtime');
   const manifestFile = path.join(runtime, 'manifest.json');
   const binary = path.join(runtime, 'opencode');

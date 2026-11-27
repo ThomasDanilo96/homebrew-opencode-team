@@ -614,6 +614,95 @@ test('native V2 quota gates existing sessions and native children before local t
     t.diagnostic('PASS: native automatic Low/Medium/High reach loopback with matching assistant models; session selections untouched');
   }
 
+  if (process.env.OPENCODE_QUOTA_NATIVE_COMPACTION === '1') {
+    configuration.providers['opencode-go'].models['minimax-m3'] = { ...definition.models.probe, modelID: 'minimax-m3' };
+    configuration.providers.openai.models['gpt-6.2-sol'].variants =
+      ['low', 'medium'].map(id => ({ id, settings: { reasoningEffort: id } }));
+    configuration.agents.build.model = 'openai/gpt-6.2-sol#medium';
+    configuration.agents.title.model = 'openai/gpt-6.1-sol';
+    // Even the local emergency OpenAI override must yield back to Go when it is usable.
+    configuration.agents.compaction = { model: 'openai/gpt-6.2-sol#low' };
+    configuration.compaction = { auto: false };
+    const reload = async label => {
+      fs.writeFileSync(config, JSON.stringify(configuration));
+      const previous = instanceIDs();
+      await api('POST', '/api/location/reload' + query);
+      await waitForReplacement(label, previous);
+      await api('GET', '/api/agent' + query);
+    };
+    await reload('compaction fixture');
+    const setQuota = (goUsed, openaiUsed) => updateQuotaState(file, state => {
+      const at = new Date().toISOString();
+      state.snapshots = state.snapshots.filter((sample, index, all) =>
+        index === all.findLastIndex(other => other.provider === sample.provider)).map(sample => ({
+        ...sample, at, windows: Object.fromEntries(Object.entries(sample.windows).map(([key, window]) =>
+          [key, { ...window, resetAt: new Date(Date.now() + 86400000).toISOString(),
+            used: sample.provider === 'openai' ? openaiUsed : goUsed }])),
+      }));
+      return state;
+    });
+    const compactions = [];
+    let rejectCompaction = false;
+    respond = body => {
+      if (JSON.stringify(body.messages.at(-1)?.content).includes('<template>')) {
+        compactions.push(body.model);
+        if (rejectCompaction) return { status: 429 };
+        return { content: '## Objective\n- Preserve the fixture history.' };
+      }
+      return { content: 'Recorded fixture history.' };
+    };
+    const messages = async id => (await api('GET', `/api/session/${id}/message`)).data;
+    const seed = async label => {
+      await setQuota(20, 20);
+      const { data } = await api('POST', '/api/session', { title: label, location: { directory: dir } });
+      await api('POST', `/api/session/${data.id}/model`, {
+        model: { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'medium' },
+      });
+      for (const message of ['Keep the first fixture message.', 'Keep another fixture message.']) {
+        const outcome = await prompt(data.id, message);
+        if (outcome !== 'succeeded') {
+          assert.fail(JSON.stringify(await api('GET', `/api/session/${data.id}/message`)) + errors);
+        }
+      }
+      return data.id;
+    };
+    for (const [goUsed, openaiUsed, expected, reject = false] of [[20, 20, 'minimax-m3'], [100, 20, 'gpt-6.2-sol'],
+      [100, 100, null], [20, 100, 'minimax-m3'], [20, 20, 'minimax-m3', true]]) {
+      const id = await seed(`Manual compaction ${goUsed}/${openaiUsed}`);
+      const before = await messages(id), count = requests, previous = compactions.length;
+      await setQuota(goUsed, openaiUsed);
+      rejectCompaction = reject;
+      await api('POST', `/api/session/${id}/compact`, {});
+      const deadline = Date.now() + 20000;
+      let after, result;
+      do {
+        after = await messages(id);
+        result = after.find(message => message.type === 'compaction' && ['completed', 'failed'].includes(message.status));
+        if (!result) await new Promise(resolve => setTimeout(resolve, 25));
+      } while (!result && Date.now() < deadline);
+      assert.equal(result?.status, expected && !reject ? 'completed' : 'failed', JSON.stringify(result) + errors);
+      assert.deepEqual(compactions.slice(previous), expected ? [expected] : []);
+      assert.equal(requests - count, expected ? 1 : 0);
+      if (!expected || reject) {
+        if (!expected) assert.match(JSON.stringify(result), /compaction-quota-unavailable/);
+        const ids = new Set(before.map(message => message.id));
+        assert.deepEqual(after.filter(message => ids.has(message.id)), before);
+      }
+      assert.equal(readQuotaState(file).leases.some(lease => lease.scope === 'admission' && !lease.sessionID), false);
+    }
+    const automatic = await seed('Automatic compaction');
+    configuration.compaction = { auto: true, background: true, buffer: '90%' };
+    await reload('automatic compaction fixture');
+    await setQuota(100, 20);
+    rejectCompaction = false;
+    const previous = compactions.length;
+    assert.equal(await prompt(automatic, 'A long local message. '.repeat(3500)), 'succeeded', errors);
+    assert.deepEqual(compactions.slice(previous), ['gpt-6.2-sol']);
+    assert.ok((await messages(automatic)).some(message => message.type === 'compaction' && message.status === 'completed'));
+    assert.equal(readQuotaState(file).leases.some(lease => lease.scope === 'admission' && !lease.sessionID), false);
+    t.diagnostic('PASS: native manual and automatic compaction, strict fallback, single transport and safe history retention');
+  }
+
   // Production subscription validator, same provider ID and fresh old quota,
   // but the runtime connection now resolves to an API key. No credential saved.
   fs.writeFileSync(path.join(wrapper, 'index.js'), `import { setupGovernor } from ${JSON.stringify(new URL('../shared/best-quota-runtime.mjs', import.meta.url).href)};

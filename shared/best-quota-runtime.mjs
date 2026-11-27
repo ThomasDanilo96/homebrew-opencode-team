@@ -7,6 +7,8 @@ const kinds = { build: 'coding', general: 'coding', explore: 'scan', specialist:
   reviewer: 'review', plan: 'architecture', 'visual-designer': 'visual' };
 const candidate = (agent, model) => ({ agent, model, provider: model.split('/')[0] });
 const exploreFallback = 'openai/gpt-6.2-sol#low';
+const goCompaction = 'opencode-go/minimax-m3';
+const openaiCompaction = 'openai/gpt-6.2-sol#low';
 const blocked = (reason = 'admission-denied') => {
   throw new Error(`BEST_QUOTA_BLOCKED (${reason}): new work suspended; state retained. Run opencode-team best quota status.`);
 };
@@ -22,6 +24,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
   const leases = new Map();
   const effortTurns = new Map();
   const requestReservations = new Map();
+  const selectingCompactions = new Set();
   const asyncDelegation = ctx.app.version === '2.3.2';
   const active = state => state.policy?.mode === 'active';
   // A receipt belongs to one setup/cleanup lifecycle, not just a reusable PID.
@@ -129,7 +132,12 @@ export async function setupGovernor(ctx, dependencies = {}) {
   async function choose(agent, models, leaseID, sessionID, reserveRequest) {
     await refresh();
     const { data: inventory } = await ctx.model.list();
-    const goCertified = (await goPaymentSafety(readQuotaState(file))).certified === true;
+    const compaction = reserveRequest === 'compaction';
+    const bindings = compaction ? Object.fromEntries(await Promise.all(['opencode-go', 'openai'].map(async provider =>
+      [provider, await subscription(ctx, provider)]))) : null;
+    const goCertified = (await (bindings
+      ? goPaymentSafety(readQuotaState(file), Date.now(), bindings['opencode-go'])
+      : goPaymentSafety(readQuotaState(file)))).certified === true;
     let decision, reservation;
     const state = await updateQuotaState(file, current => {
       const prediction = forecast(current, Date.now(), current.policy);
@@ -149,12 +157,15 @@ export async function setupGovernor(ctx, dependencies = {}) {
       const openaiSource = current.sources.openai;
       const candidates = models.filter(value => inventory.some(m => m.providerID === value.provider
         && m.id === value.model.split('/').slice(1).join('/').split('#')[0] && m.enabled !== false
-        && (!(reserveRequest || value.model === 'openai/gpt-6.2-sol#high')
+        && (!((reserveRequest && !compaction) || (compaction && value.model.includes('#')) || value.model === 'openai/gpt-6.2-sol#high')
           || m.variants?.some(variant => variant.id === value.model.split('#')[1]))))
         .filter(value => !leaseID || !active(current) || (current.leases ?? []).filter(l => l.provider === value.provider
             && l.scope !== 'admission' && (!sessionID || l.sessionID !== sessionID)).length
           < (value.provider === 'opencode-go' ? 2 : 1) * instanceCapacity)
         .filter(value => !active(current) || value.provider !== 'opencode-go' || goCertified)
+        .filter(value => !bindings || (bindings[value.provider]
+          && prediction.providers[value.provider].connection === bindings[value.provider]
+          && !prediction.providers[value.provider].confirmedExhausted))
         .filter(value => reserveRequest !== 'automatic' || value.model !== 'openai/gpt-6.2-sol#high'
           || (openaiSource?.status === 'LIVE' && openaiSource.connection
             && openaiSource.connection === prediction.providers.openai.connection
@@ -176,7 +187,11 @@ export async function setupGovernor(ctx, dependencies = {}) {
       if (candidates.some(value => value.model === exploreFallback) && agent === 'explore') {
         decision = decideQuota({ ...routing, candidates: candidates.filter(value => value.model !== exploreFallback) });
       }
-      if (!decision || decision.blocked) decision = decideQuota(routing);
+      if (compaction) {
+        decision = decideQuota({ ...routing, previous: undefined, candidates: candidates.filter(value => value.model === goCompaction) });
+        if (decision.blocked) decision = decideQuota({ ...routing, previous: undefined,
+          candidates: candidates.filter(value => value.model === openaiCompaction) });
+      } else if (!decision || decision.blocked) decision = decideQuota(routing);
       current.decisions.push({ ...decision, scope: 'routing', enforced: active(current) });
       if (reserveRequest && active(current) && !decision.blocked) {
         const cost = observedRequestCost(decision.candidate, current, prediction, calibration);
@@ -184,10 +199,13 @@ export async function setupGovernor(ctx, dependencies = {}) {
         const id = randomUUID();
         current.leases.push({ id, provider: decision.candidate.provider, ownerPid: process.pid,
           scope: 'admission', ...envelope,
-          sessionID, at: new Date().toISOString(),
+          // Scoped compaction can outlive a session step in a background fiber.
+          // Its exact lease is released by the native operation, not by step events.
+          ...(!compaction ? { sessionID } : {}), at: new Date().toISOString(),
           expiresAt: new Date(Date.now() + requestLeaseMs).toISOString() });
         reservation = { id, model: decision.candidate.model, cost: envelope.percentByWindow,
-          connection: prediction.providers[decision.candidate.provider].connection, recorded: false };
+          connection: prediction.providers[decision.candidate.provider].connection, recorded: false,
+          ...(compaction ? { scoped: true } : {}) };
       }
       if (leaseID && active(current) && !decision.blocked) {
         current.leases ??= [];
@@ -329,12 +347,16 @@ export async function setupGovernor(ctx, dependencies = {}) {
     if (!verifiedRuntime(ctx.app.version)) blocked('runtime-version-unverified');
     // The guard sees the actual selected model, including old sessions and all
     // auxiliary calls. Never substitute HTTP endpoints, headers or credentials.
-    const continuity = (event.kind === 'compaction' || event.agent === 'summary') && model === 'opencode-go/minimax-m3';
+    const key = `${event.sessionID}:${event.kind}`;
+    const scoped = event.kind === 'compaction' && requestReservations.get(key)?.scoped;
+    const exactModel = `${model}${event.model.variant ? `#${event.model.variant}` : ''}`;
+    if (scoped && requestReservations.get(key)?.model !== exactModel) blocked('compaction-model-changed');
+    const continuity = (event.kind === 'compaction' || event.agent === 'summary') && model === goCompaction;
     const roleModel = (await configuredModel(event.agent || 'build'))?.split('#')[0];
     const alternative = event.agent === 'general' ? (await configuredModel('specialist'))?.split('#')[0] : null;
     const compatible = model === roleModel || (event.agent === 'general' && model === alternative)
       || (event.agent === 'explore' && `${model}#${event.model.variant}` === exploreFallback)
-      || (event.kind === 'title' && model === 'openai/gpt-6-luna') || continuity;
+      || (event.kind === 'title' && model === 'openai/gpt-6-luna') || continuity || scoped;
     const binding = await subscription(ctx, event.model.providerID);
     if (event.model.providerID === 'opencode-go' && !(await goPaymentSafety(state, Date.now(), binding)).certified) blocked('go-payment-safety-unverified');
     if (!compatible || /claude|anthropic/i.test(model) || (/minimax/i.test(model) && !continuity)) blocked('incompatible-model');
@@ -345,7 +367,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
     const selected = candidate(event.agent || 'build', `${model}${event.model.variant ? `#${event.model.variant}` : ''}`);
     // One atomic read-decide-reserve cycle: parallel BEST instances see each
     // other's in-flight percent before their own quota snapshot is written.
-    let decision, leaseID, reservation;
+    let decision, leaseID, reservation, alreadyRecorded;
     const observedState = await updateQuotaState(file, current => {
       // Same liveness rule as routing: an admission reservation whose owning
       // process is gone or whose deadline passed is already released, so a
@@ -355,13 +377,15 @@ export async function setupGovernor(ctx, dependencies = {}) {
       const provider = prediction.providers[event.model.providerID];
       if (provider.connection !== binding) blocked('account-changed');
       if (provider.confirmedExhausted || ['EXHAUSTED', 'UNKNOWN'].includes(provider.state)) blocked('quota-unavailable');
-      const pending = requestReservations.get(`${event.sessionID}:${event.kind}`);
+      const pending = requestReservations.get(key);
       if (pending?.model === selected.model && pending.connection !== binding) blocked('account-changed');
       // Reuse only this exact request's live receipt, never every reservation
       // sharing its session. Recheck quota and account, not a changed estimate
       // after the request (including its effort) has already been prepared.
-      const own = pending && (!record || !pending.recorded) && pending.model === selected.model
+      const own = pending && (scoped || !record || !pending.recorded) && pending.model === selected.model
         && current.leases.find(lease => lease.id === pending.id);
+      if (scoped && !own) blocked('compaction-reservation-unavailable');
+      alreadyRecorded = scoped && pending.recorded;
       const held = heldByWindow(current.leases.filter(lease =>
         lease.id !== own?.id && !(joining && lease.sessionID === event.sessionID)), event.model.providerID, prediction);
       // The frozen envelope covers the original windows; newly reported ones
@@ -372,7 +396,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
       decision = decideQuota({ kind: kinds[event.agent] ?? 'coding',
         candidates: [selected], forecast: prediction,
         options: { ...current.policy, reserved: { [event.model.providerID]: held } } });
-      if (record) {
+      if (record && !alreadyRecorded) {
         current.decisions.push({ ...decision, scope: 'admission', enforced: true });
         if (!decision.blocked && !own) {
           leaseID = randomUUID();
@@ -388,8 +412,8 @@ export async function setupGovernor(ctx, dependencies = {}) {
       return current;
     });
     if (decision.blocked) blocked(decision.reason);
-    if (!record) return;
-    requestReservations.set(`${event.sessionID}:${event.kind}`, reservation);
+    if (!record || alreadyRecorded) return;
+    requestReservations.set(key, reservation);
     await recordRequest(event, observedState, binding);
   };
   const observedRequest = (name, record, transport) => guarded(async event => {
@@ -423,6 +447,40 @@ export async function setupGovernor(ctx, dependencies = {}) {
       return current;
     });
   }
+  if (ctx.app.version === '2.3.2') await ctx.session.hook('experimental.compaction.model.resolve', guarded(async event => {
+    if (!active(readQuotaState(file))) return;
+    if (event.background) {
+      event.defer = true;
+      return;
+    }
+    const key = `${event.sessionID}:compaction`;
+    if (selectingCompactions.has(key) || requestReservations.has(key)) {
+      event.denied = 'BEST_QUOTA_BLOCKED (compaction-already-reserved): another compaction is in flight.';
+      return;
+    }
+    selectingCompactions.add(key);
+    try {
+      const { state, decision, reservation } = await choose('compaction',
+        [candidate('compaction', goCompaction), candidate('compaction', openaiCompaction)],
+        undefined, event.sessionID, 'compaction');
+      if (!active(state)) return;
+      if (decision.blocked) {
+        event.denied = 'BEST_QUOTA_BLOCKED (compaction-quota-unavailable): neither Go nor OpenAI is admissible; history retained.';
+        return;
+      }
+      requestReservations.set(key, reservation);
+      event.release = async () => {
+        await updateQuotaState(file, current => ({ ...current,
+          leases: (current.leases ?? []).filter(lease => lease.id !== reservation.id) }));
+        if (requestReservations.get(key)?.id === reservation.id) requestReservations.delete(key);
+      };
+      event.model = reservation.model === goCompaction
+        ? { providerID: 'opencode-go', id: 'minimax-m3' }
+        : { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'low' };
+    } finally {
+      selectingCompactions.delete(key);
+    }
+  }));
   // Resolve the actual request rather than overwriting the user's session model.
   // Unlike prompt admission, this native boundary also covers /goal synthetics.
   if (ctx.app.version === '2.3.2') await ctx.session.hook('experimental.model.resolve', guarded(async event => {
@@ -594,7 +652,7 @@ export async function setupGovernor(ctx, dependencies = {}) {
       }) : observed;
       const liveIDs = new Set((reconciled.leases ?? []).map(lease => lease.id));
       for (const [key, receipt] of requestReservations) {
-        if (key.startsWith(`${event.data.sessionID}:`)
+        if (!receipt.scoped && key.startsWith(`${event.data.sessionID}:`)
             && !liveIDs.has(receipt.id)) requestReservations.delete(key);
       }
       if (event.type === 'session.step.ended') {

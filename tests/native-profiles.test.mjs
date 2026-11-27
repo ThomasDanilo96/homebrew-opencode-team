@@ -142,7 +142,7 @@ function packagedFixture(t) {
   // Cover hashing more than one chunk, including a partial final read.
   const bytes = fs.readFileSync(path.join(f.dir, 'opencode'), 'utf8') + `// ${' '.repeat(1024 * 1024)}\n`;
   const manifest = { version: '2.3.2', upstream: 'c0ad18b402eb2827fc1ee71c171b1177b3fc02d1',
-    patch_sha256: '1bcf5fe7140303e430b667c4782e18d836b7f45ad07a56a9e69a5c972fadb213',
+    patch_sha256: '1415411bd03d7584b0a8240490050c9d61c962c4855382bcc5db6e8427eb49e8',
     platform: process.platform, arch: process.arch, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
   fs.mkdirSync(path.dirname(path.dirname(opt)), { recursive: true });
   fs.symlinkSync(path.dirname(packageRoot), path.dirname(opt));

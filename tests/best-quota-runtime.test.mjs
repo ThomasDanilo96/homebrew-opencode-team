@@ -542,11 +542,15 @@ test('BEST compaction reserves Go first, falls back only to OpenAI, and releases
     }
     return state;
   });
-  const resolve = async () => {
-    const event = { sessionID: 'compacting', agent: 'build', model: { ...go } };
+  const resolve = async (sessionID = 'compacting') => {
+    const event = { sessionID, model: { ...go } };
     await f.hooks['experimental.compaction.model.resolve'](event);
     return event;
   };
+  const background = { sessionID: 'compacting', background: true, model: go };
+  await f.hooks['experimental.compaction.model.resolve'](background);
+  assert.equal(background.defer, true);
+  assert.deepEqual(readQuotaState(f.file).leases, undefined);
   for (const [goUsed, openaiUsed, expected] of [[20, 20, go], [100, 20, openai], [20, 100, go]]) {
     await setQuota(goUsed, openaiUsed);
     const selected = await resolve();
@@ -554,6 +558,7 @@ test('BEST compaction reserves Go first, falls back only to OpenAI, and releases
     assert.equal(readQuotaState(f.file).leases.length, 1);
     const [{ id }] = readQuotaState(f.file).leases;
     const request = { ...selected, kind: 'compaction' };
+    await f.hooks['model.request'](request);
     await f.hooks['model.request'](request);
     assert.deepEqual(readQuotaState(f.file).leases.map(lease => lease.id), [id]);
     await selected.release();
@@ -564,6 +569,27 @@ test('BEST compaction reserves Go first, falls back only to OpenAI, and releases
   assert.match(denied.denied, /BEST_QUOTA_BLOCKED.*compaction/);
   assert.equal(denied.release, undefined);
   assert.deepEqual(readQuotaState(f.file).leases, []);
+  assert.equal(readQuotaState(f.file).usage.filter(entry => entry.requests === 1).length, 3);
+  await setQuota(20, 20);
+  const simultaneous = await Promise.all([resolve(), resolve()]);
+  assert.equal(simultaneous.filter(event => event.release).length, 1);
+  assert.equal(simultaneous.filter(event => event.denied?.includes('already-reserved')).length, 1);
+  await simultaneous.find(event => event.release).release();
+  assert.deepEqual(readQuotaState(f.file).leases, []);
+
+  await setQuota(80, 20);
+  await updateQuotaState(f.file, state => ({
+    ...state, policy: { ...state.policy, expectedPercentByKind: { coding: { 'opencode-go': 15, openai: 15 } } },
+  }));
+  const parallel = await Promise.all([resolve('one'), resolve('two')]);
+  assert.deepEqual(parallel.map(event => event.model.providerID).sort(), ['openai', 'opencode-go']);
+  await parallel[0].release();
+  assert.equal(readQuotaState(f.file).leases.length, 1);
+  await parallel[1].release();
+  assert.deepEqual(readQuotaState(f.file).leases, []);
+
+  await updateQuotaState(f.file, state => ({ ...state, policy: { ...state.policy, mode: 'monitor' } }));
+  assert.deepEqual(await resolve(), { sessionID: 'compacting', model: go });
 });
 
 test('uncertified Go billing is denied even with abundant quota and a pinned live connection', async t => {

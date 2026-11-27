@@ -158,3 +158,178 @@ diff --git a/packages/tui/src/plugin/context.tsx b/packages/tui/src/plugin/conte
 +export function usePromptSubmitHooks() {
 +  return useContext(PluginContext)?.promptSubmitHooks
 +}
+diff --git a/packages/core/src/session/compaction.ts b/packages/core/src/session/compaction.ts
+index 62ff2dfd84f7890a9f100e77dfe1369543459b80..99b3a98aef022bb1c64229b21eb1a0e1b23b3986 100644
+--- a/packages/core/src/session/compaction.ts
++++ b/packages/core/src/session/compaction.ts
+@@ -15,7 +15,7 @@ import {
+   type Usage,
+ } from "@opencode/ai/effect"
+ import type { StreamOptions } from "@opencode/ai/route"
+-import type { SessionCompactionResult } from "@opencode/plugin/effect/session"
++import type { SessionCompactionModelResolve, SessionCompactionResult } from "@opencode/plugin/effect/session"
+ import type { SessionError } from "@opencode/schema/session-error"
+ import { makeLocationNode } from "@opencode/util/effect/app-node"
+ import { Clock, Context, DateTime, Effect, Exit, Fiber, Layer, Result, Scope, Stream } from "effect"
+@@ -24,6 +24,8 @@ import { Bus } from "../bus.js"
+ import { Database } from "../database/database.js"
+ import { llmClient } from "../effect/app-node-platform.js"
+ import { Model } from "../model.js"
++import { ModelResolver } from "../model-resolver.js"
++import { PluginHooks } from "../plugin/hooks.js"
+ import { State } from "../state.js"
+ import { Token } from "../util/token.js"
+ import type { SessionContext } from "./context.js"
+@@ -255,6 +257,8 @@ export const layer = Layer.effect(
+     const llm = yield* LLMClient.Service
+     const catalog = yield* Model.Service
+     const models = yield* SessionRunnerModel.Service
++    const resolver = yield* ModelResolver.Service
++    const hooks = yield* PluginHooks.Service
+     const db = (yield* Database.Service).db
+     const requests = yield* SessionModelRequest.Service
+
+@@ -322,14 +326,53 @@ export const layer = Layer.effect(
+       if (trigger.reason !== "manual")
+         yield* bus.publish(SessionEvent.Compaction.Started, { sessionID: context.session.id, reason: "auto" })
+       const swapped = held ? yield* usePrecomputed(selected, held, budget, native) : undefined
+-      const compaction = swapped
+-        ? Effect.succeed(swapped)
+-        : native
+-          ? compactNatively(selected, budget, settings.keep)
+-          : summarize(selected, budget, settings.keep)
++      if (swapped) return yield* publish(selected, swapped)
++      const admission: SessionCompactionModelResolve = {
++        sessionID: context.session.id,
++        model: selected.context.model.ref,
++        background: false,
++      }
++      const failure = (message: string): Failure => ({ error: { type: "compaction.failed", message } })
++      const compaction = Effect.gen(function* () {
++        yield* hooks.trigger("session", "experimental.compaction.model.resolve", admission).pipe(
++          // A promised hook must publish its release callback before interruption can finalize this scope.
++          Effect.uninterruptible,
++          Effect.catchDefect(() => Effect.fail(failure("Compaction admission unavailable; history retained."))),
++        )
++        if (admission.denied) return yield* Effect.fail(failure(admission.denied))
++        if (!admission.release) {
++          const result = yield* native
++            ? compactNatively(selected, budget, settings.keep)
++            : summarize(selected, budget, settings.keep)
++          return { selected, result }
++        }
++        const admitted = yield* resolver.resolve(admission.model).pipe(
++          Effect.mapError(() => failure("Admitted compaction model unavailable; history retained.")),
++        )
++        if (!admitted) return yield* Effect.fail(failure("Admitted compaction model unavailable; history retained."))
++        // The current history may start with an encrypted window owned by the chat model.
++        // Re-read with the admitted ref so incompatible windows expand back to their original messages.
++        const messages = context.messages.some(SessionHistory.isNativeCompaction) &&
++            (context.model.ref.providerID !== admitted.ref.providerID || context.model.ref.id !== admitted.ref.id)
++          ? yield* SessionHistory.load(db, context.session.id, admitted.ref).pipe(
++              Effect.mapError(() => failure("Compaction history unavailable; history retained.")),
++            )
++          : context.messages
++        const routed = { ...selected, context: { ...selected.context, model: admitted, messages } }
++        const cap = calculateCeiling(admitted.limit, settings.buffer)
++        // Cross-provider compaction must produce portable text, not a provider-native window.
++        const result = yield* summarize(routed, Math.min(budget, cap), settings.keep)
++        return { selected: routed, result }
++      }).pipe(
++        Effect.ensuring(
++          Effect.promise(async () => { await admission.release?.() }).pipe(
++            Effect.catchDefect(() => Effect.logError("failed to release compaction admission")),
++          ),
++        ),
++      )
+       return yield* compaction.pipe(
+         Effect.matchEffect({
+-          onSuccess: (result) => publish(selected, result),
++          onSuccess: ({ selected, result }) => publish(selected, result),
+           onFailure: (failure) => publish(selected, failure),
+         }),
+       )
+@@ -385,6 +428,13 @@ export const layer = Layer.effect(
+       const age = (yield* Clock.currentTimeMillis) - DateTime.toEpochMillis(anchor.time.created)
+       if (age > cacheLifetime(context.model.cache?.ttl) - CACHE_MARGIN) return
+
++      const admission = yield* hooks.trigger("session", "experimental.compaction.model.resolve", {
++        sessionID,
++        model: context.model.ref,
++        background: true,
++      }).pipe(Effect.catchDefect(() => Effect.succeed({ defer: true })))
++      if (admission.defer) return
++
+       const model = yield* selectModel(context, settings.buffer, false)
+       const usage: SessionUsage.Recorded[] = []
+       const fiber = yield* summarize({ reason: "auto", context: model.context }, model.cap, settings.keep, {
+@@ -951,7 +1001,10 @@ export const layer = Layer.effect(
+ export const node = makeLocationNode({
+   service: Service,
+   layer,
+-  deps: [Agent.node, Bus.node, Database.node, llmClient, Model.node, SessionModelRequest.node, SessionRunnerModel.node],
++  deps: [
++    Agent.node, Bus.node, Database.node, llmClient, Model.node, ModelResolver.node,
++    PluginHooks.node, SessionModelRequest.node, SessionRunnerModel.node,
++  ],
+ })
+
+ /**
+diff --git a/packages/plugin/src/effect/session.ts b/packages/plugin/src/effect/session.ts
+index 6d0429b429fd495c15b183f727e515c2d957bb91..e30a860cb1e7c3474a4f5e8b90c244b1b2df62ef 100644
+--- a/packages/plugin/src/effect/session.ts
++++ b/packages/plugin/src/effect/session.ts
+@@ -81,6 +81,16 @@ export interface SessionModelResolve {
+   model: Model.Ref
+ }
+
++/** Selects a provider only for compaction. A reservation is owned until release is called. */
++export interface SessionCompactionModelResolve {
++  readonly sessionID: Session.ID
++  readonly background: boolean
++  model: Model.Ref
++  defer?: boolean
++  denied?: string
++  release?: () => Promise<void>
++}
++
+ export interface SessionModelRequest {
+   readonly sessionID: Session.ID
+   readonly agent: Agent.ID
+@@ -207,6 +217,7 @@ export interface SessionHooks {
+   readonly generate: SessionGenerate
+   readonly title: SessionTitle
+   readonly "experimental.model.resolve": SessionModelResolve
++  readonly "experimental.compaction.model.resolve": SessionCompactionModelResolve
+   readonly "model.request": SessionModelRequest
+   readonly "http.request": SessionHttpRequest
+   readonly "http.response": SessionHttpResponse
+diff --git a/packages/plugin/src/promise/session.ts b/packages/plugin/src/promise/session.ts
+index 4fd80c187730e4ed1535c0c3082b32cf47a98882..0ed5446f925a1eac3175a0c510a6b02068f817fa 100644
+--- a/packages/plugin/src/promise/session.ts
++++ b/packages/plugin/src/promise/session.ts
+@@ -81,6 +81,16 @@ export interface SessionModelResolve {
+   model: Model.Ref
+ }
+
++/** Selects a provider only for compaction. A reservation is owned until release is called. */
++export interface SessionCompactionModelResolve {
++  readonly sessionID: Session.ID
++  readonly background: boolean
++  model: Model.Ref
++  defer?: boolean
++  denied?: string
++  release?: () => Promise<void>
++}
++
+ export interface SessionModelRequest {
+   readonly sessionID: Session.ID
+   readonly agent: Agent.ID
+@@ -207,6 +217,7 @@ export interface SessionHooks {
+   readonly generate: SessionGenerate
+   readonly title: SessionTitle
+   readonly "experimental.model.resolve": SessionModelResolve
++  readonly "experimental.compaction.model.resolve": SessionCompactionModelResolve
+   readonly "model.request": SessionModelRequest
+   readonly "http.request": SessionHttpRequest
+   readonly "http.response": SessionHttpResponse
