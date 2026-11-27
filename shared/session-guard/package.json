@@ -2,6 +2,7 @@
   "name": "opencode-team.session-guard",
   "type": "module",
   "exports": {
+    ".": "./index.js",
     "./tui": "./tui.js"
   }
 }

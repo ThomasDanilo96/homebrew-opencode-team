@@ -4,9 +4,22 @@ import { test } from 'node:test';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 
 const root = path.resolve(import.meta.dirname, '..');
+function runtimeFixture(temp) {
+  const dir = path.join(temp, 'runtime-assets');
+  fs.mkdirSync(dir);
+  const asset = path.join(dir, 'opencode-team-runtime-2.3.2-darwin-arm64.tar.gz');
+  const bytes = Buffer.from('locked runtime fixture');
+  fs.writeFileSync(asset, bytes);
+  const lock = path.join(dir, 'runtime-lock.json');
+  fs.writeFileSync(lock, JSON.stringify({ 'darwin-arm64': {
+    sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length,
+  } }));
+  return { dir, lock, asset };
+}
 test('source Homebrew formula installs a working portable launcher without obsolete assets', (t) => {
   const temp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'team-formula-'));
   t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
@@ -94,9 +107,9 @@ test('published archive identity stays immutable while candidate versions can ad
   const url = source.match(/^  url "([^"]+)"$/m)[1];
   const sha = source.match(/^  sha256 "([0-9a-f]{64})"$/m)[1];
   // Pin the published archive, not HEAD: CI must not compare a commit to itself.
-  const publishedVersion = '0.3.11';
+  const publishedVersion = '0.3.12';
   const oldURL = `https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v${publishedVersion}.tar.gz`;
-  const oldSHA = 'efcc97d57de86f047016341582ed7febdf5ef810ca1ae8beabe601af50917f22';
+  const oldSHA = '4a14454ca2b05ecfccc3737d7d81afa1c5a7b92a8a456bb87de872cfd65d01bc';
   const version = fs.readFileSync(path.join(root, 'VERSION'), 'utf8').trim();
   assert.match(version, /^\d+\.\d+\.\d+$/);
   const compare = (a, b) => a.split('.').reduce((order, part, i) => order || Math.sign(Number(part) - Number(b.split('.')[i])), 0);
@@ -114,12 +127,13 @@ test('published archive identity stays immutable while candidate versions can ad
     assert.notEqual(sha, oldSHA, 'a new VERSION changes the archive contents');
   }
   const output = path.join(temp, 'formula.rb');
-  const args = [path.join(root, '.github/scripts/render-staging-formula.rb'), formula, output,
-    'OpencodeTeamStaging', version, 'file:///candidate.tar.gz', 'a'.repeat(64)];
+  const assets = runtimeFixture(temp);
+  const args = [path.join(root, '.github/scripts/render-staging-formula.rb'), '--runtime', formula, output,
+    'OpencodeTeamStaging', version, 'file:///candidate.tar.gz', 'a'.repeat(64), assets.lock, assets.dir];
   const valid = spawnSync('ruby', args, { encoding: 'utf8' });
   assert.equal(valid.status, 0, valid.stderr);
   assert.match(fs.readFileSync(output, 'utf8'), /class OpencodeTeamStaging < Formula/);
-  args[args.length - 1] = 'not-a-checksum';
+  args[7] = 'not-a-checksum';
   const invalid = spawnSync('ruby', args, { encoding: 'utf8' });
   assert.notEqual(invalid.status, 0);
   assert.match(invalid.stderr, /invalid SHA-256/);
@@ -132,8 +146,9 @@ test('staging candidate installs guarded test surface and runs installed smoke w
   const formula = path.join(root, 'Formula/opencode-team.rb');
   const version = fs.readFileSync(path.join(root, 'VERSION'), 'utf8').trim();
   const output = path.join(temp, 'staging.rb');
-  const args = [path.join(root, '.github/scripts/render-staging-formula.rb'), formula, output,
-    'OpencodeTeamStaging', version, 'file:///candidate.tar.gz', 'a'.repeat(64)];
+  const assets = runtimeFixture(temp);
+  const args = [path.join(root, '.github/scripts/render-staging-formula.rb'), '--runtime', formula, output,
+    'OpencodeTeamStaging', version, 'file:///candidate.tar.gz', 'a'.repeat(64), assets.lock, assets.dir];
   const render = spawnSync('ruby', args, { encoding: 'utf8' });
   assert.equal(render.status, 0, render.stderr);
   const rendered = fs.readFileSync(output, 'utf8');
@@ -172,6 +187,11 @@ class Formula
   def libexec; Pathname.new(ENV.fetch('MOCK_PREFIX'))/'libexec'; end
   def zsh_completion; Pathname.new(ENV.fetch('MOCK_PREFIX'))/'share/zsh/site-functions'; end
   def opt_prefix; Pathname.new(ENV.fetch('MOCK_PREFIX')); end
+  def version; "0.3.13"; end
+  def resources; ENV["MOCK_RUNTIME"] ? [Struct.new(:name).new("team-runtime")] : []; end
+  def resource(name); self; end
+  def stage(&block); Dir.chdir(ENV.fetch("MOCK_RUNTIME"), &block); end
+  def odie(message); abort message; end
   def formula_opt_bin(*); File.dirname(ENV.fetch('MOCK_NODE')); end
   def chmod(mode, file); File.chmod(mode, file); end
 end
@@ -181,8 +201,15 @@ formula = OpencodeTeamStaging.new
 formula.bin.mkpath
 formula.install
 `;
+  const env = { ...process.env, MOCK_PREFIX: temp, MOCK_NODE: process.execPath };
+  const unguarded = spawnSync('ruby', ['-e', mock, output], { cwd: root, env, encoding: 'utf8' });
+  assert.notEqual(unguarded.status, 0);
+  assert.match(unguarded.stderr, /No checksum-locked Session Guard runtime/);
+  const runtime = path.join(temp, 'fixture-runtime');
+  fs.mkdirSync(runtime);
+  for (const file of ['opencode', 'manifest.json', 'LICENSE']) fs.writeFileSync(path.join(runtime, file), file);
   const result = spawnSync('ruby', ['-e', mock, output], {
-    cwd: root, env: { ...process.env, MOCK_PREFIX: temp, MOCK_NODE: process.execPath }, encoding: 'utf8',
+    cwd: root, env: { ...env, MOCK_RUNTIME: runtime }, encoding: 'utf8',
   });
   assert.equal(result.status, 0, result.stderr);
   assert.ok(fs.existsSync(path.join(temp, 'libexec/tests/guardrail/runner.sh')));
@@ -194,6 +221,8 @@ formula.install
   assert.equal(fs.existsSync(path.join(temp, 'libexec/best-quota-native.test.mjs')), false,
     'staging must not misplace a continued formula install argument into libexec root');
   const launcher = path.join(temp, 'bin/opencode-team');
+  assert.equal(fs.readFileSync(path.join(temp, 'libexec/.requires-session-guard'), 'utf8'), '2.3.2\n');
+  assert.equal(fs.readFileSync(path.join(temp, 'libexec/runtime/opencode'), 'utf8'), 'opencode');
   const v = spawnSync(launcher, ['version'], { cwd: temp, encoding: 'utf8' });
   assert.equal(v.status, 0, v.stderr);
   assert.equal(v.stdout.trim(), `OpenCode Team ${version}`);
@@ -212,6 +241,30 @@ formula.install
         TMPDIR: path.join(installed, 'tmp') } });
   assert.equal(smoke.status, 0, smoke.stderr + smoke.stdout);
   assert.match(smoke.stdout, /PACKAGING CONFIG SMOKE PASS/);
+});
+
+test('runtime formula validates local resources and requires a complete platform lock for stable promotion', (t) => {
+  const temp = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'team-runtime-formula-'));
+  t.after(() => fs.rmSync(temp, { recursive: true, force: true }));
+  const lock = path.join(temp, 'runtime-lock.json');
+  const asset = path.join(temp, 'opencode-team-runtime-2.3.2-darwin-arm64.tar.gz');
+  const output = path.join(temp, 'formula.rb');
+  const bytes = Buffer.from('runtime fixture');
+  fs.writeFileSync(asset, bytes);
+  const entry = { sha256: createHash('sha256').update(bytes).digest('hex'), bytes: bytes.length };
+  const writeLock = (targets) => fs.writeFileSync(lock, JSON.stringify(Object.fromEntries(targets.map((target) => [target, entry]))));
+  const render = (...extra) => spawnSync('ruby', [path.join(root, '.github/scripts/render-staging-formula.rb'),
+    '--runtime', path.join(root, 'Formula/opencode-team.rb'), output, 'OpencodeTeam', '0.3.13',
+    'file:///candidate.tar.gz', 'a'.repeat(64), lock, ...extra], { encoding: 'utf8' });
+  writeLock(['darwin-arm64']);
+  assert.equal(render(temp).status, 0);
+  assert.match(fs.readFileSync(output, 'utf8'), /on_macos do[\s\S]+on_arm do[\s\S]+resource "team-runtime"/);
+  assert.match(render().stderr, /requires all runtime targets/);
+  fs.appendFileSync(asset, 'changed');
+  assert.match(render(temp).stderr, /runtime asset mismatch/);
+  writeLock(['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64-baseline']);
+  assert.equal(render().status, 0);
+  assert.equal((fs.readFileSync(output, 'utf8').match(/resource "team-runtime"/g) ?? []).length, 4);
 });
 
 test('release handoff binds archive, commit, source and complete operational instructions', t => {
@@ -236,7 +289,8 @@ test('release handoff binds archive, commit, source and complete operational ins
   fs.writeFileSync(archive, git(['archive', '--format=tar.gz', '--prefix=candidate/', commit]));
   const bundle = path.join(temp, 'handoff with spaces');
   const renderer = path.join(root, '.github/scripts/render-staging-formula.rb');
-  const prepare = spawnSync('ruby', [renderer, '--handoff', archive, commit, source, bundle], { encoding: 'utf8' });
+  const assets = runtimeFixture(temp);
+  const prepare = spawnSync('ruby', [renderer, '--handoff', archive, commit, source, bundle, assets.dir], { encoding: 'utf8' });
   assert.equal(prepare.status, 0, prepare.stderr);
   const partial = path.join(temp, 'incomplete.tar.gz');
   fs.writeFileSync(partial, git(['archive', '--format=tar.gz', '--prefix=candidate/', commit,
@@ -249,6 +303,10 @@ test('release handoff binds archive, commit, source and complete operational ins
     spawnSync('ruby', [renderer, '--verify', bundle, ref, sha, tree], { encoding: 'utf8' });
   const valid = verify();
   assert.equal(valid.status, 0, valid.stderr);
+  const originalAsset = fs.readFileSync(assets.asset);
+  fs.appendFileSync(assets.asset, 'swapped runtime');
+  assert.match(verify().stderr, /runtime asset mismatch/);
+  fs.writeFileSync(assets.asset, originalAsset);
   assert.match(valid.stdout, /HANDOFF_VALID/);
   assert.doesNotMatch(valid.stdout, /RELEASE_PREPARATION=PASS/, 'identity alone is not packaging completion');
   assert.match(fs.readFileSync(path.join(bundle, 'OPERATIONS.md'), 'utf8'), new RegExp(commit));

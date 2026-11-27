@@ -6,6 +6,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { readQuotaState, updateQuotaState } from './best-quota.mjs';
 
 const packageRoot = path.resolve(import.meta.dirname, '..');
+const packaged = fs.existsSync(path.join(packageRoot, '.requires-session-guard'));
 const profiles = ['best', 'free'];
 const home = process.env.HOME;
 if (!home) throw new Error('HOME is required');
@@ -259,6 +260,10 @@ function profileEnvironment(profile) {
     env.npm_config_cache = path.join(roots.cache, 'best/npm');
     env.CTX7_TELEMETRY_DISABLED = '1';
   }
+  if (packaged) {
+    // Core adds plugin entries across config documents; keep the profile file and CLI config unchanged.
+    env.OPENCODE_CONFIG_CONTENT = JSON.stringify({ plugins: [path.join(packageRoot, 'shared/session-guard')] });
+  }
   return { ...env, XDG_CONFIG_HOME: path.join(roots.config, profile, 'v2/xdg-config'),
     XDG_DATA_HOME: path.join(roots.data, profile, 'data'), XDG_STATE_HOME: path.join(roots.state, profile),
     XDG_CACHE_HOME: path.join(roots.cache, profile), OPENCODE_CONFIG: configFile(profile),
@@ -270,8 +275,62 @@ function command(executable, args, options = {}) {
   if (result.error || result.status !== 0) fail(`${path.basename(executable)} ${args[0]} failed: ${result.error?.message || result.stderr || result.status}`);
   return result.stdout.trim();
 }
+function packagedBinary() {
+  const version = '2.3.2';
+  const upstream = 'c0ad18b402eb2827fc1ee71c171b1177b3fc02d1';
+  const patch = '1bcf5fe7140303e430b667c4782e18d836b7f45ad07a56a9e69a5c972fadb213';
+  const runtime = path.join(packageRoot, 'runtime');
+  const manifestFile = path.join(runtime, 'manifest.json');
+  const binary = path.join(runtime, 'opencode');
+  const invalid = (reason) => fail(`Packaged OpenCode runtime ${reason}; reinstall opencode-team`);
+  let manifest;
+  try {
+    if (fs.lstatSync(runtime).isDirectory() && fs.lstatSync(manifestFile).isFile()) {
+      manifest = JSON.parse(fs.readFileSync(manifestFile, 'utf8'));
+    }
+  } catch {
+    invalid('manifest is missing, unreadable or malformed');
+  }
+  if (manifest?.version !== version || manifest.upstream !== upstream || manifest.patch_sha256 !== patch ||
+      manifest.platform !== process.platform || manifest.arch !== process.arch ||
+      typeof manifest.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(manifest.sha256)) {
+    invalid('manifest identity or checksum field is invalid');
+  }
+  let digest;
+  try {
+    if (fs.lstatSync(binary).isFile()) {
+      fs.accessSync(binary, fs.constants.X_OK);
+      const fd = fs.openSync(binary, 'r');
+      try {
+        // Hash the installed binary without buffering the entire executable.
+        const hash = crypto.createHash('sha256');
+        const chunk = Buffer.allocUnsafe(1024 * 1024);
+        for (let n; (n = fs.readSync(fd, chunk)) > 0;) hash.update(chunk.subarray(0, n));
+        digest = hash.digest('hex');
+      } finally {
+        fs.closeSync(fd);
+      }
+    }
+  } catch {
+    invalid('executable is missing, unreadable or not executable');
+  }
+  if (!digest) invalid('executable is not a regular file');
+  if (digest !== manifest.sha256) invalid('checksum mismatch');
+  if (['package.json', 'index.js', 'tui.js', 'guard.mjs'].some((file) =>
+    !fs.lstatSync(path.join(packageRoot, 'shared/session-guard', file), { throwIfNoEntry: false })?.isFile())) {
+    invalid('is missing the packaged Session Guard plugin');
+  }
+  const probe = spawnSync(binary, ['--version'], { env: profileEnvironment('best'), encoding: 'utf8', timeout: 15000 });
+  if (probe.error || probe.status !== 0) invalid('executable failed its version check');
+  if (probe.stdout.trim().replace(/^(?:opencode\s+)?v?/, '') !== version) invalid(`version mismatch (expected ${version})`);
+  return { binary, version };
+}
 function nativeBinary() {
   const override = process.env.OPENCODE_TEAM_OPENCODE_BIN;
+  if (packaged) {
+    if (override !== undefined) fail('Packaged OpenCode runtime does not accept OPENCODE_TEAM_OPENCODE_BIN; unset it');
+    return packagedBinary();
+  }
   if (override && !path.isAbsolute(override)) fail('OPENCODE_TEAM_OPENCODE_BIN must be an absolute executable path');
   // BEST's private tools remain on the child PATH, but must never select the
   // native runtime (including a historical retention fork) for either profile.
@@ -767,9 +826,10 @@ try {
       const report = await quotaCLI(args.slice(1), file, quotaScope);
       report.historical = { status: 'UNAVAILABLE' };
       if (fs.existsSync(configFile('best'))) {
+        const packagedRuntime = packaged ? nativeBinary() : undefined;
         const to = Date.now(), from = to - report.days * 86400000;
         try {
-          report.historical = nativeUsageReport(JSON.parse(command(nativeBinary().binary,
+          report.historical = nativeUsageReport(JSON.parse(command((packagedRuntime ?? nativeBinary()).binary,
             ['api', 'get', `/api/experimental/session/stats?from=${from}&to=${to}&tools=summary`, '--standalone'],
             { env: profileEnvironment('best'), timeout: 90000 })));
         } catch {

@@ -47,9 +47,17 @@ echo "HOMEBREW_ISOLATED_PREFIX=$actual"
 "$brew" --version || blocked version
 tar -czf "$work/candidate.tar.gz" -C "$ROOT" bin shared tests Formula completions VERSION .github
 sha="$(/usr/bin/shasum -a 256 "$work/candidate.tar.gz" | /usr/bin/awk '{print $1}')"
-ruby "$ROOT/.github/scripts/render-staging-formula.rb" "$ROOT/Formula/opencode-team.rb" \
-  "$prefix/Library/Taps/opencode-team/homebrew-staging/Formula/opencode-team-candidate.rb" \
-  OpencodeTeamCandidate "$(tr -d '[:space:]' < "$ROOT/VERSION")" "file://$work/candidate.tar.gz" "$sha"
+version="$(tr -d '[:space:]' < "$ROOT/VERSION")"
+formula_file="$prefix/Library/Taps/opencode-team/homebrew-staging/Formula/opencode-team-candidate.rb"
+if [[ "$version" = 0.3.13 ]]; then
+  [[ -d "$ROOT/runtime-assets" ]] || blocked runtime-assets
+  ruby "$ROOT/.github/scripts/render-staging-formula.rb" --runtime "$ROOT/Formula/opencode-team.rb" \
+    "$formula_file" OpencodeTeamCandidate "$version" "file://$work/candidate.tar.gz" "$sha" \
+    "$ROOT/runtime-assets/runtime-lock.json" "$ROOT/runtime-assets" || blocked runtime-formula
+else
+  ruby "$ROOT/.github/scripts/render-staging-formula.rb" "$ROOT/Formula/opencode-team.rb" \
+    "$formula_file" OpencodeTeamCandidate "$version" "file://$work/candidate.tar.gz" "$sha"
+fi
 formula=opencode-team/staging/opencode-team-candidate
 
 # Readonly reuse: the sandbox denies network and the 105-char temp prefix

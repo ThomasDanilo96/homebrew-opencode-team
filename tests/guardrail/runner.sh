@@ -148,6 +148,11 @@ if [ "${1:-}" = rollback ] && [ "$#" -eq 3 ]; then
   cp -p "$2" "$STAGING/rollback-code.tar.gz"
   cp -p "$3" "$STAGING/rollback-manifest.json"
 fi
+if [ "${1:-}" = homebrew ] && [ "$#" -eq 2 ]; then
+  assets="$(realpath_cmd "$2")"
+  mkdir "$STAGING/runtime-assets"
+  cp -p "$assets/runtime-lock.json" "$assets"/opencode-team-runtime-*.tar.gz "$STAGING/runtime-assets/"
+fi
 cd "$STAGING"
 target="${1:-all}"
 case "$target" in all|smoke|maintenance|benchmark|profile|qualification|homebrew|compatibility|rollback|best-routing|best-native|packaging|quota) ;; *) echo "unknown target: $target" >&2; exit 2 ;; esac
@@ -258,7 +263,7 @@ fi
 run_suite /usr/bin/python3 -B tests/test_benchmark_maintenance.py -v 2>&1 || :
 
 echo "## Node suites"
-for suite in native-profiles session-report disk-cleanup hybrid-evidence packaging best-routing; do
+for suite in native-profiles session-report session-guard disk-cleanup hybrid-evidence packaging best-routing; do
   echo "--- $suite ---"
   run_suite node --test "tests/${suite}.test.mjs" 2>&1 || :
 done

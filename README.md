@@ -1,9 +1,9 @@
 # OpenCode Team
 
-Two isolated profiles on **standard OpenCode V2**, with one launcher and config
+Two isolated profiles on **OpenCode V2**, with one launcher and config
 generator (`shared/profiles.mjs`). Native V2 owns agents, tools, permissions,
-skills, MCP and sessions. No custom runtime, server, router, daemon, OmO, Codex
-bridge or mandatory fanout is installed. macOS setup also schedules the safe
+skills, MCP and sessions. No extra server, router, daemon, OmO, Codex bridge
+or mandatory fanout is installed. macOS setup also schedules the safe
 maintenance described below; it never deletes sessions.
 
 | Profile | Default | Connection |
@@ -21,6 +21,10 @@ See [Hybrid validation](docs/best-hybrid-validation.md) for comparison and relea
 Install OpenCode **V2** yourself; V1 and unknown major versions are rejected.
 Setup never installs/replaces OpenCode or changes its shared service settings.
 Requirements: Node.js 22.16+ (Homebrew uses `node@22`), Git and uv.
+
+The unreleased [v0.3.13 Homebrew candidate](docs/releases/v0.3.13.md) instead
+uses a private, precompiled OpenCode 2.3.2 runtime shared by BEST and FREE.
+The public formula still serves v0.3.12 and leaves standard OpenCode alone.
 
 The retention fork is not required. Historical compatibility and the safe
 transition constraint are documented in

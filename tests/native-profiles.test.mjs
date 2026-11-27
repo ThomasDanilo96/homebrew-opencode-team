@@ -20,8 +20,9 @@ function fixture(t) {
   fs.mkdirSync(path.join(deps, 'bin'), { recursive: true });
   const executable = (file, text) => { fs.writeFileSync(file, text); fs.chmodSync(file, 0o755); };
   executable(path.join(dir, 'opencode'), `#!/usr/bin/env node
+if (process.env.MOCK_INVOKED) require('fs').appendFileSync(process.env.MOCK_INVOKED, 'invoked\\n');
 if (process.argv[2] === '--version') { console.log(process.env.MOCK_VERSION || '2.0.32'); process.exit(0); }
-require('fs').writeFileSync(process.env.MOCK_CAPTURE, JSON.stringify({pid:process.pid, args:process.argv.slice(2), env:process.env}));
+require('fs').writeFileSync(process.env.MOCK_CAPTURE, JSON.stringify({pid:process.pid, binary:process.argv[1], args:process.argv.slice(2), env:process.env}));
 if (process.env.MOCK_WAIT) setInterval(() => {}, 1000);
 else process.exit(Number(process.env.MOCK_EXIT || 0));
 `);
@@ -95,11 +96,13 @@ test('native discovery ignores profile-local OpenCode while BEST keeps private t
   fs.writeFileSync(fork, '#!/bin/sh\necho "profile-local fork must not run" >&2\nexit 95\n', { mode: 0o755 });
   delete f.env.OPENCODE_TEAM_OPENCODE_BIN;
   f.env.PATH = `${privateBin}:${f.dir}:${f.env.PATH}`;
+  f.env.OPENCODE_CONFIG_CONTENT = '{"plugins":["caller"]}';
   ok(f.run('setup'));
   for (const profile of ['best', 'free']) {
     ok(f.run(profile, 'run', 'official native'));
     const capture = JSON.parse(fs.readFileSync(f.env.MOCK_CAPTURE));
     assert.equal(capture.args[1], 'official native');
+    assert.equal(capture.env.OPENCODE_CONFIG_CONTENT, undefined);
     if (profile === 'best') assert.ok(capture.env.PATH.startsWith(`${privateBin}:`));
   }
   assert.match(fs.readFileSync(fork, 'utf8'), /profile-local fork/);
@@ -123,6 +126,109 @@ fs.realpathSync = function(file, ...args) {
   f.env.NODE_OPTIONS = `--import=${hook}`;
   f.env.PATH += `${path.delimiter}${denied}`;
   ok(f.run('best', 'run', 'do not inspect unused PATH entries'));
+});
+
+function packagedFixture(t) {
+  const f = fixture(t);
+  ok(f.run('setup')); // Simulate configs already installed before the packaged upgrade.
+  const packageRoot = path.join(f.dir, 'keg');
+  const runtime = path.join(packageRoot, 'runtime');
+  fs.mkdirSync(runtime, { recursive: true });
+  fs.cpSync(path.join(root, 'shared'), path.join(packageRoot, 'shared'), { recursive: true });
+  const binary = path.join(runtime, 'opencode');
+  const manifestFile = path.join(runtime, 'manifest.json');
+  // Cover hashing more than one chunk, including a partial final read.
+  const bytes = fs.readFileSync(path.join(f.dir, 'opencode'), 'utf8') + `// ${' '.repeat(1024 * 1024)}\n`;
+  const manifest = { version: '2.3.2', upstream: 'c0ad18b402eb2827fc1ee71c171b1177b3fc02d1',
+    patch_sha256: '1bcf5fe7140303e430b667c4782e18d836b7f45ad07a56a9e69a5c972fadb213',
+    platform: process.platform, arch: process.arch, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
+  fs.writeFileSync(path.join(packageRoot, '.requires-session-guard'), '2.3.2\n');
+  delete f.env.OPENCODE_TEAM_OPENCODE_BIN;
+  f.env.PATH = `${f.dir}${path.delimiter}${f.env.PATH}`; // The unbundled mock is a valid PATH decoy.
+  f.env.MOCK_VERSION = manifest.version;
+  f.env.MOCK_INVOKED = path.join(f.dir, 'invoked.log');
+  const run = (...args) => spawnSync(process.execPath, [path.join(packageRoot, 'shared/profiles.mjs'), ...args],
+    { env: f.env, encoding: 'utf8', cwd: f.dir });
+  const writeRuntime = () => {
+    fs.writeFileSync(binary, bytes);
+    fs.chmodSync(binary, 0o755);
+    fs.writeFileSync(manifestFile, JSON.stringify(manifest));
+  };
+  writeRuntime();
+  return { ...f, run, packageRoot, binary, manifest, manifestFile, writeRuntime };
+}
+
+test('packaged BEST and FREE pin the keg runtime and add only the Guard to the inline config', async (t) => {
+  const f = packagedFixture(t);
+  f.env.OPENCODE_CONFIG_CONTENT = '{"plugins":["caller"],"permissions":[]}';
+  f.env.OPENCODE_CLI_CONFIG_CONTENT = '{"plugins":["caller"]}';
+  const guard = path.join(f.packageRoot, 'shared/session-guard');
+  for (const profile of ['best', 'free']) {
+    const configPath = f.configPath(profile);
+    const original = fs.readFileSync(configPath, 'utf8');
+    const cli = path.join(f.team, 'config', profile, 'v2/xdg-config/opencode/cli.json');
+    fs.writeFileSync(cli, '{"plugins":["./existing-tui"]}\n');
+    ok(f.run(profile, '--help'));
+    const capture = JSON.parse(fs.readFileSync(f.env.MOCK_CAPTURE));
+    assert.equal(capture.binary, f.binary);
+    assert.equal(capture.env.OPENCODE_CONFIG, configPath);
+    assert.deepEqual(JSON.parse(capture.env.OPENCODE_CONFIG_CONTENT), { plugins: [guard] });
+    assert.equal(capture.env.OPENCODE_CLI_CONFIG_CONTENT, undefined);
+    assert.deepEqual(capture.args, ['--help', '--standalone']);
+    assert.equal(fs.readFileSync(configPath, 'utf8'), original);
+    assert.equal(fs.readFileSync(cli, 'utf8'), '{"plugins":["./existing-tui"]}\n');
+  }
+  const { exports } = JSON.parse(fs.readFileSync(path.join(guard, 'package.json')));
+  const { default: server } = await import(path.join(guard, exports['.']));
+  assert.equal(server.id, 'opencode-team.session-guard');
+  assert.equal(await server.setup(undefined), undefined);
+  assert.equal(exports['./tui'], './tui.js');
+});
+
+test('packaged BEST/FREE runtime refuses invalid installs and overrides without falling back to PATH', async (t) => {
+  const f = packagedFixture(t);
+  for (const [name, change, error] of [
+    ['missing manifest', () => fs.unlinkSync(f.manifestFile), /manifest/],
+    ['malformed manifest', () => fs.writeFileSync(f.manifestFile, '{'), /manifest/],
+    ...Object.keys(f.manifest).map(key => [key, () => fs.writeFileSync(f.manifestFile,
+      JSON.stringify({ ...f.manifest, [key]: 'invalid' })), /manifest/]),
+    ['missing binary', () => fs.unlinkSync(f.binary), /executable/],
+    ['non-executable binary', () => fs.chmodSync(f.binary, 0o644), /executable/],
+    ['changed binary', () => fs.appendFileSync(f.binary, '\n'), /checksum/],
+    ['binary symlink', () => {
+      fs.renameSync(f.binary, `${f.binary}.original`);
+      fs.symlinkSync(`${f.binary}.original`, f.binary);
+    }, /executable/],
+    ['explicit override', () => { f.env.OPENCODE_TEAM_OPENCODE_BIN = path.join(f.dir, 'opencode'); }, /override|OPENCODE_TEAM_OPENCODE_BIN/],
+    ['empty override', () => { f.env.OPENCODE_TEAM_OPENCODE_BIN = ''; }, /override|OPENCODE_TEAM_OPENCODE_BIN/],
+  ]) {
+    await t.test(name, () => {
+      change();
+      try {
+        const result = f.run('free', 'run', 'must not run');
+        assert.equal(result.status, 1, result.stdout + result.stderr);
+        assert.match(result.stderr, /^opencode-team: .*packaged/i);
+        assert.match(result.stderr, error);
+        assert.equal(fs.existsSync(f.env.MOCK_CAPTURE), false);
+        assert.equal(fs.existsSync(f.env.MOCK_INVOKED), false);
+      } finally {
+        delete f.env.OPENCODE_TEAM_OPENCODE_BIN;
+        if (fs.existsSync(f.binary)) fs.unlinkSync(f.binary);
+        f.writeRuntime();
+      }
+    });
+  }
+  fs.unlinkSync(f.manifestFile);
+  const report = f.run('best', 'quota', 'report', '--days', '7');
+  assert.equal(report.status, 1, report.stdout + report.stderr);
+  assert.match(report.stderr, /^opencode-team: .*packaged.*manifest/i);
+  f.writeRuntime();
+
+  f.env.MOCK_VERSION = '2.3.3';
+  const result = f.run('free', 'run', 'must not run');
+  assert.equal(result.status, 1, result.stdout + result.stderr);
+  assert.match(result.stderr, /^opencode-team: .*packaged.*version/i);
+  assert.equal(fs.existsSync(f.env.MOCK_CAPTURE), false);
 });
 
 function mockCleanup(f) {

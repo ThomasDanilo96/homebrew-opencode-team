@@ -86,6 +86,9 @@ jobs:
     # This runner is disposable. The staging keg/formula never touches the stable tap.
     runs-on: macos-26
     timeout-minutes: 65
+    permissions:
+      actions: read
+      contents: read
     steps:
       - name: Checkout candidate source
         uses: actions/checkout@v4
@@ -107,6 +110,8 @@ jobs:
 
       - name: Build candidate source artifact and ephemeral formula
         timeout-minutes: 10
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           echo 'Phase A / artifact: binding candidate archive and isolated formula to dispatch SHA'
           version="$(tr -d '[:space:]' < VERSION)"
@@ -121,8 +126,14 @@ jobs:
           # into Formula/opencode-team.rb or used as a release checksum.
           staging_sha256="$(shasum -a 256 "$archive" | awk '{print $1}')"
           bundle="$RUNNER_TEMP/opencode-team-$version-handoff"
+          runtime_args=()
+          if [ "$version" = "0.3.13" ]; then
+            assets="$RUNNER_TEMP/qualified-runtime"
+            bash .github/scripts/stage-qualified-runtime.sh "$candidate_sha" "$assets"
+            runtime_args+=("$assets")
+          fi
           ruby .github/scripts/render-staging-formula.rb \
-            --handoff "$archive" "$candidate_sha" "$PWD" "$bundle"
+            --handoff "$archive" "$candidate_sha" "$PWD" "$bundle" "${runtime_args[@]}"
           cp "$bundle/opencode-team-staging.rb" "$formula"
           printf 'CANDIDATE_ARCHIVE_SHA256=%s\n' "$staging_sha256" >> "$GITHUB_ENV"
           ruby -c "$formula"
@@ -147,8 +158,13 @@ jobs:
           gitleaks dir "$package_root"
           bash "$package_root/tests/guardrail/runner.sh" smoke
           bundle="$RUNNER_TEMP/opencode-team-$version-handoff"
+          cmp "$bundle/opencode-team-staging.rb" "$(brew --repo opencode-team/staging)/Formula/opencode-team-staging.rb"
           ruby .github/scripts/render-staging-formula.rb --verify "$bundle" "$GITHUB_SHA" "$CANDIDATE_ARCHIVE_SHA256" "$PWD"
           echo "RELEASE_PREPARATION=PASS commit=$GITHUB_SHA sha256=$CANDIDATE_ARCHIVE_SHA256 installation=CI_ONLY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qualified-runtime-receipt
+          path: ${{ runner.temp }}/qualified-runtime/runtime-receipt.json
 
   official-archive-validation:
     needs: [source-validation, release_state]
@@ -195,6 +211,7 @@ jobs:
             printf 'Phase A staging job for %s did not pass (result: %s)\n' "$tag_commit" "${phase_a_job:-missing}" >&2
             exit 1
           fi
+          printf 'PHASE_A_RUN_ID=%s\n' "$phase_a_run_id" >> "$GITHUB_ENV"
           archive="$RUNNER_TEMP/opencode-team-$version-official.tar.gz"
           archive_url="https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v$version.tar.gz"
           curl -fsSL --proto '=https' --tlsv1.2 "$archive_url" -o "$archive"
@@ -211,6 +228,7 @@ jobs:
           HOMEBREW_NO_INSTALL_CLEANUP: "1"
           HOMEBREW_NO_AUTO_UPDATE: "1"
           EXPECTED_ARCHIVE_SHA256: ${{ inputs.official_archive_sha256 }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           version="$(tr -d '[:space:]' < VERSION)"
           archive_url="https://github.com/ThomasDanilo96/homebrew-opencode-team/archive/refs/tags/v$version.tar.gz"
@@ -222,9 +240,21 @@ jobs:
           fi
           brew tap-new --no-git opencode-team/staging
           formula="$(brew --repo opencode-team/staging)/Formula/opencode-team-official.rb"
-          ruby .github/scripts/render-staging-formula.rb \
-            Formula/opencode-team.rb "$formula" OpencodeTeamOfficial "$version" \
-            "$archive_url" "$actual_sha256"
+          if [ "$version" = "0.3.13" ]; then
+            assets="$RUNNER_TEMP/qualified-runtime"
+            receipt="$RUNNER_TEMP/phase-a-receipt"
+            gh run download "$PHASE_A_RUN_ID" --repo "$GITHUB_REPOSITORY" --name qualified-runtime-receipt --dir "$receipt"
+            matrix_run="$(jq -er '.matrix_run' "$receipt/runtime-receipt.json")"
+            bash .github/scripts/stage-qualified-runtime.sh "$(git rev-parse HEAD)" "$assets" "$matrix_run"
+            cmp "$receipt/runtime-receipt.json" "$assets/runtime-receipt.json"
+            ruby .github/scripts/render-staging-formula.rb --runtime \
+              Formula/opencode-team.rb "$formula" OpencodeTeamOfficial "$version" \
+              "$archive_url" "$actual_sha256" "$assets/runtime-lock.json" "$assets"
+          else
+            ruby .github/scripts/render-staging-formula.rb \
+              Formula/opencode-team.rb "$formula" OpencodeTeamOfficial "$version" \
+              "$archive_url" "$actual_sha256"
+          fi
           ruby -c "$formula"
           brew install --verbose opencode-team/staging/opencode-team-official
           brew test --verbose --force opencode-team/staging/opencode-team-official

@@ -22,6 +22,20 @@ BASE = pathlib.Path(
     os.environ.get("SESSION_GUARD_TEST_TMP", tempfile.gettempdir())
 ).resolve()
 PLUGIN = pathlib.Path(__file__).resolve().parents[1] / "shared/session-guard"
+LINUX_CONTAINER = (
+    sys.platform == "linux"
+    and pathlib.Path("/.dockerenv").exists()
+    and {
+        path.name
+        for path in pathlib.Path("/sys/class/net").iterdir()
+        if path.is_dir() and int((path / "flags").read_text().strip(), 16) & 1
+    }
+    == {"lo"}
+)
+if sys.platform != "darwin" and not LINUX_CONTAINER:
+    raise SystemExit(
+        "Native acceptance requires macOS Seatbelt or Docker with --network none"
+    )
 
 
 def wait(fn, desc, seconds=12):
@@ -99,10 +113,11 @@ for label in ("BEST", "FREE"):
         thread = threading.Thread(target=mock.serve_forever, daemon=True)
         thread.start()
         cfg = root / "config-dir"
-        plugin = cfg / "plugins" / "opencode-team.session-guard"
-        shutil.copytree(PLUGIN, plugin)
+        inline_plugin = os.environ.get("SESSION_GUARD_TEST_INLINE_PLUGIN") == "1"
+        if not inline_plugin:
+            shutil.copytree(PLUGIN, cfg / "plugins" / "opencode-team.session-guard")
         observer = cfg / "plugins" / "session-guard-fixture-observer"
-        observer.mkdir()
+        observer.mkdir(parents=True)
         (observer / "package.json").write_text(
             '{"name":"session-guard-fixture-observer","type":"module","exports":{"./tui":"./tui.js"}}'
         )
@@ -160,6 +175,7 @@ export default Plugin.define({{
         (cfg / "opencode.json").write_text(json.dumps(config))
         for d in ("home", "data", "state", "config", "cache", "tmp", "project"):
             (root / d).mkdir()
+        (cfg / "cli.json").write_text('{"keybinds":{"prompt.queue":"ctrl+g"}}')
         password = secrets.token_urlsafe(32)
         env = {
             "PATH": "/opt/homebrew/bin:/usr/bin:/bin",
@@ -177,6 +193,8 @@ export default Plugin.define({{
                 for k in ("data", "state", "config", "cache")
             },
         }
+        if inline_plugin:
+            env["OPENCODE_CONFIG_CONTENT"] = json.dumps({"plugins": [str(PLUGIN)]})
         sb = root / "isolation.sb"
         sb.write_text(f"""(version 1)
 (allow default)
@@ -186,7 +204,11 @@ export default Plugin.define({{
 (deny network-outbound)
 (allow network-outbound (remote ip "localhost:*"))
 """)
-        start = ["/usr/bin/sandbox-exec", "-f", str(sb), BINARY]
+        start = (
+            [BINARY]
+            if LINUX_CONTAINER
+            else ["/usr/bin/sandbox-exec", "-f", str(sb), BINARY]
+        )
         log = root / "serve.log"
         tmux = ["tmux", "-L", "guard-" + secrets.token_hex(5), "-f", "/dev/null"]
         with log.open("w") as out:
@@ -322,7 +344,9 @@ export default Plugin.define({{
             def enter(window, text, queue=False):
                 t("set-buffer", "--", text)
                 t("paste-buffer", "-pr", "-t", f"guard:{window}")
-                keys(window, *(["C-x", "Enter"] if queue else ["Enter"]))
+                if "\n" in text:
+                    wait(lambda: "[Pasted ~" in pane(window), "native paste ready")
+                keys(window, "C-g" if queue else "Enter")
 
             def dialog(window, word):
                 try:
