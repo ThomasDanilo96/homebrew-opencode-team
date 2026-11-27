@@ -35,7 +35,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.4.4
-      - uses: Homebrew/actions/setup-homebrew@master
+      - uses: Homebrew/actions/setup-homebrew@9adaf5f919d8bcadd00012733acf8d50319d25e3 # main
       - name: Build pinned source and stage an unpublished Homebrew package
         run: |
           bash .github/scripts/build-team-runtime.sh "$TARGET" "$RUNNER_TEMP/runtime"
