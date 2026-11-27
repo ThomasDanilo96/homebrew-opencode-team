@@ -194,6 +194,7 @@ test('packaged BEST and FREE pin the keg runtime and add only the Guard to the i
   const f = packagedFixture(t);
   f.env.OPENCODE_CONFIG_CONTENT = '{"plugins":["caller"],"permissions":[]}';
   f.env.OPENCODE_CLI_CONFIG_CONTENT = '{"plugins":["caller"]}';
+  f.env.OPENCODE_CLI_CONFIG_DEFAULTS = '{"theme":{"name":"caller"}}';
   const guard = path.join(f.packageRoot, 'shared/session-guard');
   for (const profile of ['best', 'free']) {
     const configPath = f.configPath(profile);
@@ -206,6 +207,20 @@ test('packaged BEST and FREE pin the keg runtime and add only the Guard to the i
     assert.equal(capture.env.OPENCODE_CONFIG, configPath);
     assert.deepEqual(JSON.parse(capture.env.OPENCODE_CONFIG_CONTENT), { plugins: [guard] });
     assert.equal(capture.env.OPENCODE_CLI_CONFIG_CONTENT, undefined);
+    if (profile === 'best') {
+      assert.deepEqual(JSON.parse(capture.env.OPENCODE_CLI_CONFIG_DEFAULTS), {
+        theme: { name: 'tokyonight', mode: 'dark' },
+        session: { verbosity: 'high', thinking: 'show', scrollbar: true, submit_scroll: 'bottom', grouping: 'none',
+          sidebar: 'auto', tps: true, markdown: 'rendered', image_preview: true },
+        prompt: { image_preview: true, paste: 'compact' },
+        scroll: { acceleration: true },
+        tabs: { scope: 'cwd', mode: 'on', indicators: 'status', layout: 'horizontal' },
+        diffs: { wrap: 'word', source: 'turn', tree: true, view: 'auto' },
+        attention: { notifications: true, sound: false },
+        animations: true, cursor: { style: 'block', blinking: true }, mouse: true,
+        terminal: { title: true, copy: 'select' },
+      });
+    } else assert.equal(capture.env.OPENCODE_CLI_CONFIG_DEFAULTS, undefined);
     assert.deepEqual(capture.args, ['--help', '--standalone']);
     assert.equal(fs.readFileSync(configPath, 'utf8'), original);
     assert.equal(fs.readFileSync(cli, 'utf8'), '{"plugins":["./existing-tui"]}\n');
