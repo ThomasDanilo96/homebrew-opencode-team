@@ -82,16 +82,38 @@ jobs:
             OpencodeTeamStaging 0.3.12 "file://$archive" "$sha"
           brew uninstall --formula "$name"
           cp "$RUNNER_TEMP/old.rb" "$formula"
+          brew trust --formula "$name"
           brew install "$name"
           test "$(opencode-team version)" = "OpenCode Team 0.3.12"
+          old="$(brew --cellar "$name")/0.3.12/libexec"
+          profile_root="$(mktemp -d "$RUNNER_TEMP/upgrade-profiles.XXXXXX")"
+          OPENCODE_TEAM_HOME="$(cd "$profile_root" && pwd -P)"
+          export OPENCODE_TEAM_HOME
+          for profile in best free; do
+            mkdir -p "$OPENCODE_TEAM_HOME/config/$profile/v2"
+            printf '# Isolated cleanup fixture\n' > "$OPENCODE_TEAM_HOME/config/$profile/v2/AGENTS.md"
+          done
+          jq -n --arg old "$old" '{skills: [($old+"/shared/skills")],
+            plugins: [{package: ($old+"/shared/best-quota-plugin")}]}' > "$OPENCODE_TEAM_HOME/config/best/opencode.jsonc"
+          printf '{}\n' > "$OPENCODE_TEAM_HOME/config/free/opencode.jsonc"
           cp "$RUNNER_TEMP/new.rb" "$formula"
+          brew trust --formula "$name"
           brew upgrade --formula --no-ask "$name"
           test "$(opencode-team version)" = "OpenCode Team 0.3.13"
-          test -d "$(brew --cellar "$name")/0.3.12"
+          test -d "$old"
+          brew cleanup "$name"
+          test ! -e "$old"
+          test "$(opencode-team best --version)" = "opencode v2.3.2"
+          test "$(opencode-team free --version)" = "opencode v2.3.2"
+          opt="$(brew --prefix "$name")/libexec"
+          jq -e --arg opt "$opt" '.skills == [($opt+"/shared/skills")] and
+            .plugins[0].package == ($opt+"/shared/best-quota-plugin")' "$OPENCODE_TEAM_HOME/config/best/opencode.jsonc"
           cp "$RUNNER_TEMP/old.rb" "$formula"
+          brew trust --formula "$name"
           brew uninstall --formula "$name"
-          brew link "$name"
+          brew install "$name"
           test "$(opencode-team version)" = "OpenCode Team 0.3.12"
+          test -d "$opt/shared/best-quota-plugin"
       - uses: actions/upload-artifact@v4
         with:
           name: opencode-team-runtime-${{ matrix.target }}

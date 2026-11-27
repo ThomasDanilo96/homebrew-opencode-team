@@ -221,7 +221,7 @@ formula.install
   assert.equal(fs.existsSync(path.join(temp, 'libexec/best-quota-native.test.mjs')), false,
     'staging must not misplace a continued formula install argument into libexec root');
   const launcher = path.join(temp, 'bin/opencode-team');
-  assert.equal(fs.readFileSync(path.join(temp, 'libexec/.requires-session-guard'), 'utf8'), '2.3.2\n');
+  assert.equal(fs.readFileSync(path.join(temp, 'libexec/.requires-session-guard'), 'utf8'), `${path.join(temp, 'libexec')}\n`);
   assert.equal(fs.readFileSync(path.join(temp, 'libexec/runtime/opencode'), 'utf8'), 'opencode');
   const v = spawnSync(launcher, ['version'], { cwd: temp, encoding: 'utf8' });
   assert.equal(v.status, 0, v.stderr);

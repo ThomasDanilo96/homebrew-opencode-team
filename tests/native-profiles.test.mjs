@@ -131,7 +131,9 @@ fs.realpathSync = function(file, ...args) {
 function packagedFixture(t) {
   const f = fixture(t);
   ok(f.run('setup')); // Simulate configs already installed before the packaged upgrade.
-  const packageRoot = path.join(f.dir, 'keg');
+  const rack = path.join(f.dir, 'Cellar/opencode-team');
+  const packageRoot = path.join(rack, '0.3.13/libexec');
+  const opt = path.join(f.dir, 'opt/opencode-team/libexec');
   const runtime = path.join(packageRoot, 'runtime');
   fs.mkdirSync(runtime, { recursive: true });
   fs.cpSync(path.join(root, 'shared'), path.join(packageRoot, 'shared'), { recursive: true });
@@ -142,7 +144,9 @@ function packagedFixture(t) {
   const manifest = { version: '2.3.2', upstream: 'c0ad18b402eb2827fc1ee71c171b1177b3fc02d1',
     patch_sha256: '1bcf5fe7140303e430b667c4782e18d836b7f45ad07a56a9e69a5c972fadb213',
     platform: process.platform, arch: process.arch, sha256: crypto.createHash('sha256').update(bytes).digest('hex') };
-  fs.writeFileSync(path.join(packageRoot, '.requires-session-guard'), '2.3.2\n');
+  fs.mkdirSync(path.dirname(path.dirname(opt)), { recursive: true });
+  fs.symlinkSync(path.dirname(packageRoot), path.dirname(opt));
+  fs.writeFileSync(path.join(packageRoot, '.requires-session-guard'), `${opt}\n`);
   delete f.env.OPENCODE_TEAM_OPENCODE_BIN;
   f.env.PATH = `${f.dir}${path.delimiter}${f.env.PATH}`; // The unbundled mock is a valid PATH decoy.
   f.env.MOCK_VERSION = manifest.version;
@@ -155,8 +159,36 @@ function packagedFixture(t) {
     fs.writeFileSync(manifestFile, JSON.stringify(manifest));
   };
   writeRuntime();
-  return { ...f, run, packageRoot, binary, manifest, manifestFile, writeRuntime };
+  return { ...f, run, packageRoot, rack, opt, binary, manifest, manifestFile, writeRuntime };
 }
+
+test('packaged BEST repairs only managed keg references after cleanup, preserving JSONC and profile state', (t) => {
+  const f = packagedFixture(t);
+  const old = path.join(f.rack, '0.3.12/libexec');
+  const config = f.configPath('best');
+  const oldSkills = JSON.stringify(path.join(old, 'shared/skills'));
+  const oldPlugin = JSON.stringify(path.join(old, 'shared/best-quota-plugin'));
+  const custom = JSON.stringify(path.join(f.dir, 'Cellar/another/0.3.12/libexec/shared/skills'));
+  const text = `{\n  /* leave ${oldSkills} alone */\n  "skills": [${oldSkills}, ${custom},],\n` +
+    `  "plugins": [{"package": ${oldPlugin}, "options": {"keep": ${oldPlugin}}}],\n` +
+    `  "other": {"skills": [${oldSkills}], "plugins": [${oldPlugin}]},\n}\n`;
+  fs.writeFileSync(config, text);
+  assert.equal(fs.existsSync(old), false);
+  const data = path.join(f.team, 'data/best/data/opencode');
+  const files = [path.join(data, 'opencode.db'), path.join(data, 'auth.json'),
+    path.join(f.team, 'state/best/handoff-checkpoints')];
+  files.forEach((file, i) => fs.writeFileSync(file, `unchanged-${i}`));
+  const free = fs.readFileSync(f.configPath('free'), 'utf8');
+  const run = f.run('best', '--help');
+  ok(run);
+  assert.match(run.stderr, /Configuration backup:/);
+  assert.equal(fs.readFileSync(config, 'utf8'), text
+    .replace(`"skills": [${oldSkills},`, `"skills": [${JSON.stringify(path.join(f.opt, 'shared/skills'))},`)
+    .replace(`"package": ${oldPlugin}`, `"package": ${JSON.stringify(path.join(f.opt, 'shared/best-quota-plugin'))}`));
+  assert.doesNotMatch(f.run('best', '--help').stderr, /Configuration backup:/);
+  assert.equal(fs.readFileSync(f.configPath('free'), 'utf8'), free);
+  files.forEach((file, i) => assert.equal(fs.readFileSync(file, 'utf8'), `unchanged-${i}`));
+});
 
 test('packaged BEST and FREE pin the keg runtime and add only the Guard to the inline config', async (t) => {
   const f = packagedFixture(t);
@@ -187,7 +219,9 @@ test('packaged BEST and FREE pin the keg runtime and add only the Guard to the i
 
 test('packaged BEST/FREE runtime refuses invalid installs and overrides without falling back to PATH', async (t) => {
   const f = packagedFixture(t);
+  const optLink = path.dirname(f.opt);
   for (const [name, change, error] of [
+    ['unlinked opt path', () => fs.unlinkSync(optLink), /Homebrew opt/],
     ['missing manifest', () => fs.unlinkSync(f.manifestFile), /manifest/],
     ['malformed manifest', () => fs.writeFileSync(f.manifestFile, '{'), /manifest/],
     ...Object.keys(f.manifest).map(key => [key, () => fs.writeFileSync(f.manifestFile,
@@ -213,6 +247,7 @@ test('packaged BEST/FREE runtime refuses invalid installs and overrides without 
         assert.equal(fs.existsSync(f.env.MOCK_INVOKED), false);
       } finally {
         delete f.env.OPENCODE_TEAM_OPENCODE_BIN;
+        if (!fs.existsSync(optLink)) fs.symlinkSync(path.dirname(f.packageRoot), optLink);
         if (fs.existsSync(f.binary)) fs.unlinkSync(f.binary);
         f.writeRuntime();
       }

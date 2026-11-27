@@ -6,7 +6,11 @@ import { spawn, spawnSync } from 'node:child_process';
 import { readQuotaState, updateQuotaState } from './best-quota.mjs';
 
 const packageRoot = path.resolve(import.meta.dirname, '..');
-const packaged = fs.existsSync(path.join(packageRoot, '.requires-session-guard'));
+const packageMarker = path.join(packageRoot, '.requires-session-guard');
+const packaged = fs.existsSync(packageMarker);
+const cellarRack = path.dirname(path.dirname(packageRoot));
+const quotaAsset = 'shared/best-quota-plugin';
+const skillsAsset = 'shared/skills';
 const profiles = ['best', 'free'];
 const home = process.env.HOME;
 if (!home) throw new Error('HOME is required');
@@ -275,7 +279,67 @@ function command(executable, args, options = {}) {
   if (result.error || result.status !== 0) fail(`${path.basename(executable)} ${args[0]} failed: ${result.error?.message || result.stderr || result.status}`);
   return result.stdout.trim();
 }
+function persistedAssetRoot() {
+  if (!packaged) return packageRoot;
+  try {
+    const stable = fs.readFileSync(packageMarker, 'utf8').trim();
+    if (path.isAbsolute(stable) && path.basename(stable) === 'libexec' &&
+        path.basename(path.dirname(stable)) === path.basename(cellarRack) &&
+        path.basename(path.dirname(path.dirname(stable))) === 'opt' &&
+        fs.realpathSync(stable) === packageRoot) return stable;
+  } catch (error) {
+    if (!['ENOENT', 'EACCES', 'ENOTDIR'].includes(error.code)) throw error;
+  }
+  fail('Packaged OpenCode runtime is not linked through the Homebrew opt path; relink or reinstall opencode-team');
+}
+function legacyKegAsset(value, asset) {
+  if (!packaged || typeof value !== 'string' || !path.isAbsolute(value)) return false;
+  const relative = path.relative(cellarRack, value);
+  const version = relative.split(path.sep)[0];
+  return /^\d+\.\d+\.\d+(?:[._+-][\w.+-]+)?$/.test(version) &&
+    relative === path.join(version, 'libexec', asset);
+}
+function rebaseKegReferences(text, stable) {
+  // Only inspect values in the root skills/plugins arrays, keeping all other JSONC bytes.
+  const tokens = [...text.matchAll(/"(?:\\[\s\S]|[^"\\])*"|\/\/[^\r\n]*|\/\*[\s\S]*?\*\/|[{}\[\]:,]/g)]
+    .filter(([token]) => !token.startsWith('/'));
+  const stack = [];
+  let offset = 0, result = '';
+  for (const [i, match] of tokens.entries()) {
+    const [token] = match;
+    const previous = tokens[i - 1]?.[0];
+    const key = previous === ':' ? tokens[i - 2]?.[0] : undefined;
+    if (token === '{' || token === '[') {
+      stack.push(stack.length === 1 && stack[0] === '{' && token === '[' ? key : token);
+    } else if (token === '}' || token === ']') {
+      stack.pop();
+    } else if (token.startsWith('"')) {
+      const asset = stack.length === 2 && stack[1] === '"skills"' ? skillsAsset :
+        stack[1] === '"plugins"' && (stack.length === 2 ||
+          (stack.length === 3 && stack[2] === '{' && key === '"package"')) ? quotaAsset : null;
+      if (!asset) continue;
+      let value;
+      try { value = JSON.parse(token); } catch { return text; }
+      if (!legacyKegAsset(value, asset)) continue;
+      result += text.slice(offset, match.index) + JSON.stringify(path.join(stable, asset));
+      offset = match.index + token.length;
+    }
+  }
+  return result + text.slice(offset);
+}
+function repairKegReferences(profile) {
+  if (!packaged) return;
+  const stable = persistedAssetRoot();
+  const file = configFile(profile);
+  const current = fs.readFileSync(file, 'utf8');
+  if (rebaseKegReferences(current, stable) === current) return;
+  locked(() => {
+    safe(file);
+    transaction([{ file, bytes: rebaseKegReferences(fs.readFileSync(file, 'utf8'), stable) }], console.error);
+  });
+}
 function packagedBinary() {
+  persistedAssetRoot();
   const version = '2.3.2';
   const upstream = 'c0ad18b402eb2827fc1ee71c171b1177b3fc02d1';
   const patch = '1bcf5fe7140303e430b667c4782e18d836b7f45ad07a56a9e69a5c972fadb213';
@@ -500,7 +564,7 @@ function configuration(profile) {
         ? [rule('read', 'deny', '*.env'), rule('read', 'deny', '*.env.*')]
         : secretFiles.map((resource) => rule('read', 'ask', resource))),
       rule('read', 'allow', '*.env.example')],
-    skills: [path.join(eccSource, 'skills'), ...(profile === 'best' ? [path.join(packageRoot, 'shared/skills')] : [])], instructions,
+    skills: [path.join(eccSource, 'skills'), ...(profile === 'best' ? [path.join(persistedAssetRoot(), skillsAsset)] : [])], instructions,
     mcp: { servers: { serena: { type: 'local', command: [serenaBin, 'start-mcp-server', '--context', 'ide', '--project-from-cwd', '--enable-web-dashboard', 'false', '--open-web-dashboard', 'false'],
       codemode: false, disabled: false, environment: { SERENA_HOME: path.join(roots.state, profile, 'serena') },
       timeout: { startup: 45000, catalog: 30000, execution: 600000 } } } } };
@@ -512,7 +576,7 @@ function configuration(profile) {
   // Depth 1 keeps subagents from spawning subagents in both profiles.
   config.experimental = { subagent_depth: 1, ...(profile === 'best' ? { todo: true } : {}) };
   if (profile === 'best') {
-    config.plugins = [{ package: path.join(packageRoot, 'shared/best-quota-plugin'),
+    config.plugins = [{ package: path.join(persistedAssetRoot(), quotaAsset),
       options: { stateFile: path.join(roots.state, 'best/quota/state.json') } }];
   }
   // V2 drops the root variant; low must also be the model's native default.
@@ -566,7 +630,7 @@ function recover() {
   fs.unlinkSync(pending);
   console.error(`Recovered interrupted configuration transaction ${id}; credentials and databases untouched.`);
 }
-function transaction(updates) {
+function transaction(updates, log = console.log) {
   const changed = updates.filter(({ file, bytes }) => {
     safe(file);
     return bytes === null ? fs.existsSync(file) : !fs.existsSync(file) || !fs.readFileSync(file).equals(Buffer.from(bytes));
@@ -590,7 +654,7 @@ function transaction(updates) {
     fs.unlinkSync(path.join(roots.config, '.pending'));
   } catch (error) { recover(); throw error; }
   if (!entries.some((entry) => entry.existed)) fs.rmSync(directory, { recursive: true });
-  else console.log(`Configuration backup: ${id}`);
+  else log(`Configuration backup: ${id}`);
 }
 function locked(action) {
   mkdir(roots.config);
@@ -740,6 +804,7 @@ function launch(profile, args) {
   if (!fs.existsSync(configFile(profile)) || !fs.existsSync(instructionFile(profile))) fail('Profile not configured; run opencode-team setup');
   const { binary } = nativeBinary();
   checkIdle();
+  repairKegReferences(profile);
   const nativeArgs = [...args];
   const separator = nativeArgs.indexOf('--');
   nativeArgs.splice(separator < 0 ? nativeArgs.length : separator, 0, '--standalone');
@@ -783,11 +848,11 @@ try {
       locked(() => {
         safe(configFile('best'));
         const config = JSON.parse(fs.readFileSync(configFile('best'), 'utf8'));
-        const plugin = path.join(packageRoot, 'shared/best-quota-plugin');
+        const plugin = path.join(persistedAssetRoot(), quotaAsset);
         config.plugins ??= [];
         const previous = config.plugins.findIndex(p => {
           const source = typeof p === 'string' ? p : p.package;
-          if (source === plugin) return true;
+          if (source === plugin || legacyKegAsset(source, quotaAsset)) return true;
           if (!path.isAbsolute(source) || path.basename(source) !== 'best-quota-plugin') return false;
           const manifest = path.join(source, 'package.json');
           safe(manifest);

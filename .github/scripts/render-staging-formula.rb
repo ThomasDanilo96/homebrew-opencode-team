@@ -67,7 +67,7 @@ def render_formula(source, class_name, version, url, sha256, runtime: nil)
       resource("team-runtime").stage do
         (libexec/"runtime").install "opencode", "manifest.json", "LICENSE"
       end
-      (libexec/".requires-session-guard").write "2.3.2\n"
+      (libexec/".requires-session-guard").write "#{opt_prefix}/libexec\n"
     RUBY
     test_runtime = <<~'RUBY'
       assert_predicate libexec/"runtime/opencode", :executable?
