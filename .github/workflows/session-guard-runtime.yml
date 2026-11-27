@@ -13,12 +13,10 @@ jobs:
       matrix:
         include:
           - { runner: macos-26, target: darwin-arm64 }
-          - { runner: macos-15-intel, target: darwin-x64 }
           - { runner: ubuntu-24.04-arm, target: linux-arm64 }
           - { runner: ubuntu-24.04, target: linux-x64-baseline }
     runs-on: ${{ matrix.runner }}
-    # Homebrew no longer ships current Intel macOS bottles for every dependency.
-    timeout-minutes: ${{ matrix.target == 'darwin-x64' && 330 || 45 }}
+    timeout-minutes: 45
     env:
       HOMEBREW_NO_AUTO_UPDATE: "1"
       HOMEBREW_NO_INSTALL_CLEANUP: "1"

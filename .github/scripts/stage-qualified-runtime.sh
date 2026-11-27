@@ -20,7 +20,7 @@ gh run view "$run" --repo "$GITHUB_REPOSITORY" --json workflowName,headSha,headB
     .headSha == $sha and .headBranch == "master" and .event == "workflow_dispatch" and .conclusion == "success"' >/dev/null
 mkdir "$output"
 gh run download "$run" --repo "$GITHUB_REPOSITORY" --pattern 'opencode-team-runtime-*' --dir "$output"
-for target in darwin-arm64 darwin-x64 linux-arm64 linux-x64-baseline; do
+for target in darwin-arm64 linux-arm64 linux-x64-baseline; do
   directory="$output/opencode-team-runtime-$target"
   jq -e --arg target "$target" 'keys == [$target]' "$directory/runtime-lock.json" >/dev/null
   mv "$directory/opencode-team-runtime-2.3.2-$target.tar.gz" "$output/"

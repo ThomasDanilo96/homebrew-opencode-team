@@ -263,8 +263,12 @@ test('runtime formula validates local resources and requires a complete platform
   fs.appendFileSync(asset, 'changed');
   assert.match(render(temp).stderr, /runtime asset mismatch/);
   writeLock(['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64-baseline']);
+  assert.match(render().stderr, /invalid runtime target set/);
+  writeLock(['darwin-arm64', 'linux-arm64', 'linux-x64-baseline']);
   assert.equal(render().status, 0);
-  assert.equal((fs.readFileSync(output, 'utf8').match(/resource "team-runtime"/g) ?? []).length, 4);
+  const rendered = fs.readFileSync(output, 'utf8');
+  assert.match(rendered, /on_macos do\n    depends_on arch: :arm64\n  end/);
+  assert.equal((rendered.match(/resource "team-runtime"/g) ?? []).length, 3);
 });
 
 test('release handoff binds archive, commit, source and complete operational instructions', t => {

@@ -11,7 +11,6 @@ require "zlib"
 
 RUNTIME_TARGETS = {
   "darwin-arm64" => %w[macos arm],
-  "darwin-x64" => %w[macos intel],
   "linux-arm64" => %w[linux arm],
   "linux-x64-baseline" => %w[linux intel],
 }.freeze
@@ -62,6 +61,11 @@ def render_formula(source, class_name, version, url, sha256, runtime: nil)
   abort "source formula license not found" unless source.match?(/^  license /)
   abort "v0.3.13 requires verified Session Guard runtime resources" if version == "0.3.13" && !runtime
   if runtime
+    host_requirement = <<~'RUBY'
+      on_macos do
+        depends_on arch: :arm64
+      end
+    RUBY
     install = <<~'RUBY'
       odie "No checksum-locked Session Guard runtime for this OS/architecture" unless resources.any? { |r| r.name == "team-runtime" }
       resource("team-runtime").stage do
@@ -82,7 +86,7 @@ def render_formula(source, class_name, version, url, sha256, runtime: nil)
         assert_equal "opencode v2.3.2", shell_output("#{bin}/opencode-team #{profile} --version").strip
       end
     RUBY
-    source.sub!("  def install\n") { "#{runtime}\n\n  def install\n#{install.lines.map { |line| "    #{line}" }.join}" } ||
+    source.sub!("  def install\n") { "#{host_requirement.lines.map { |line| "  #{line}" }.join}\n#{runtime}\n\n  def install\n#{install.lines.map { |line| "    #{line}" }.join}" } ||
       abort("template install method not found")
     source.sub!("  test do\n") { "  test do\n#{test_runtime.lines.map { |line| "    #{line}" }.join}" } ||
       abort("template test block not found")

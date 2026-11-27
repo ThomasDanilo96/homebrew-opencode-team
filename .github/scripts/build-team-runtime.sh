@@ -5,7 +5,7 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 target="${1:?usage: build-team-runtime.sh TARGET NEW_OUTPUT_DIRECTORY}"
 output="${2:?usage: build-team-runtime.sh TARGET NEW_OUTPUT_DIRECTORY}"
 case "$target" in
-  darwin-arm64|darwin-x64|linux-arm64|linux-x64-baseline) ;;
+  darwin-arm64|linux-arm64|linux-x64-baseline) ;;
   *) echo "Unsupported Homebrew runtime target: $target" >&2; exit 2 ;;
 esac
 [[ "$(bun --version)" == 1.4.4 ]]
