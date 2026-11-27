@@ -528,6 +528,44 @@ test('MiniMax continuity compaction is preserved, never an implementation fallba
   await assert.rejects(f.hooks['model.request']({ ...event, kind: 'primary' }), /BEST_QUOTA_BLOCKED/);
 });
 
+test('BEST compaction reserves Go first, falls back only to OpenAI, and releases the exact request', async t => {
+  const f = await fixture(t, 'active', { certified: true }, undefined, undefined, '2.3.2');
+  t.after(f.cleanup);
+  const go = { providerID: 'opencode-go', id: 'minimax-m3' };
+  const openai = { providerID: 'openai', id: 'gpt-6.2-sol', variant: 'low' };
+  f.ctx.model.list = async () => ({ data: [go, { ...openai, variants: [{ id: 'low' }] }] });
+  const setQuota = (goUsed, openaiUsed) => updateQuotaState(f.file, state => {
+    for (const snapshot of state.snapshots) {
+      for (const window of Object.values(snapshot.windows)) {
+        window.used = snapshot.provider === 'opencode-go' ? goUsed : openaiUsed;
+      }
+    }
+    return state;
+  });
+  const resolve = async () => {
+    const event = { sessionID: 'compacting', agent: 'build', model: { ...go } };
+    await f.hooks['experimental.compaction.model.resolve'](event);
+    return event;
+  };
+  for (const [goUsed, openaiUsed, expected] of [[20, 20, go], [100, 20, openai], [20, 100, go]]) {
+    await setQuota(goUsed, openaiUsed);
+    const selected = await resolve();
+    assert.deepEqual(selected.model, expected);
+    assert.equal(readQuotaState(f.file).leases.length, 1);
+    const [{ id }] = readQuotaState(f.file).leases;
+    const request = { ...selected, kind: 'compaction' };
+    await f.hooks['model.request'](request);
+    assert.deepEqual(readQuotaState(f.file).leases.map(lease => lease.id), [id]);
+    await selected.release();
+    assert.deepEqual(readQuotaState(f.file).leases, []);
+  }
+  await setQuota(100, 100);
+  const denied = await resolve();
+  assert.match(denied.denied, /BEST_QUOTA_BLOCKED.*compaction/);
+  assert.equal(denied.release, undefined);
+  assert.deepEqual(readQuotaState(f.file).leases, []);
+});
+
 test('uncertified Go billing is denied even with abundant quota and a pinned live connection', async t => {
   const f = await fixture(t, 'active', { certified: false });
   await updateQuotaState(f.file, state => {
