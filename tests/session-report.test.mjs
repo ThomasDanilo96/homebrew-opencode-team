@@ -374,7 +374,7 @@ test('the concluded coordinator result survives approval, preserving Markdown, r
   const body = '# Piano di recovery\n\n| Volume | Liberi |\n|---|---|\n| SSD | 422 GiB |\n\n' +
     '## Procedura\n\n1. Verifica `/srv/backup/giaffatto`.\n2. Calcola `300 / 7`.\n\n```sh\n' +
     'rsync -a /srv/backup/ /Volumes/offsite/\nPrivateKey = WGPRIVATEKEY_DO_NOT_COPY\n' +
-    'curl -H "Authorization: Bearer SHORT_BEARER_DO_NOT_COPY" https://example.invalid/\n' +
+    'curl -H "Authorization: Bearer SHORT_BEARER_DO_NOT_COPY" https://example.invalid/\n' + // gitleaks:allow — synthetic redaction fixture.
     '```\n\n```json\n{"password":"JSON_SECRET_DO_NOT_COPY","retain":39}\n```\n' +
     '\n<shell command="INTERNAL_COMMAND_DO_NOT_COPY">RAW_OUTPUT_DO_NOT_COPY</shell>\n';
   md.updates.conclusion = json.updates.conclusion = body;
